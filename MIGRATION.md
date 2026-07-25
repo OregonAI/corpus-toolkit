@@ -70,3 +70,9 @@ informational note even when resolution SUCCEEDS, not just when it fails)
 - [x] `resolver` may return `(candidates, note)` instead of a bare list —
       `note` is surfaced whether resolution succeeds or not, overriding the
       generic unresolved message
+
+## v1.0.3 (also surfaced writing executive-regulatory-frameworks's corpus.yml
+— oregon has 17 per-group source-manifest files needing schema validation,
+not one)
+- [x] `extra_schema_checks`' `path` may be a glob (e.g. `_meta/sources/*.yml`)
+      to validate many files against the same schema, not just one exact path

@@ -128,18 +128,35 @@ def _load_registry(config):
 
 
 def _check_extra_schemas(config, r):
+    """Validate corpus-declared {path, schema} pairs against a JSON schema.
+    `path` may be a glob (e.g. `_meta/sources/*.yml`) to validate many files
+    against the same schema — a corpus with per-group source manifests, for
+    example, doesn't have just one file to check."""
     for check in config.extra_schema_checks:
-        data_path = (config.root / check["path"]).resolve()
         schema_path = (config.root / check["schema"]).resolve()
-        rel = data_path.relative_to(config.root)
         try:
             schema = json.loads(schema_path.read_text())
-            text = data_path.read_text()
-            data = json.loads(text) if data_path.suffix == ".json" else yaml.safe_load(text)
-            for err in sorted(jsonschema.Draft202012Validator(schema).iter_errors(data), key=str):
-                r.error(rel, f"schema: {err.message[:200]}")
         except FileNotFoundError as e:
-            r.error(rel, f"missing: {e}")
+            r.error(check["schema"], f"missing schema: {e}")
+            continue
+        validator = jsonschema.Draft202012Validator(schema)
+
+        if any(ch in check["path"] for ch in "*?["):
+            data_paths = sorted(config.root.glob(check["path"]))
+            if not data_paths:
+                r.warn(check["path"], "glob matched no files")
+        else:
+            data_paths = [(config.root / check["path"]).resolve()]
+
+        for data_path in data_paths:
+            rel = data_path.relative_to(config.root)
+            try:
+                text = data_path.read_text()
+                data = json.loads(text) if data_path.suffix == ".json" else yaml.safe_load(text)
+                for err in sorted(validator.iter_errors(data), key=str):
+                    r.error(rel, f"schema: {err.message[:200]}")
+            except FileNotFoundError as e:
+                r.error(rel, f"missing: {e}")
 
 
 def _run_relationships_only(config, paths, r):

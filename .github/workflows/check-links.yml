@@ -6,7 +6,7 @@ on:
     inputs:
       toolkit-ref:
         type: string
-        default: v1.0.2
+        default: v1.0.3
       exclude-paths:
         description: newline-separated paths to exclude from the lychee link scan (e.g. large snapshot/template dirs)
         type: string
