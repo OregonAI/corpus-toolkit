@@ -76,3 +76,20 @@ informational note even when resolution SUCCEEDS, not just when it fails)
 not one)
 - [x] `extra_schema_checks`' `path` may be a glob (e.g. `_meta/sources/*.yml`)
       to validate many files against the same schema, not just one exact path
+
+## v1.0.4 (a real correctness bug, found testing `issuing_body_profile`
+against the actual repo, not the fixture — DAS returned "no documents
+ingested" despite having 300+)
+- [x] Oregon's frontmatter has BOTH `agency` (the registry/path-scoping slug,
+      e.g. `department-of-administrative-services`) and `issuing_body` (a
+      free-text descriptor, e.g. "DAS Enterprise Information Strategy and
+      Policy Division" — a *sub-unit*, not the same string). The toolkit's
+      FTS index only stored the frontmatter `issuing_body` value, so
+      `issuing_body_profile`'s stats join (which needs the registry slug)
+      silently matched zero rows for every real agency.
+- [x] Added `config.scope_slug_for(rel_parts)` (path-derived, independent of
+      any frontmatter field) and a new `issuing_body_slug` FTS column sourced
+      from it; `issuing_body_profile` now joins on that instead of the
+      free-text `issuing_body` field. `search_corpus`'s existing
+      `issuing_body` filter is untouched (still frontmatter-sourced — still
+      correct for corpora without this two-fields distinction).

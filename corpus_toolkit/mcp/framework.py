@@ -125,8 +125,9 @@ class CorpusFramework:
         con.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
         con.execute("""CREATE TABLE docs (
             id TEXT PRIMARY KEY, path TEXT, doc_type TEXT, issuing_body TEXT,
-            citation TEXT, title TEXT, status TEXT, source_url TEXT, retrieved TEXT,
-            effective_date TEXT, content_mode TEXT, content_exception TEXT, size INTEGER)""")
+            issuing_body_slug TEXT, citation TEXT, title TEXT, status TEXT,
+            source_url TEXT, retrieved TEXT, effective_date TEXT, content_mode TEXT,
+            content_exception TEXT, size INTEGER)""")
         con.execute("""CREATE VIRTUAL TABLE fts USING fts5(
             id, citation, title, tags, glance, body, tokenize='porter unicode61')""")
         con.execute("BEGIN")
@@ -134,9 +135,11 @@ class CorpusFramework:
             fm, body = parse_frontmatter(p)
             glance = self._extract_section(body, "At a glance") or ""
             ft = extract_fulltext(body) or self._extract_section(body, "Key provisions") or ""
-            con.execute("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
-                fm["id"], str(p.relative_to(self.config.root)), fm["doc_type"],
-                fm.get("issuing_body", ""), fm.get("citation", ""), fm["title"],
+            rel = p.relative_to(self.config.root)
+            con.execute("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                fm["id"], str(rel), fm["doc_type"],
+                fm.get("issuing_body", ""), self.config.scope_slug_for(rel.parts) or "",
+                fm.get("citation", ""), fm["title"],
                 fm.get("status", ""), fm.get("source_url", ""), str(fm.get("retrieved", "")),
                 str(fm.get("effective_date") or ""), fm.get("content_mode", ""),
                 fm.get("content_exception") or "", p.stat().st_size))
@@ -420,7 +423,7 @@ class CorpusFramework:
 
         con = self.ensure_index()
         docs = con.execute(
-            "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body = ? "
+            "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body_slug = ? "
             "GROUP BY content_mode", (slug,)).fetchall()
         return {
             "slug": slug,

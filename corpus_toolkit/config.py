@@ -68,6 +68,21 @@ class CorpusConfig:
                 return dt
         return None
 
+    def scope_slug_for(self, rel_parts: tuple[str, ...]) -> str | None:
+        """The issuing-body slug this path is scoped under (e.g. 'agencies/<slug>/...'),
+        or None for a jurisdiction-wide root or a path outside any content root. This
+        is PATH-derived, deliberately independent of whatever a document's own
+        `issuing_body` frontmatter field says (that's a free-text descriptor — e.g.
+        Oregon's `issuing_body: "DAS Enterprise Information Strategy and Policy
+        Division"` is a sub-unit name, not the registry slug `agency:
+        department-of-administrative-services` the directory is scoped under).
+        Used to join documents to the issuing-body registry correctly, whatever a
+        corpus's frontmatter field naming happens to be."""
+        for cr in self.content_roots:
+            if cr.scoped and rel_parts and rel_parts[0] == cr.path and len(rel_parts) > 1:
+                return rel_parts[1]
+        return None
+
     def expected_root_for(self, doc_type: str) -> ContentRoot | None:
         """The one content root a given doc_type is allowed to live under (used to report
         'this belongs under X/, not Y/' when a document is misplaced)."""
