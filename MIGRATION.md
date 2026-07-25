@@ -94,11 +94,23 @@ ingested" despite having 300+)
       `issuing_body` filter is untouched (still frontmatter-sourced — still
       correct for corpora without this two-fields distinction).
 
-## v1.0.5 (writing executive-regulatory-frameworks's check-links.yml —
-oregon's own link-checker deliberately accepted 403 and the full 200-299
-range, and included llms.txt; the toolkit's hardcoded a narrower set and
-skipped llms.txt)
+## v1.0.5 (bundles two things found running the real 69k-file corpus through
+`corpus-validate-frontmatter` for the first time, plus writing
+executive-regulatory-frameworks's check-links.yml call)
+- [x] **Real schema bugs**, found because the fixture never exercised the
+      full field/conditional surface real content hits: `effective_date`/
+      `last_reviewed`/`source_version` must allow `null` (oregon's real data
+      has thousands of nulls — the Phase-1 generalization dropped the
+      original schema's nullable typing); the `content_mode` verbatim-
+      required conditional needs the `content_exception`/`migration_pending`
+      exemption the original schema had (missing it flagged 39 legitimately-
+      excused documents); `source_format`'s enum was missing `xls`/`xlsx`/
+      `docx`. All three were "0 errors on the fixture, ~172k errors on the
+      real corpus" until fixed — a strong argument for testing against real
+      data, not just a synthetic fixture, before calling a schema change done.
 - [x] `check-links.yml` gains an `accept-codes` input (lychee's own
-      comma-separated codes/ranges syntax), default unchanged
+      comma-separated codes/ranges syntax; oregon's own workflow deliberately
+      accepted 403 and the full 200-299 range, the toolkit's default was
+      narrower), default unchanged
 - [x] `check-links.yml` always also scans `llms.txt` (part of the standard
       repo anatomy per every archetype, not just `**/*.md`)
