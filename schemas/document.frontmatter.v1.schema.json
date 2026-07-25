@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/{{ORG}}/corpus-toolkit/schemas/document.frontmatter.v1.schema.json",
+  "title": "Civic Corpus Document Frontmatter v1",
+  "description": "Generic provenance frontmatter per docs/provenance-schema-v1.md — the v1 field set and archetype conditionals, generalized from oregon-policy-repo's schema (Phase 1 of PLAN.md).",
+  "type": "object",
+  "required": [
+    "schema_version", "corpus", "jurisdiction", "id", "title", "doc_type",
+    "citation", "issuing_body", "source_url", "source_format", "status",
+    "last_verified", "verified_by", "maintainer"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "corpus": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+    "jurisdiction": { "type": "string", "pattern": "^[a-z0-9-]+(/[a-z0-9-]+)*$" },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$" },
+    "title": { "type": "string", "minLength": 1 },
+    "doc_type": {
+      "type": "string",
+      "enum": ["statute", "rule", "executive_order", "policy", "procedure",
+               "standard", "manual", "schedule", "ordinance", "entity_doc",
+               "dataset_doc", "external_reference"]
+    },
+    "citation": { "type": "string", "minLength": 1 },
+    "authority_level": { "type": "string" },
+    "issuing_body": { "type": "string", "minLength": 1 },
+    "legal_authority": { "type": "array", "items": { "type": "string" } },
+    "source_url": { "type": "string", "format": "uri" },
+    "source_format": { "type": "string", "enum": ["pdf", "html", "xml", "json", "odata", "soda"] },
+    "retrieved": { "type": "string", "format": "date" },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "snapshot_policy": { "type": "string", "enum": ["hash-only"],
+      "description": "hash-only: raw source deliberately not committed (e.g. very large image-scan PDFs); source_sha256 is derived from a committed .txt extraction when present, else the raw uncommitted source. Absent = normal always-commit-snapshot policy." },
+    "snapshot_id": { "type": "string",
+      "description": "Snapshot basename in the snapshot dir when it differs from id — for documents split from, or sharing, one source file." },
+    "live_schema_hash": { "type": "string" },
+    "effective_date": { "type": "string", "format": "date" },
+    "last_reviewed": { "type": "string", "format": "date" },
+    "source_version": { "type": "string" },
+    "status": { "type": "string", "enum": ["current", "superseded", "repealed", "proposed", "draft"] },
+    "content_mode": { "type": "string", "enum": ["verbatim", "summary", "mixed"] },
+    "content_exception": { "type": "string" },
+    "migration_pending": { "type": "boolean" },
+    "conversion_notes": { "type": "string" },
+    "last_verified": { "type": "string", "format": "date" },
+    "verified_by": { "type": "string" },
+    "maintainer": { "type": "string" },
+    "relationships": {
+      "type": "object",
+      "properties": {
+        "implements": { "type": "array", "items": { "type": "string" } },
+        "implemented_by": { "type": "array", "items": { "type": "string" } },
+        "references_external": { "type": "array", "items": { "type": "string" } },
+        "related": { "type": "array", "items": { "type": "string" } },
+        "supersedes": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "joins": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["document_id", "dataset", "key"],
+        "properties": {
+          "document_id": { "type": "string" },
+          "dataset": { "type": "string" },
+          "key": { "type": "string" }
+        }
+      }
+    },
+    "tags": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "doc_type": { "enum": ["statute", "rule", "executive_order", "policy", "procedure", "standard", "manual", "schedule", "ordinance"] } }
+      },
+      "then": {
+        "required": ["retrieved", "source_sha256", "content_mode", "authority_level"],
+        "properties": {
+          "content_mode": {
+            "anyOf": [
+              { "const": "verbatim" },
+              { "const": "mixed" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "doc_type": { "const": "external_reference" } } },
+      "then": { "properties": { "content_mode": { "const": "summary" } }, "required": ["content_mode"] }
+    }
+  ]
+}

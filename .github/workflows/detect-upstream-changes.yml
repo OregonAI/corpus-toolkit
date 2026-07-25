@@ -1,0 +1,41 @@
+# Reusable workflow: scheduled upstream change detection.
+# Re-fetches manifest sources, diffs hashes (documents) or schemas (APIs),
+# opens an issue per drifted source. Also regenerates STATUS.md.
+name: detect-upstream-changes
+on:
+  workflow_call:
+    inputs:
+      toolkit-ref:
+        type: string
+        default: v1.0.0
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: {{ORG}}/corpus-toolkit
+          ref: ${{ inputs.toolkit-ref }}
+          path: .toolkit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update -q && sudo apt-get install -y poppler-utils
+      - run: pip install ./.toolkit
+      - name: Detect drift and open issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: corpus-detect-changes --config _meta/corpus.yml --open-issues
+      - name: Regenerate STATUS.md
+        run: corpus-generate-status --config _meta/corpus.yml --output STATUS.md
+      - name: Commit STATUS.md if changed
+        run: |
+          git config user.name "corpus-bot"
+          git config user.email "actions@github.com"
+          git add STATUS.md
+          git diff --cached --quiet || (git commit -m "chore: regenerate STATUS.md" && git push)
