@@ -6,11 +6,15 @@ on:
     inputs:
       toolkit-ref:
         type: string
-        default: v1.0.4
+        default: v1.0.5
       exclude-paths:
         description: newline-separated paths to exclude from the lychee link scan (e.g. large snapshot/template dirs)
         type: string
         default: ""
+      accept-codes:
+        description: HTTP status codes/ranges lychee treats as OK (comma-separated, lychee's own syntax e.g. "200..=299,403,429")
+        type: string
+        default: "200,203,206,429"
 
 jobs:
   links:
@@ -28,7 +32,7 @@ jobs:
       - name: External links
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --no-progress --accept 200,203,206,429 ${{ steps.excludes.outputs.flags }} './**/*.md'
+          args: --no-progress --accept ${{ inputs.accept-codes }} ${{ steps.excludes.outputs.flags }} './**/*.md' 'llms.txt'
       - uses: actions/checkout@v4
         with:
           repository: OregonAI/corpus-toolkit
