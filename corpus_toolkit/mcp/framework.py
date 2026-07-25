@@ -19,6 +19,7 @@ docs/mcp-interface-contract.md:
 Every document payload carries the non-authoritative notice + source_url +
 retrieved from frontmatter — this server must never present content as the
 official text."""
+import inspect
 import json
 import re
 import sqlite3
@@ -49,9 +50,16 @@ def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
       positional groups) to produce ONE candidate id.
       Example: register_scheme("retention-schedule", r"Schedule\\s+(?P<num>[\\d-]+)",
                                "schedule-{num}")
-    - `resolver`: a callable `resolver(match) -> list[str] | None`, for cases
-      a flat template can't express — a renumbering-map lookup, or a division
-      citation that expands to several rule ids.
+    - `resolver`: a callable for cases a flat template can't express — a
+      renumbering-map lookup, or a division citation that expands to several
+      rule ids. Two signatures are accepted: `resolver(match)` or
+      `resolver(match, nodes)` — `nodes` is the corpus's full {id: node} graph
+      map, for resolvers that need corpus-wide context (e.g. "every rule
+      whose id starts with this division"). Return either `candidates` (a
+      list of ids) or `(candidates, note)` — `note` is surfaced on the
+      response whether resolution succeeds (e.g. "was renumbered to X") or
+      not (e.g. a repealed-citation explanation), overriding the generic
+      unresolved message.
       Example: register_scheme("oar-rule", r"OAR\\s+(?P<num>\\d+-\\d+-\\d+)",
                                resolver=lambda m: [renumber(m["num"])])
 
@@ -288,13 +296,22 @@ class CorpusFramework:
         c = citation.strip()
         matched_scheme = None
         cands: list[str] = []
+        resolver_note = None
         for name, pattern, id_template, resolver in _SCHEMES:
             m = pattern.search(c)
             if not m:
                 continue
             matched_scheme = name
             if resolver is not None:
-                cands = list(resolver(m) or [])
+                try:
+                    nparams = len(inspect.signature(resolver).parameters)
+                except (TypeError, ValueError):
+                    nparams = 1
+                result = resolver(m, nodes) if nparams >= 2 else resolver(m)
+                if isinstance(result, tuple):
+                    cands, resolver_note = list(result[0] or []), result[1]
+                else:
+                    cands = list(result or [])
             else:
                 try:
                     cid = id_template.format(**m.groupdict()) if m.groupdict() \
@@ -307,11 +324,14 @@ class CorpusFramework:
                 for i in cands if i in nodes]
         out = {"citation": citation, "matches": hits,
                "corpus": self.config.id, "archetype": self.config.archetype}
+        if hits and resolver_note:
+            out["note"] = resolver_note
         if not hits:
             out["unresolved"] = True
-            out["note"] = (f"scheme '{matched_scheme}' matched but no such document exists"
-                          if matched_scheme else
-                          "no citation scheme recognized this format — try search_corpus")
+            out["note"] = resolver_note or (
+                f"scheme '{matched_scheme}' matched but no such document exists"
+                if matched_scheme else
+                "no citation scheme recognized this format — try search_corpus")
             out["schemes_attempted"] = [s[0] for s in _SCHEMES]
             out["search_fallback"] = [{"id": s["id"], "title": s["title"]}
                                       for s in self.search_corpus(c, limit=3)]
