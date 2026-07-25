@@ -1,6 +1,6 @@
 # AGENTS.md — corpus-toolkit
 
-This repo is the shared platform for the {{ORG}} civic corpus system. It
+This repo is the shared platform for the OregonAI civic corpus system. It
 contains tooling and specs only — never civic content.
 
 ## Rules

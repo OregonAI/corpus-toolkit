@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: {{ORG}}/corpus-toolkit
+          repository: OregonAI/corpus-toolkit
           ref: ${{ inputs.toolkit-ref }}
           path: .toolkit
       - uses: actions/setup-python@v5
