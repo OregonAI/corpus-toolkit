@@ -33,10 +33,13 @@ def build_server(config) -> FastMCP:
 
     @mcp.tool()
     def search_corpus(query: str, doc_type: str = "", issuing_body: str = "",
-                      limit: int = 10) -> list[dict]:
+                      limit: int = 10, mode: str = "hybrid") -> list[dict]:
         """Search the corpus. Returns ranked matches with snippets, never whole
-        documents. Optional filters: doc_type, issuing_body."""
-        return fw.search_corpus(query, doc_type or None, issuing_body or None, limit)
+        documents. Optional filters: doc_type, issuing_body. mode: 'hybrid'
+        (default, keyword+semantic when this corpus has semantic search
+        configured), 'keyword' (BM25 only), 'semantic' (vector only, falls
+        back to keyword if unavailable)."""
+        return fw.search_corpus(query, doc_type or None, issuing_body or None, limit, mode)
 
     @mcp.tool()
     def get_document(doc_id: str, part: str = "auto") -> dict:

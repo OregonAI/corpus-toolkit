@@ -12,9 +12,8 @@ import datetime
 import sys
 from collections import Counter
 
-import yaml
-
 from corpus_toolkit import config as config_mod
+from corpus_toolkit.config import load_source_manifest_groups
 from corpus_toolkit.repo import content_files, parse_frontmatter
 
 
@@ -40,10 +39,9 @@ def generate(config, today: datetime.date) -> str:
             overdue.append((fm.get("id", p.stem), fm.get("doc_type", "unknown"),
                             lv.isoformat() if lv else "never"))
 
-    manifest_count = None
-    if config.source_manifest_path.is_file():
-        manifest = yaml.safe_load(config.source_manifest_path.read_text()) or {}
-        manifest_count = len(manifest.get("sources", []))
+    manifest_groups = load_source_manifest_groups(config)
+    manifest_count = (sum(len(g.get("sources") or []) for g in manifest_groups)
+                      if manifest_groups else None)
 
     lines = [
         f"# STATUS — {config.name or config.id}",
@@ -60,8 +58,8 @@ def generate(config, today: datetime.date) -> str:
     lines += ["", f"**Total: {total}**", ""]
 
     if manifest_count is not None:
-        lines += [f"## Source manifest", "", f"{manifest_count} declared source(s) in "
-                  f"`{config.source_manifest_path.name}`.", ""]
+        lines += [f"## Source manifest", "", f"{manifest_count} declared source(s) across "
+                  f"{len(manifest_groups)} group(s) in `{config.source_manifest_path.name}`.", ""]
 
     lines += [
         f"## Freshness (reverify every {config.reverify_days} days)",

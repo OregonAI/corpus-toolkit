@@ -124,7 +124,7 @@ def _load_registry(config):
     if not config.issuing_body_registry:
         return None
     data = yaml.safe_load(config.issuing_body_registry.read_text()) or {}
-    return {e["slug"] for e in data.get("entries", [])}
+    return {e["slug"] for e in data.get(config.issuing_body_registry_key, [])}
 
 
 def _check_extra_schemas(config, r):

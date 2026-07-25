@@ -1,5 +1,9 @@
 # Reusable workflow: frontmatter schema validation.
 # Lives at .github/workflows/validate-frontmatter.yml in corpus-toolkit.
+#
+# Scoping is event-based so large corpora don't pay a full-corpus scan on
+# every PR: pull_request/push validate only the changed files; schedule/
+# workflow_dispatch run the full corpus. No caller-side bash needed.
 name: validate-frontmatter
 on:
   workflow_call:
@@ -7,13 +11,19 @@ on:
       toolkit-ref:
         description: corpus-toolkit tag to use
         type: string
-        default: v1.0.0
+        default: v1.0.1
+      jobs:
+        description: worker processes for corpus-validate-frontmatter (empty = CLI auto-detects cpu_count)
+        type: string
+        default: ""
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so --changed can compute the merge-base
       - uses: actions/checkout@v4
         with:
           repository: OregonAI/corpus-toolkit
@@ -24,4 +34,20 @@ jobs:
           python-version: "3.12"
       - run: pip install ./.toolkit
       - name: Validate frontmatter against schema
-        run: corpus-validate-frontmatter --config _meta/corpus.yml --schema .toolkit/schemas/document.frontmatter.v1.schema.json
+        run: |
+          JOBS_ARG=""
+          [ -n "${{ inputs.jobs }}" ] && JOBS_ARG="-j ${{ inputs.jobs }}"
+          case "${{ github.event_name }}" in
+            pull_request)
+              git fetch --no-tags origin "${{ github.base_ref }}"
+              corpus-validate-frontmatter --config _meta/corpus.yml \
+                --schema .toolkit/schemas/document.frontmatter.v1.schema.json \
+                --changed "origin/${{ github.base_ref }}" $JOBS_ARG ;;
+            push)
+              corpus-validate-frontmatter --config _meta/corpus.yml \
+                --schema .toolkit/schemas/document.frontmatter.v1.schema.json \
+                --changed "${{ github.event.before }}" $JOBS_ARG ;;
+            *)  # schedule / workflow_dispatch — full corpus
+              corpus-validate-frontmatter --config _meta/corpus.yml \
+                --schema .toolkit/schemas/document.frontmatter.v1.schema.json $JOBS_ARG ;;
+          esac

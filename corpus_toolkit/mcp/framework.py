@@ -37,17 +37,29 @@ BIG_DOC_BYTES = 50_000
 
 # ---------- citation-scheme registry (populated by a corpus's citation_module) ----------
 
-_SCHEMES: list[tuple[str, "re.Pattern", str]] = []
+_SCHEMES: list[tuple[str, "re.Pattern", str | None, object | None]] = []
 
 
-def register_scheme(name: str, pattern: str, id_template: str) -> None:
+def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
+                    resolver=None) -> None:
     """Register a citation format: `pattern` is matched against the trimmed
-    citation string; `id_template` is formatted with the match's named groups
-    (falls back to positional groups) to produce a candidate document id.
+    citation string. Two ways to turn a match into candidate document id(s):
 
-    Example: register_scheme("retention-schedule", r"Schedule\\s+(?P<num>[\\d-]+)",
-                             "schedule-{num}")"""
-    _SCHEMES.append((name, re.compile(pattern), id_template))
+    - `id_template`: formatted with the match's named groups (falls back to
+      positional groups) to produce ONE candidate id.
+      Example: register_scheme("retention-schedule", r"Schedule\\s+(?P<num>[\\d-]+)",
+                               "schedule-{num}")
+    - `resolver`: a callable `resolver(match) -> list[str] | None`, for cases
+      a flat template can't express — a renumbering-map lookup, or a division
+      citation that expands to several rule ids.
+      Example: register_scheme("oar-rule", r"OAR\\s+(?P<num>\\d+-\\d+-\\d+)",
+                               resolver=lambda m: [renumber(m["num"])])
+
+    Exactly one of `id_template`/`resolver` should be given; `resolver` takes
+    precedence if both are."""
+    if id_template is None and resolver is None:
+        raise ValueError("register_scheme requires id_template or resolver")
+    _SCHEMES.append((name, re.compile(pattern), id_template, resolver))
 
 
 def clear_schemes() -> None:
@@ -63,6 +75,8 @@ class CorpusFramework:
         self._graph_cache = None
         if config.citation_module:
             load_module(config.citation_module, config.root)
+        self._semantic = (load_module(config.semantic_search_module, config.root)
+                          if config.semantic_search_module else None)
 
     # ---------- FTS index ----------
 
@@ -170,16 +184,65 @@ class CorpusFramework:
         order = sorted(rows, key=lambda i: rows[i][7])
         return rows, order
 
+    def _semantic_available(self) -> bool:
+        if self._semantic is None:
+            return False
+        avail = getattr(self._semantic, "available", None)
+        return bool(avail()) if avail else True
+
+    def _doc_meta_row(self, con, doc_id):
+        return con.execute(
+            "SELECT id, title, citation, doc_type, issuing_body, path "
+            "FROM docs WHERE id = ?", (doc_id,)).fetchone()
+
+    @staticmethod
+    def _rrf(rankings: list[list[str]], k: int = 60) -> list[str]:
+        """Reciprocal-rank fusion of several ranked id lists."""
+        score: dict[str, float] = {}
+        for ranking in rankings:
+            for rank, did in enumerate(ranking):
+                score[did] = score.get(did, 0.0) + 1.0 / (k + rank + 1)
+        return sorted(score, key=lambda d: -score[d])
+
     def search_corpus(self, query: str, doc_type: str | None = None,
-                      issuing_body: str | None = None, limit: int = 10) -> list[dict]:
+                      issuing_body: str | None = None, limit: int = 10,
+                      mode: str = "hybrid") -> list[dict]:
+        """mode: 'hybrid' (default) fuses BM25 keyword + a registered
+        semantic_search_module via RRF; 'keyword' is FTS5/BM25 only;
+        'semantic' is vector-only. Hybrid/semantic silently degrade to
+        keyword when no semantic_search_module is configured/available."""
         con = self.ensure_index()
         n = max(1, min(int(limit), 40))
-        rows, order = self._fts_rows(con, query, doc_type, issuing_body, n)
+        use_sem = mode in ("hybrid", "semantic") and self._semantic_available()
+        pool = max(n * 4, 40) if use_sem else n
+        rows, kw_order = self._fts_rows(con, query, doc_type, issuing_body, pool)
+
+        if not use_sem:
+            final = kw_order[:n]
+        else:
+            sem_order = list(self._semantic.rank(query, pool) or [])
+            if doc_type or issuing_body:
+                keep = []
+                for d in sem_order:
+                    mr = self._doc_meta_row(con, d)
+                    if mr and (not doc_type or mr[3] == doc_type) and \
+                            (not issuing_body or mr[4] == issuing_body):
+                        keep.append(d)
+                sem_order = keep
+            final = sem_order[:n] if mode == "semantic" else self._rrf([kw_order, sem_order])[:n]
+
         out = []
-        for i in order[:n]:
-            r = rows[i]
-            out.append({"id": r[0], "title": r[2], "citation": r[3], "doc_type": r[4],
-                        "issuing_body": r[5], "path": r[6], "snippet": r[1][:400]})
+        for i in final:
+            r = rows.get(i)
+            if r:
+                out.append({"id": r[0], "title": r[2], "citation": r[3], "doc_type": r[4],
+                            "issuing_body": r[5], "path": r[6], "snippet": r[1][:400]})
+            else:
+                mr = self._doc_meta_row(con, i)
+                if mr:
+                    out.append({"id": mr[0], "title": mr[1], "citation": mr[2],
+                                "doc_type": mr[3], "issuing_body": mr[4], "path": mr[5],
+                                "snippet": "(semantic match — no keyword overlap)"})
         return out
 
     def _doc_row(self, doc_id: str):
@@ -225,17 +288,20 @@ class CorpusFramework:
         c = citation.strip()
         matched_scheme = None
         cands: list[str] = []
-        for name, pattern, id_template in _SCHEMES:
+        for name, pattern, id_template, resolver in _SCHEMES:
             m = pattern.search(c)
             if not m:
                 continue
-            try:
-                cid = id_template.format(**m.groupdict()) if m.groupdict() \
-                    else id_template.format(*m.groups())
-            except (IndexError, KeyError):
-                continue
-            cands = [cid]
             matched_scheme = name
+            if resolver is not None:
+                cands = list(resolver(m) or [])
+            else:
+                try:
+                    cid = id_template.format(**m.groupdict()) if m.groupdict() \
+                        else id_template.format(*m.groups())
+                    cands = [cid]
+                except (IndexError, KeyError):
+                    cands = []
             break
         hits = [{"id": i, "title": nodes[i]["title"], "doc_type": nodes[i]["doc_type"]}
                 for i in cands if i in nodes]
@@ -317,7 +383,7 @@ class CorpusFramework:
         if not self.config.issuing_body_registry:
             return {"error": "this corpus has no issuing-body registry configured"}
         registry = yaml.safe_load(self.config.issuing_body_registry.read_text()) or {}
-        entries = {e["slug"]: e for e in registry.get("entries", [])}
+        entries = {e["slug"]: e for e in registry.get(self.config.issuing_body_registry_key, [])}
         curated = {}
         if self.config.issuing_body_profiles and self.config.issuing_body_profiles.is_file():
             curated = (yaml.safe_load(self.config.issuing_body_profiles.read_text()) or {}).get(
