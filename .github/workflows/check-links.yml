@@ -1,0 +1,30 @@
+# Reusable workflow: markdown link + reference integrity.
+# Also checks that every `relationships` target resolves (local or corpus:id).
+name: check-links
+on:
+  workflow_call:
+    inputs:
+      toolkit-ref:
+        type: string
+        default: v1.0.0
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: External links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress --accept 200,203,206,429 './**/*.md'
+      - uses: actions/checkout@v4
+        with:
+          repository: {{ORG}}/corpus-toolkit
+          ref: ${{ inputs.toolkit-ref }}
+          path: .toolkit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ./.toolkit
+      - name: Relationship graph integrity
+        run: corpus-validate-frontmatter --config _meta/corpus.yml --check-relationships

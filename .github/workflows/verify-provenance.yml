@@ -1,0 +1,27 @@
+# Reusable workflow: provenance verification.
+# Document/hybrid: diff `## Full text` against pinned snapshots.
+# API/hybrid: verify entity docs against live API schema (drift check).
+name: verify-provenance
+on:
+  workflow_call:
+    inputs:
+      toolkit-ref:
+        type: string
+        default: v1.0.0
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: {{ORG}}/corpus-toolkit
+          ref: ${{ inputs.toolkit-ref }}
+          path: .toolkit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ./.toolkit
+      - name: Verify provenance (archetype-aware)
+        run: corpus-verify-provenance --config _meta/corpus.yml
