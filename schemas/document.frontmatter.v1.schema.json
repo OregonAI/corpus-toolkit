@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/{{ORG}}/corpus-toolkit/schemas/document.frontmatter.v1.schema.json",
+  "$id": "https://github.com/OregonAI/corpus-toolkit/schemas/document.frontmatter.v1.schema.json",
   "title": "Civic Corpus Document Frontmatter v1",
   "description": "Generic provenance frontmatter per docs/provenance-schema-v1.md — the v1 field set and archetype conditionals, generalized from oregon-policy-repo's schema (Phase 1 of PLAN.md).",
   "type": "object",

@@ -1,6 +1,6 @@
 # corpus-toolkit
 
-The shared, versioned core of the {{ORG}} civic corpus platform: schemas,
+The shared, versioned core of the OregonAI civic corpus platform: schemas,
 reusable CI workflows, validation tooling, and the MCP server framework.
 Corpus repos pin a tagged version of this repo — nothing corpus-specific
 lives here.

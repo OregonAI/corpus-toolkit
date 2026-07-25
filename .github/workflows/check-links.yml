@@ -19,7 +19,7 @@ jobs:
           args: --no-progress --accept 200,203,206,429 './**/*.md'
       - uses: actions/checkout@v4
         with:
-          repository: {{ORG}}/corpus-toolkit
+          repository: OregonAI/corpus-toolkit
           ref: ${{ inputs.toolkit-ref }}
           path: .toolkit
       - uses: actions/setup-python@v5
