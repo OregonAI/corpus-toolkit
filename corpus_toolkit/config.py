@@ -45,7 +45,9 @@ class CorpusConfig:
     snapshot_dir: Path
     snapshot_slice_module: str | None
     citation_module: str | None
+    semantic_search_module: str | None
     issuing_body_registry: Path | None
+    issuing_body_registry_key: str
     issuing_body_profiles: Path | None
     extra_schema_checks: list[dict]
     mcp_server_name: str
@@ -81,6 +83,36 @@ def _resolve(root: Path, value: str | None) -> Path | None:
     if not value:
         return None
     return (root / value).resolve()
+
+
+def load_source_manifest_groups(config: "CorpusConfig") -> list[dict]:
+    """Source-manifest groups: `source_manifest_path` may be a single flat
+    file (one implicit group) or a directory of per-group `*.yml` files
+    (each with its own `sources:` list, and optionally `group`/`last_checked`/
+    `recheck`/etc. — carried through as-is, not interpreted by the toolkit).
+    Large corpora with many distinct source groups (different recheck
+    cadences, different upstream owners) use directory mode; a small corpus
+    just ships one `_meta/source-manifest.yml`."""
+    path = config.source_manifest_path
+    if path is None:
+        return []
+    if path.is_dir():
+        groups = []
+        for p in sorted(path.glob("*.yml")):
+            g = yaml.safe_load(p.read_text()) or {}
+            g.setdefault("group", p.stem)
+            groups.append(g)
+        return groups
+    if path.is_file():
+        return [yaml.safe_load(path.read_text()) or {}]
+    return []
+
+
+def iter_manifest_sources(config: "CorpusConfig"):
+    """Yield every source dict ({id, url, sha256, ...}) across all manifest
+    groups, in group order."""
+    for g in load_source_manifest_groups(config):
+        yield from (g.get("sources", []) or [])
 
 
 def load(config_path: str | Path) -> CorpusConfig:
@@ -120,7 +152,9 @@ def load(config_path: str | Path) -> CorpusConfig:
         snapshot_dir=_resolve(root, raw.get("snapshot_dir", "_meta/snapshots")),
         snapshot_slice_module=plugins.get("snapshot_slice_module"),
         citation_module=plugins.get("citation_module"),
+        semantic_search_module=plugins.get("semantic_search_module"),
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
+        issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),
         extra_schema_checks=plugins.get("extra_schema_checks", []) or [],
         mcp_server_name=mcp.get("server_name", corpus.get("id", "corpus")),

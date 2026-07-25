@@ -1,19 +1,28 @@
 # Reusable workflow: provenance verification.
 # Document/hybrid: diff `## Full text` against pinned snapshots.
 # API/hybrid: verify entity docs against live API schema (drift check).
+#
+# Scoping is event-based, same as validate-frontmatter.yml: pull_request/push
+# verify only changed files; schedule/workflow_dispatch run the full corpus.
 name: verify-provenance
 on:
   workflow_call:
     inputs:
       toolkit-ref:
         type: string
-        default: v1.0.0
+        default: v1.0.1
+      jobs:
+        description: worker processes for corpus-verify-provenance (empty = CLI auto-detects cpu_count)
+        type: string
+        default: ""
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so --changed can compute the merge-base
       - uses: actions/checkout@v4
         with:
           repository: OregonAI/corpus-toolkit
@@ -24,4 +33,17 @@ jobs:
           python-version: "3.12"
       - run: pip install ./.toolkit
       - name: Verify provenance (archetype-aware)
-        run: corpus-verify-provenance --config _meta/corpus.yml
+        run: |
+          JOBS_ARG=""
+          [ -n "${{ inputs.jobs }}" ] && JOBS_ARG="-j ${{ inputs.jobs }}"
+          case "${{ github.event_name }}" in
+            pull_request)
+              git fetch --no-tags origin "${{ github.base_ref }}"
+              corpus-verify-provenance --config _meta/corpus.yml \
+                --changed "origin/${{ github.base_ref }}" $JOBS_ARG ;;
+            push)
+              corpus-verify-provenance --config _meta/corpus.yml \
+                --changed "${{ github.event.before }}" $JOBS_ARG ;;
+            *)  # schedule / workflow_dispatch — full corpus
+              corpus-verify-provenance --config _meta/corpus.yml $JOBS_ARG ;;
+          esac

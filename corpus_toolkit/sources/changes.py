@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""corpus-detect-changes — re-fetch every source in `_meta/source-manifest.yml`,
-diff content hashes, write changed-sources.tsv, optionally open a GitHub issue
-per drifted source. Ported from oregon-policy-repo/src/detect_changes.py; the
-Oregon-specific SharePoint-listing diff (`check_sp_listing`) is NOT ported —
-it re-queries a specific vendor's list-view API and doesn't generalize. A
-corpus that needs it keeps that check as its own local script (it can still
-import `corpus_toolkit.repo.content_hash` etc.) and runs it alongside this one.
+"""corpus-detect-changes — re-fetch every source declared in the corpus's
+source manifest, diff content hashes, write changed-sources.tsv, optionally
+open a GitHub issue per drifted source. Ported from
+oregon-policy-repo/src/detect_changes.py; the Oregon-specific SharePoint-
+listing diff (`check_sp_listing`) is NOT ported — it re-queries a specific
+vendor's list-view API and doesn't generalize. A corpus that needs it keeps
+that check as its own local script (it can still import
+`corpus_toolkit.repo.content_hash` etc.) and runs it alongside this one.
 
-Manifest shape (`_meta/source-manifest.yml`):
+Manifest shape (`_meta/corpus.yml`'s `source_manifest_path`, a file or a
+directory of group files — see `corpus_toolkit.config.load_source_manifest_groups`):
   sources:
     - id: some-doc-id
       url: https://...
@@ -23,9 +25,8 @@ import subprocess
 import sys
 import urllib.request
 
-import yaml
-
 from corpus_toolkit import config as config_mod
+from corpus_toolkit.config import iter_manifest_sources
 from corpus_toolkit.repo import content_hash
 
 USER_AGENT = "corpus-toolkit-change-detector"
@@ -73,10 +74,9 @@ def main():
     args = ap.parse_args()
 
     config = config_mod.load(args.config)
-    manifest = yaml.safe_load(config.source_manifest_path.read_text()) or {}
 
     changed, failed = [], []
-    for s in manifest.get("sources", []):
+    for s in iter_manifest_sources(config):
         sid, url, old = s["id"], s["url"], s.get("sha256", "")
         fmt = _format_for(url, s.get("format"))
         try:
