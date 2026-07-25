@@ -93,3 +93,12 @@ ingested" despite having 300+)
       free-text `issuing_body` field. `search_corpus`'s existing
       `issuing_body` filter is untouched (still frontmatter-sourced — still
       correct for corpora without this two-fields distinction).
+
+## v1.0.5 (writing executive-regulatory-frameworks's check-links.yml —
+oregon's own link-checker deliberately accepted 403 and the full 200-299
+range, and included llms.txt; the toolkit's hardcoded a narrower set and
+skipped llms.txt)
+- [x] `check-links.yml` gains an `accept-codes` input (lychee's own
+      comma-separated codes/ranges syntax), default unchanged
+- [x] `check-links.yml` always also scans `llms.txt` (part of the standard
+      repo anatomy per every archetype, not just `**/*.md`)

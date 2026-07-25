@@ -11,7 +11,7 @@ on:
       toolkit-ref:
         description: corpus-toolkit tag to use
         type: string
-        default: v1.0.4
+        default: v1.0.5
       jobs:
         description: worker processes for corpus-validate-frontmatter (empty = CLI auto-detects cpu_count)
         type: string

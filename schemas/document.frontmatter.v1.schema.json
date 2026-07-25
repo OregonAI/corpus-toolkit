@@ -26,7 +26,7 @@
     "issuing_body": { "type": "string", "minLength": 1 },
     "legal_authority": { "type": "array", "items": { "type": "string" } },
     "source_url": { "type": "string", "format": "uri" },
-    "source_format": { "type": "string", "enum": ["pdf", "html", "xml", "json", "odata", "soda"] },
+    "source_format": { "type": "string", "enum": ["pdf", "html", "xml", "xls", "xlsx", "docx", "json", "odata", "soda"] },
     "retrieved": { "type": "string", "format": "date" },
     "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "snapshot_policy": { "type": "string", "enum": ["hash-only"],
@@ -34,9 +34,9 @@
     "snapshot_id": { "type": "string",
       "description": "Snapshot basename in the snapshot dir when it differs from id — for documents split from, or sharing, one source file." },
     "live_schema_hash": { "type": "string" },
-    "effective_date": { "type": "string", "format": "date" },
-    "last_reviewed": { "type": "string", "format": "date" },
-    "source_version": { "type": "string" },
+    "effective_date": { "type": ["string", "null"], "format": "date" },
+    "last_reviewed": { "type": ["string", "null"], "format": "date" },
+    "source_version": { "type": ["string", "null"] },
     "status": { "type": "string", "enum": ["current", "superseded", "repealed", "proposed", "draft"] },
     "content_mode": { "type": "string", "enum": ["verbatim", "summary", "mixed"] },
     "content_exception": { "type": "string" },
@@ -73,7 +73,13 @@
   "allOf": [
     {
       "if": {
-        "properties": { "doc_type": { "enum": ["statute", "rule", "executive_order", "policy", "procedure", "standard", "manual", "schedule", "ordinance"] } }
+        "properties": { "doc_type": { "enum": ["statute", "rule", "executive_order", "policy", "procedure", "standard", "manual", "schedule", "ordinance"] } },
+        "not": {
+          "anyOf": [
+            { "required": ["content_exception"] },
+            { "required": ["migration_pending"] }
+          ]
+        }
       },
       "then": {
         "required": ["retrieved", "source_sha256", "content_mode", "authority_level"],
