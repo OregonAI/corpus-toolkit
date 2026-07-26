@@ -29,6 +29,22 @@ class ContentRoot:
 
 
 @dataclasses.dataclass
+class Sibling:
+    """A corpus in the same org that this one cites. Resolution against a
+    sibling reads its COMPACT `_meta/corpus-index.json` (see
+    corpus_toolkit/index.py) — never its `_meta/graph.json`, which is tens of
+    megabytes for a real corpus.
+
+    `index_path` is a local filesystem path (absolute, or relative to this
+    corpus's root) and takes precedence over `index_url` — for offline/dev
+    work, monorepo checkouts, and tests."""
+    id: str
+    index_url: str | None = None
+    web_base: str = ""
+    index_path: Path | None = None
+
+
+@dataclasses.dataclass
 class CorpusConfig:
     root: Path                # repo root (parent of `_meta/`)
     config_path: Path
@@ -56,6 +72,10 @@ class CorpusConfig:
     coverage_fail_threshold: float
     coverage_warn_threshold: float
     raw: dict
+    siblings: list[Sibling] = dataclasses.field(default_factory=list)
+
+    def sibling(self, sibling_id: str) -> Sibling | None:
+        return next((s for s in self.siblings if s.id == sibling_id), None)
 
     @property
     def content_dirs(self) -> list[str]:
@@ -149,6 +169,15 @@ def load(config_path: str | Path) -> CorpusConfig:
     mcp = raw.get("mcp", {}) or {}
     status = raw.get("status", {}) or {}
     provenance = raw.get("provenance", {}) or {}
+    siblings = [
+        Sibling(
+            id=s["id"],
+            index_url=s.get("index_url"),
+            web_base=s.get("web_base", "") or "",
+            index_path=_resolve(root, s.get("index_path")),
+        )
+        for s in raw.get("siblings", []) or []
+    ]
 
     return CorpusConfig(
         root=root,
@@ -178,4 +207,5 @@ def load(config_path: str | Path) -> CorpusConfig:
         coverage_fail_threshold=float(provenance.get("coverage_fail_threshold", 0.70)),
         coverage_warn_threshold=float(provenance.get("coverage_warn_threshold", 0.90)),
         raw=raw,
+        siblings=siblings,
     )

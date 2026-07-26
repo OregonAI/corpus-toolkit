@@ -12,7 +12,11 @@ docs/mcp-interface-contract.md:
   - Citation resolution via a pluggable scheme registry: a corpus's
     `plugins.citation_module` (see corpus_toolkit/config.py) registers its
     citation formats with `register_scheme()`; nothing Oregon-specific
-    (ORS/OAR/renumbering/etc.) lives here.
+    (ORS/OAR/renumbering/etc.) lives here. A scheme may declare
+    `corpus="<sibling id>"`, in which case its candidates resolve against that
+    sibling's compact index (corpus_toolkit/index.py + remote.py) rather than
+    the local graph — an unreachable sibling degrades to `unresolved` with an
+    explicit "unavailable, not absent" note, never a fabricated hit.
   - Optional issuing-body profile extension, active only when corpus.yml
     declares an `issuing_body_registry` (+ optional `issuing_body_profiles`).
 
@@ -30,6 +34,9 @@ import yaml
 
 from corpus_toolkit.config import CorpusConfig
 from corpus_toolkit.plugins import load_module
+from corpus_toolkit.remote import (
+    document_url as sibling_document_url, load_sibling_index, lookup as sibling_lookup,
+)
 from corpus_toolkit.repo import (
     content_files, extract_fulltext, parse_frontmatter, repo_state,
 )
@@ -38,11 +45,11 @@ BIG_DOC_BYTES = 50_000
 
 # ---------- citation-scheme registry (populated by a corpus's citation_module) ----------
 
-_SCHEMES: list[tuple[str, "re.Pattern", str | None, object | None]] = []
+_SCHEMES: list[tuple[str, "re.Pattern", str | None, object | None, str | None]] = []
 
 
 def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
-                    resolver=None) -> None:
+                    resolver=None, corpus: str | None = None) -> None:
     """Register a citation format: `pattern` is matched against the trimmed
     citation string. Two ways to turn a match into candidate document id(s):
 
@@ -64,10 +71,18 @@ def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
                                resolver=lambda m: [renumber(m["num"])])
 
     Exactly one of `id_template`/`resolver` should be given; `resolver` takes
-    precedence if both are."""
+    precedence if both are.
+
+    `corpus` names the SIBLING corpus this scheme's candidate ids belong to —
+    the citation formats a corpus recognizes but does not itself hold (a
+    records-retention corpus recognizing `OAR 166-300-0040`, which lives in
+    the rules corpus). The sibling must be declared in corpus.yml's
+    `siblings:` block; resolution then goes through that sibling's compact
+    index (corpus_toolkit/index.py) and hits come back carrying `corpus` and
+    `url`. Default None = resolve locally, exactly as before."""
     if id_template is None and resolver is None:
         raise ValueError("register_scheme requires id_template or resolver")
-    _SCHEMES.append((name, re.compile(pattern), id_template, resolver))
+    _SCHEMES.append((name, re.compile(pattern), id_template, resolver, corpus))
 
 
 def clear_schemes() -> None:
@@ -294,17 +309,49 @@ class CorpusFramework:
             return {**meta, "error": f"no section {part!r}", "sections": headings}
         return {**meta, "section": part, "body": sec}
 
+    # ---------- cross-corpus resolution ----------
+
+    def _resolve_in_sibling(self, sibling_id: str, cands: list[str]):
+        """Look candidate ids up in a sibling corpus's compact index. Returns
+        (hits, status); status distinguishes "the sibling says it has no such
+        document" (available=True, no hits) from "we could not consult the
+        sibling at all" (available=False) — opposite answers for a caller."""
+        sib = self.config.sibling(sibling_id)
+        if sib is None:
+            return [], {"available": False, "stale": False,
+                        "reason": f"no sibling {sibling_id!r} declared in corpus.yml's "
+                                  f"`siblings:` block"}
+        index = load_sibling_index(sib, self._cache_dir / "siblings")
+        if index is None:
+            return [], {"available": False, "stale": False,
+                        "reason": "index could not be fetched and no cached copy exists"}
+        hits = []
+        for i in cands:
+            row = sibling_lookup(index, i)
+            if row is None:
+                continue
+            hit = {"id": i, "title": row["title"], "doc_type": row["doc_type"],
+                   "corpus": sibling_id}
+            url = sibling_document_url(sib, row["path"])
+            if url:
+                hit["url"] = url
+            hits.append(hit)
+        return hits, {"available": True, "stale": bool(index.get("_stale")),
+                      "reason": ""}
+
     def resolve_citation(self, citation: str) -> dict:
         nodes, _ = self.graph()
         c = citation.strip()
         matched_scheme = None
+        matched_corpus = None
         cands: list[str] = []
         resolver_note = None
-        for name, pattern, id_template, resolver in _SCHEMES:
+        for name, pattern, id_template, resolver, scheme_corpus in _SCHEMES:
             m = pattern.search(c)
             if not m:
                 continue
             matched_scheme = name
+            matched_corpus = scheme_corpus
             if resolver is not None:
                 try:
                     nparams = len(inspect.signature(resolver).parameters)
@@ -327,14 +374,44 @@ class CorpusFramework:
                 for i in cands if i in nodes]
         out = {"citation": citation, "matches": hits,
                "corpus": self.config.id, "archetype": self.config.archetype}
+
+        sibling_status = None
+        if matched_corpus and cands:
+            sibling_hits, sibling_status = self._resolve_in_sibling(matched_corpus, cands)
+            if sibling_hits:
+                hits = hits + sibling_hits
+                out["matches"] = hits
+                out["resolved_via"] = f"sibling:{matched_corpus}"
+            if sibling_status.get("stale"):
+                out["sibling_index_stale"] = True
+
         if hits and resolver_note:
             out["note"] = resolver_note
+        if hits and sibling_status and sibling_status.get("stale"):
+            out.setdefault("note", (
+                f"resolved from a STALE cached copy of sibling corpus "
+                f"'{matched_corpus}'s index — it could not be refreshed"))
         if not hits:
             out["unresolved"] = True
-            out["note"] = resolver_note or (
-                f"scheme '{matched_scheme}' matched but no such document exists"
-                if matched_scheme else
-                "no citation scheme recognized this format — try search_corpus")
+            if sibling_status and not sibling_status.get("available"):
+                # "we couldn't look" is a completely different answer from "it
+                # isn't there" — a caller must never conflate them.
+                out["sibling_unavailable"] = matched_corpus
+                out["note"] = (
+                    f"citation belongs to sibling corpus '{matched_corpus}', but its "
+                    f"index could not be loaded ({sibling_status['reason']}) — this is "
+                    f"NOT evidence the document is absent; retry, or check the sibling "
+                    f"corpus directly")
+            elif sibling_status:
+                out["note"] = resolver_note or (
+                    f"scheme '{matched_scheme}' matched and sibling corpus "
+                    f"'{matched_corpus}'s index loaded, but it holds no document with "
+                    f"id(s) {', '.join(cands)}")
+            else:
+                out["note"] = resolver_note or (
+                    f"scheme '{matched_scheme}' matched but no such document exists"
+                    if matched_scheme else
+                    "no citation scheme recognized this format — try search_corpus")
             out["schemes_attempted"] = [s[0] for s in _SCHEMES]
             out["search_fallback"] = [{"id": s["id"], "title": s["title"]}
                                       for s in self.search_corpus(c, limit=3)]

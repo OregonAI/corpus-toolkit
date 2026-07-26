@@ -114,3 +114,69 @@ executive-regulatory-frameworks's check-links.yml call)
       narrower), default unchanged
 - [x] `check-links.yml` always also scans `llms.txt` (part of the standard
       repo anatomy per every archetype, not just `**/*.md`)
+
+## v1.1.0 — cross-corpus citation resolution
+
+Corpora in one org cite each other constantly (a records-retention corpus
+cites `OAR 166-300-0040`, which lives in the rules corpus). Until now
+`resolve_citation` only ever consulted the LOCAL graph and silently dropped
+every candidate it didn't hold, so those citations were simply unresolvable.
+A sibling's `_meta/graph.json` can't be the lookup target — it is 26 MB for
+the real Oregon rules corpus.
+
+**Fully backward-compatible: a corpus with no `siblings:` block and no
+`corpus=` on any scheme behaves exactly as it does today** (regression-tested
+in `tests/test_cross_corpus.py::TestBackwardCompatibility`).
+
+- [x] **New artifact + CLI `corpus-generate-index`** (`corpus_toolkit/index.py`)
+      writes the compact `_meta/corpus-index.json` a sibling resolves against:
+      `{corpus, contract_version, n_documents, documents: {id: [title,
+      doc_type, path]}}`. Derived from `_meta/graph.json`'s nodes when that
+      file exists, else by walking the content roots. Keys are sorted and no
+      wall-clock timestamp is stamped, so the file is byte-stable and
+      `--check` is meaningful in CI (`--generated YYYY-MM-DD` sets the
+      optional `generated` field explicitly; `--check` ignores it).
+      Commit the generated file — that's the published surface.
+- [x] **`siblings:` block in `_meta/corpus.yml`** (optional, default `[]`):
+
+      ```yaml
+      siblings:
+        - id: executive-regulatory-frameworks
+          index_url: https://raw.githubusercontent.com/OregonAI/executive-regulatory-frameworks/main/_meta/corpus-index.json
+          web_base: https://github.com/OregonAI/executive-regulatory-frameworks/blob/main/
+      ```
+
+      Exposed as `config.siblings` (`Sibling(id, index_url, web_base,
+      index_path)`) plus `config.sibling(id)`. `index_path` is a LOCAL file
+      path for offline/dev/monorepo/test use and wins over `index_url`.
+- [x] **`corpus_toolkit/remote.py`** — `load_sibling_index(sibling,
+      cache_dir, ttl_seconds=86400) -> dict | None`, stdlib `urllib` only,
+      10s timeout, descriptive User-Agent, on-disk cache under
+      `_meta/.cache/siblings/<id>.json` (already gitignored). Serves a fresh
+      cache without a fetch; on fetch failure falls back to a STALE cache
+      marked `_stale: True` (`_source` is `local`/`fetch`/`cache`/
+      `cache-stale`); returns `None` only when there is nothing at all. A
+      payload without a `documents` dict is treated as unavailable, never
+      trusted. **Never raises** — an unreachable sibling degrades resolution,
+      it never breaks the server.
+- [x] **`register_scheme(..., corpus="<sibling id>")`** declares that a
+      scheme's candidate ids live in a sibling corpus. Default `None` =
+      local, as before. `_SCHEMES` entries are now 5-tuples.
+- [x] **`resolve_citation` sibling fallback**: matches from a sibling carry
+      `corpus` + `url` (`web_base` + repo path; omitted when the sibling
+      declares no `web_base`) and the response is tagged
+      `resolved_via: "sibling:<id>"`. Resolution only ever follows an
+      EXPLICIT `corpus=` declaration — it never guesses a sibling. If the
+      sibling index can't be loaded the result stays `unresolved` with
+      `sibling_unavailable: "<id>"` and a note saying so, deliberately
+      distinct from the "sibling consulted, no such document" note: "we
+      couldn't look" and "it isn't there" are opposite answers for a caller.
+- [x] `tests/test_cross_corpus.py` — first tests in the repo (stdlib
+      `unittest`, run `python3 -m unittest discover -s tests`).
+
+### Adopting it in a corpus repo
+1. `corpus-generate-index --config _meta/corpus.yml`, commit
+   `_meta/corpus-index.json`, and add a `--check` step to CI.
+2. Add a `siblings:` entry per corpus you cite.
+3. Pass `corpus="<sibling id>"` on the schemes in your `citation_module`
+   whose citations that sibling owns.
