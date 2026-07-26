@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corpus-toolkit"
-version = "1.1.0"
+version = "1.2.0"
 description = "Shared validation, provenance, and MCP framework for the civic corpus platform"
 requires-python = ">=3.10"
 dependencies = [
@@ -21,6 +21,7 @@ corpus-verify-provenance = "corpus_toolkit.validate.provenance:main"
 corpus-detect-changes = "corpus_toolkit.sources.changes:main"
 corpus-generate-status = "corpus_toolkit.status:main"
 corpus-generate-index = "corpus_toolkit.index:main"
+corpus-detect-unsourced = "corpus_toolkit.grounding:main"
 corpus-mcp-serve = "corpus_toolkit.mcp.server:main"
 
 [tool.setuptools.packages.find]
