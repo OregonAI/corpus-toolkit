@@ -57,6 +57,21 @@ def fold(s: str) -> str:
 # "September 2015" edition date and buried the real signal in dates.
 CITATION_RE = re.compile(r"^(?:\d+\s+)?[A-Z]{2,6}\.?\s+\d[\w.\-]*$")
 
+# A citation list in a source shares ONE authority prefix across many sections:
+#   "Statutory/Other Authority:  ORS 179.040, 423.020, 423.030 & 423.075"
+# Frontmatter correctly expands that to "ORS 423.030", but the literal string never
+# appears anywhere. Checking only the full form reported 7,331 fabrications against the
+# mature corpus, every one of them this artifact. So a citation counts as grounded if
+# EITHER the full form or its bare number is present. That trades a little sensitivity
+# for precision, which is the right trade: a false accusation of fabrication costs far
+# more than a missed one, and this tool exists to be believed.
+CITATION_NUM_RE = re.compile(r"^(?:\d+\s+)?[A-Z]{2,6}\.?\s+(\S+)$")
+
+# Registry slugs ("department-of-fish-and-wildlife") are controlled-vocabulary
+# identifiers, not quotations. The source says "Department of Fish and Wildlife"; the
+# hyphenated slug appears nowhere and never should.
+SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)+$")   # 1+ hyphens: "employment-department" counts
+
 # Dates are asserted ABOUT a document in a normalised form the source never prints
 # ("2017-08-31" for "August 2017"), so literal absence proves nothing. Excluded from the
 # citation signal; still counted in the grounding-rate table.
@@ -79,6 +94,11 @@ STRUCTURAL = {
     # over the mature corpus — the same failure mode as the quote matcher's 43. Identity
     # is not an assertion.
     "citation", "title",
+    # Constructed provenance strings, not quotations: source_version reads
+    # "DEQ 7-2015, effective 2015-04-16" — assembled from the rule's history line, and
+    # never present verbatim. effective_date is a normalised ISO value the source does
+    # not print in that form. Both were dominating the report with expected absences.
+    "source_version", "effective_date", "expires",
 }
 
 
@@ -96,7 +116,13 @@ def _values(value):
 
 def scan(config, limit: int | None = None, only_field: str | None = None) -> dict:
     snap_dir = config.snapshot_dir
-    snap_cache: dict[str, str] = {}
+    # BOUNDED, and it has to be. executive-regulatory-frameworks carries 1.1 GB across
+    # 77,028 snapshot files; caching every folded one would hold the whole corpus in
+    # memory to answer questions about it. The cache exists so documents SHARING a
+    # snapshot (a statute chapter sliced into sections) do not re-read it, and that
+    # locality is local — a small window captures all of it.
+    snap_cache: collections.OrderedDict[str, str] = collections.OrderedDict()
+    CACHE_MAX = 256
 
     def source_text(fm: dict) -> str | None:
         """The folded snapshot for one document, or None when it has none to check
@@ -104,10 +130,14 @@ def scan(config, limit: int | None = None, only_field: str | None = None) -> dic
         sid = fm.get("snapshot_id") or fm.get("id")
         if not sid:
             return None
-        if sid not in snap_cache:
+        if sid in snap_cache:
+            snap_cache.move_to_end(sid)
+        else:
             txt = snap_dir / f"{sid}.txt"
             snap_cache[sid] = fold(txt.read_text(encoding="utf-8", errors="replace")) \
                 if txt.is_file() else ""
+            if len(snap_cache) > CACHE_MAX:
+                snap_cache.popitem(last=False)
         return snap_cache[sid] or None
 
     per_field = collections.defaultdict(lambda: {"checked": 0, "grounded": 0})
@@ -135,6 +165,10 @@ def scan(config, limit: int | None = None, only_field: str | None = None) -> dic
                 key = (field, value)
                 value_docs[key].add(fm.get("id", str(path)))
                 found = fold(value) in src
+                if not found:
+                    num = CITATION_NUM_RE.match(value)
+                    if num and fold(num.group(1)) in src:
+                        found = True          # shared-prefix list form, see above
                 per_field[field]["checked"] += 1
                 per_field[field]["grounded"] += int(found)
                 if found:
@@ -171,6 +205,7 @@ def report(res: dict, corpus_id: str, top: int = 15) -> list[str]:
     out.append("   Hard-coding leaves this fingerprint: every document, never the source.")
     const = [((f, v), docs) for (f, v), docs in res["value_docs"].items()
              if f not in STRUCTURAL and len(docs) > 1
+             and not SLUG_RE.match(v)          # registry identifiers are not quotations
              and res["value_grounded"].get((f, v), 0) == 0]
     const.sort(key=lambda kv: -len(kv[1]))
     if not const:
