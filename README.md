@@ -16,6 +16,7 @@ lives here.
 | `schemas/` | Machine-enforced JSON Schemas |
 | `.github/workflows/` | Reusable workflows (`workflow_call`) corpus repos invoke |
 | `corpus_toolkit/` | Python package: validators, provenance diff, change detection, MCP framework (extracted from oregon-policy-repo `src/`) |
+| `tests/` | `python3 -m unittest discover -s tests` |
 
 ## Versioning
 

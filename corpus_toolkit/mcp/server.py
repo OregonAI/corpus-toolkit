@@ -52,7 +52,11 @@ def build_server(config) -> FastMCP:
     def resolve_citation(citation: str) -> dict:
         """Map a citation string to in-corpus document id(s) via the corpus's
         registered citation schemes, or an explicit `unresolved` result with the
-        schemes attempted. Never guesses."""
+        schemes attempted. Never guesses. Citations belonging to a sibling
+        corpus resolve remotely: those matches carry `corpus` + `url` and the
+        response is tagged `resolved_via: sibling:<id>`. If a sibling's index
+        cannot be loaded the result is `unresolved` with `sibling_unavailable`
+        set — that means "could not check", NOT "no such document"."""
         return fw.resolve_citation(citation)
 
     @mcp.tool()

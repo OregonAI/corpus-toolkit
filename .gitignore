@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 *.egg-info/
 _meta/.cache/
+
+# setuptools build artifacts (a stale copy of the package tree)
+build/

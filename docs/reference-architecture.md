@@ -60,7 +60,8 @@ DISCLAIMER.md      full non-authoritative statement
 llms.txt           curated machine-readable index
 CHANGELOG.md       Keep a Changelog + domain change types
 _meta/
-  corpus.yml       corpus config: id, jurisdiction, archetype, versions
+  corpus.yml       corpus config: id, jurisdiction, archetype, versions, siblings
+  corpus-index.json     generated compact id→[title,doc_type,path] index siblings resolve against
   source-manifest.yml   every upstream source, recheck cadence, hashes
   templates/       document template(s)
   snapshots/       pinned source snapshots (document/hybrid)
@@ -83,6 +84,17 @@ it recognizes but does not hold. The registry (org profile README plus a
 machine-readable `registry.yml` in the org `.github` repo, added when a
 second corpus exists) maps citation schemes → owning corpus. This keeps
 each corpus small while letting agents walk the whole graph.
+
+Implemented in toolkit v1.1.0: each corpus publishes a compact
+`_meta/corpus-index.json` (`corpus-generate-index`) — id → [title, doc_type,
+path] and nothing else, because a real corpus's `_meta/graph.json` runs to
+tens of megabytes and is unusable as a remote lookup target. A citing corpus
+declares the corpora it cites under `siblings:` in its `corpus.yml` and marks
+the owning corpus on the relevant citation schemes
+(`register_scheme(..., corpus=...)`). Sibling indexes are fetched over plain
+HTTPS and cached on disk for a day; an unreachable sibling degrades to an
+explicit "could not check" (never a fabricated hit, and never an error that
+takes the server down).
 
 ## Status layer
 
