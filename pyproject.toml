@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]"]
+test = ["pytest"]
 
 [project.scripts]
 corpus-validate-frontmatter = "corpus_toolkit.validate.frontmatter:main"
