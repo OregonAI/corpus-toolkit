@@ -140,13 +140,13 @@ def main():
                      "cannot be honoured. Pin an SDK that supports it, or drop --path and "
                      "give this corpus its own hostname.")
         mcp.settings.streamable_http_path = args.path
-        mounted = [getattr(r, "path", None) for r in mcp.streamable_http_app().routes]
-        if args.path not in mounted:
-            sys.exit(f"ERROR: asked to mount at {args.path!r} but the app exposes {mounted!r}. "
-                     f"Refusing to start: behind a path-routing proxy this would 404 every "
-                     f"request with no other symptom.")
-        print(f"[corpus-mcp] {config.id}: serving streamable-http at {args.path}",
-              file=sys.stderr, flush=True)
+
+        # EVERY setting must be applied before the first streamable_http_app() call below.
+        # That call creates FastMCP's session manager, which captures
+        # settings.transport_security AT THAT MOMENT and is then cached for the process —
+        # so anything set afterwards is silently ignored. Setting --public-hostname after
+        # the mount check left the allow-list at localhost-only and made every tunnelled
+        # request 421, with the correct value sitting unused in settings.
         if args.public_hostname:
             from mcp.server.transport_security import TransportSecuritySettings
             mcp.settings.transport_security = TransportSecuritySettings(
@@ -155,6 +155,25 @@ def main():
                 allowed_origins=["http://127.0.0.1:*", "http://localhost:*",
                                  "http://[::1]:*", f"https://{args.public_hostname}"],
             )
+
+        # First build: validates the mount AND freezes the settings above into the session
+        # manager that run() will reuse.
+        mounted = [getattr(r, "path", None) for r in mcp.streamable_http_app().routes]
+        if args.path not in mounted:
+            sys.exit(f"ERROR: asked to mount at {args.path!r} but the app exposes {mounted!r}. "
+                     f"Refusing to start: behind a path-routing proxy this would 404 every "
+                     f"request with no other symptom.")
+        # Report what the session manager actually captured, not what was requested — the
+        # two diverged once already.
+        _sec = getattr(mcp._session_manager, "security_settings", None)
+        _hosts = getattr(_sec, "allowed_hosts", []) if _sec else []
+        if args.public_hostname and args.public_hostname not in _hosts:
+            sys.exit(f"ERROR: --public-hostname {args.public_hostname!r} did not reach the "
+                     f"session manager (allowed_hosts={_hosts!r}). Refusing to start: every "
+                     f"request through a proxy would 421 Invalid Host header.")
+        print(f"[corpus-mcp] {config.id}: serving streamable-http at {args.path} "
+              f"(allowed hosts: {', '.join(_hosts) or 'defaults'})",
+              file=sys.stderr, flush=True)
         mcp.run(transport="streamable-http")
     else:
         mcp.run()
