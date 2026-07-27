@@ -1,0 +1,70 @@
+name: tests
+
+# CI for the toolkit ITSELF. The other four workflows in this directory are the reusable
+# ones corpora call; none of them runs this package's own test suite. That gap is not
+# theoretical: v1.3.0 was committed with a regression that would have failed CI on the
+# first push to every new branch in every corpus, and nothing here would have caught it —
+# it was found by hand before tagging.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor declared in pyproject (requires-python = ">=3.10") and the version
+        # the corpus workflows actually pin. A corpus on 3.10 must not be broken by
+        # syntax only 3.12 accepts.
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e ".[test]"
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+  # The suite imports corpus_toolkit.mcp.backends and .framework but never
+  # corpus_toolkit.mcp.server, because server.py needs the optional mcp extra. So the
+  # startup path is untested — and c513606 changed exactly that (ensure_index() ->
+  # backend.health()), where the old call raised AttributeError for any non-file backend.
+  # This is a smoke test, not coverage: it proves the module imports and the console
+  # scripts resolve under a real install.
+  entrypoints:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with the mcp extra
+        run: pip install -e ".[mcp,test]"
+      - name: Import the MCP server module
+        run: python -c "import corpus_toolkit.mcp.server; print('server module imports')"
+      - name: Every console script resolves
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import tomllib, importlib
+          scripts = tomllib.load(open("pyproject.toml", "rb"))["project"]["scripts"]
+          for name, target in scripts.items():
+              module, _, attr = target.partition(":")
+              mod = importlib.import_module(module)
+              assert hasattr(mod, attr), f"{name}: {module} has no {attr}()"
+              print(f"  ok  {name} -> {target}")
+          print(f"{len(scripts)} console scripts resolve")
+          PY
