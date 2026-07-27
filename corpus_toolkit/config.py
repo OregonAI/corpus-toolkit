@@ -66,6 +66,12 @@ class CorpusConfig:
     # None = the built-in FileBackend (markdown + FTS). An API-archetype corpus
     # supplies its own; see corpus_toolkit/mcp/backends.py.
     retrieval_module: str | None
+    # doc_type -> ordered list of '## ' headings whose text feeds the searchable body
+    # column. A doc_type ABSENT from this map keeps the historical behaviour exactly
+    # ('## Full text', else '## Key provisions'), so an existing corpus that does not
+    # set this key indexes byte-identically to before. Listed headings are CONCATENATED,
+    # not first-match: a mirrored record often has several sections worth searching.
+    index_headings: dict
     issuing_body_registry: Path | None
     issuing_body_registry_key: str
     issuing_body_profiles: Path | None
@@ -202,6 +208,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         citation_module=plugins.get("citation_module"),
         semantic_search_module=plugins.get("semantic_search_module"),
         retrieval_module=plugins.get("retrieval_module"),
+        index_headings=(raw.get("index_headings") or {}),
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
         issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),
