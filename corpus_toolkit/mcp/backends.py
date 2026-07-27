@@ -132,7 +132,7 @@ class FileBackend:
         for p in content_files(self.config):
             fm, body = parse_frontmatter(p)
             glance = self._extract_section(body, "At a glance") or ""
-            ft = extract_fulltext(body) or self._extract_section(body, "Key provisions") or ""
+            ft = self._searchable_body(body, fm.get("doc_type", ""))
             rel = p.relative_to(self.config.root)
             con.execute("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 fm["id"], str(rel), fm["doc_type"],
@@ -156,6 +156,28 @@ class FileBackend:
                       self._db_path.with_name(self._db_path.name + "-shm")):
             stray.unlink(missing_ok=True)
         return sqlite3.connect(self._db_path)
+
+    def _searchable_body(self, body: str, doc_type: str) -> str:
+        """Text that feeds the FTS `body` column.
+
+        A doc_type listed in config.index_headings gets exactly the sections named there,
+        concatenated in order. Anything NOT listed keeps the historical rule verbatim --
+        '## Full text', else '## Key provisions', first match wins -- so a corpus that
+        does not set the key indexes byte-identically to before this existed.
+
+        Why per-doc_type rather than 'index every section': mirrored records and entity
+        docs need different sections indexed than statutes do, and widening the rule for
+        everyone would silently change what an existing corpus matches on.
+        """
+        headings = (getattr(self.config, "index_headings", None) or {}).get(doc_type)
+        if not headings:
+            return extract_fulltext(body) or self._extract_section(body, "Key provisions") or ""
+        parts = []
+        for h in headings:
+            sec = extract_fulltext(body) if h == "Full text" else self._extract_section(body, h)
+            if sec:
+                parts.append(sec)
+        return "\n\n".join(parts)
 
     # ---------- retrieval ----------
 

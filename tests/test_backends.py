@@ -243,3 +243,127 @@ def test_ensure_index_is_meaningless_without_files(corpus):
     f = _with_backend(corpus, "backend_mod:_StubBackend")
     with pytest.raises(AttributeError, match="not file-backed"):
         f.ensure_index()
+
+
+# ---------- G1: per-doc_type heading selection ----------
+
+MULTI = """---
+schema_version: 1
+id: {id}
+title: "T"
+doc_type: {doc_type}
+citation: "C"
+authority_level: statute
+issuing_body: "B"
+agency: statewide
+source_url: "https://example.invalid/x"
+source_format: html
+retrieved: "2026-07-26"
+source_sha256: "{sha}"
+status: current
+content_mode: verbatim
+last_verified: "2026-07-26"
+verified_by: "@t"
+tags: []
+---
+
+## At a glance
+
+GLANCEWORD
+
+## Summary
+
+SUMMARYWORD
+
+## Full text
+
+FULLTEXTWORD
+
+## Provenance & change history
+
+PROVENANCEWORD
+"""
+
+
+def _corpus_with(tmp_path, doc_type, index_headings=None):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "_meta").mkdir()
+    (tmp_path / "docs" / "d1.md").write_text(
+        MULTI.format(id="d1", doc_type=doc_type, sha="c" * 64))
+    cfg = textwrap.dedent(f"""
+        corpus:
+          id: t
+          name: T
+          jurisdiction: oregon
+          archetype: document
+        content_roots:
+          - path: docs
+            doc_type: {doc_type}
+    """).strip() + "\n"
+    if index_headings:
+        cfg += "index_headings:\n"
+        for dt, hs in index_headings.items():
+            cfg += f"  {dt}: [{', '.join(repr(h) for h in hs)}]\n"
+    (tmp_path / "_meta" / "corpus.yml").write_text(cfg)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    return CorpusFramework(load_config(str(tmp_path / "_meta" / "corpus.yml")))
+
+
+def _body_col(fw):
+    con = fw.backend.ensure_index()
+    return con.execute("SELECT body FROM fts WHERE id='d1'").fetchone()[0]
+
+
+def test_unconfigured_doc_type_keeps_historical_behaviour(tmp_path):
+    """The guarantee the whole option was chosen for: a corpus that does not set
+    index_headings indexes exactly as before — '## Full text' only."""
+    body = _body_col(_corpus_with(tmp_path, "statute"))
+    assert "FULLTEXTWORD" in body
+    assert "SUMMARYWORD" not in body        # NOT indexed, as before
+    assert "PROVENANCEWORD" not in body
+
+
+def test_configured_doc_type_indexes_the_named_sections(tmp_path):
+    fw = _corpus_with(tmp_path, "dataset_doc",
+                      {"dataset_doc": ["Summary", "Full text"]})
+    body = _body_col(fw)
+    assert "SUMMARYWORD" in body and "FULLTEXTWORD" in body
+    assert "PROVENANCEWORD" not in body     # boilerplate still excluded
+
+
+def test_configured_headings_are_concatenated_in_order(tmp_path):
+    fw = _corpus_with(tmp_path, "dataset_doc",
+                      {"dataset_doc": ["Summary", "Full text"]})
+    body = _body_col(fw)
+    assert body.index("SUMMARYWORD") < body.index("FULLTEXTWORD")
+
+
+def test_config_for_one_doc_type_does_not_affect_another(tmp_path):
+    """Blast-radius guard: configuring measures must not change how statutes index."""
+    fw = _corpus_with(tmp_path, "statute", {"dataset_doc": ["Summary"]})
+    body = _body_col(fw)
+    assert "FULLTEXTWORD" in body and "SUMMARYWORD" not in body
+
+
+def test_summary_only_document_is_searchable_when_configured(tmp_path):
+    """A measure with no bill text must still be findable by its metadata — the gap
+    the step-4 ingest flagged."""
+    (tmp_path / "docs").mkdir(); (tmp_path / "_meta").mkdir()
+    (tmp_path / "docs" / "d1.md").write_text(
+        MULTI.format(id="d1", doc_type="dataset_doc", sha="d" * 64)
+        .replace("## Full text\n\nFULLTEXTWORD\n\n", ""))
+    (tmp_path / "_meta" / "corpus.yml").write_text(textwrap.dedent("""
+        corpus:
+          id: t
+          name: T
+          jurisdiction: oregon
+          archetype: hybrid
+        content_roots:
+          - path: docs
+            doc_type: dataset_doc
+        index_headings:
+          dataset_doc: ['Summary', 'Full text']
+    """).strip() + "\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    fw = CorpusFramework(load_config(str(tmp_path / "_meta" / "corpus.yml")))
+    assert [h["id"] for h in fw.search_corpus("SUMMARYWORD")] == ["d1"]
