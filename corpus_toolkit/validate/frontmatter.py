@@ -120,6 +120,36 @@ def _graph_node_ids(config):
     return {n["id"] for n in json.loads(config.graph_path.read_text()).get("nodes", [])}
 
 
+def _all_content_ids(config):
+    """Every document id in the corpus, by parsing frontmatter.
+
+    The fallback when there is no authority graph. It exists because the resolution
+    UNIVERSE must be corpus-wide even when the set being VALIDATED is not: scoping both
+    to the changed files makes every relationship pointing at an unchanged sibling look
+    unresolvable. A corpus with no graph.json — legitimate, and the documented state for a
+    corpus that has not built one yet — otherwise gets a universe consisting only of the
+    files in the diff, so a one-file PR fails on references that are perfectly valid.
+
+    Slower than reading the graph (it parses every frontmatter), which is why it is a
+    fallback rather than the default.
+    """
+    ids = set()
+    for p in content_files(config):
+        try:
+            fm, _ = parse_frontmatter(p)
+        except ValueError:
+            continue
+        if fm.get("id"):
+            ids.add(fm["id"])
+    return ids
+
+
+def _resolution_universe(config, docs):
+    """Ids a relationship target may resolve to. Corpus-wide by construction — see
+    _all_content_ids for why that matters when validation is scoped to changed files."""
+    return (_graph_node_ids(config) or _all_content_ids(config)) | set(docs)
+
+
 def _load_registry(config):
     if not config.issuing_body_registry:
         return None
@@ -169,7 +199,7 @@ def _run_relationships_only(config, paths, r):
             continue
         if fm.get("id"):
             docs[fm["id"]] = p.relative_to(config.root)
-    universe = _graph_node_ids(config) | set(docs)
+    universe = _resolution_universe(config, docs)
     for rel, level, msg in _relationship_findings(paths, universe, config):
         (r.error if level == "error" else r.warn)(rel, msg)
     r.finish(f"OK: relationship graph consistent across {len(paths)} content file(s).")
@@ -227,7 +257,7 @@ def main():
         if doc_id is not None:
             docs[doc_id] = rel
 
-    universe = _graph_node_ids(config) | set(docs)
+    universe = _resolution_universe(config, docs)
     for rel, level, msg in _relationship_findings(paths, universe, config):
         (r.error if level == "error" else r.warn)(rel, msg)
 
