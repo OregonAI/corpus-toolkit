@@ -147,10 +147,27 @@ def load_source_manifest_groups(config: "CorpusConfig") -> list[dict]:
             g = yaml.safe_load(p.read_text()) or {}
             g.setdefault("group", p.stem)
             groups.append(g)
+        if not groups:
+            raise MissingSourceManifest(
+                f"source_manifest_path {path} is a directory containing no *.yml group "
+                f"files. Refusing to report zero sources as success. (A directory of "
+                f"*.yaml files is the usual cause — the loader only reads *.yml.)")
         return groups
     if path.is_file():
         return [yaml.safe_load(path.read_text()) or {}]
-    return []
+    # A configured path that is neither file nor directory returned [] — so
+    # corpus-detect-changes reported "0 changed, 0 fetch failure(s)" and exited 0,
+    # forever, while checking nothing. A renamed file, a typo'd path, or a directory
+    # holding *.yaml instead of *.yml all silenced upstream-change detection for a
+    # corpus declaring 1,874 sources. Absence of a CONFIGURED path is a fault.
+    raise MissingSourceManifest(
+        f"source_manifest_path {path} does not exist. Refusing to report zero sources "
+        f"as success — upstream-change detection would be permanently green while "
+        f"checking nothing. (If this corpus has no manifest, unset the key.)")
+
+
+class MissingSourceManifest(RuntimeError):
+    """A configured source_manifest_path that is not on disk."""
 
 
 def iter_manifest_sources(config: "CorpusConfig"):
@@ -158,6 +175,42 @@ def iter_manifest_sources(config: "CorpusConfig"):
     groups, in group order."""
     for g in load_source_manifest_groups(config):
         yield from (g.get("sources", []) or [])
+
+
+def _validated_index_headings(raw) -> dict:
+    """Validate `index_headings` shape LOUDLY.
+
+    Getting this wrong empties a doc_type's searchable body with no error anywhere:
+    _searchable_body() finds no matching section, writes "", and health() still reports
+    the corpus as reachable because it counts ROWS, not indexed text. The worst case is
+    a YAML scalar --
+
+        index_headings:
+          statute: "Full text"      # a string, not a list
+
+    -- because a non-empty string is truthy AND iterable, so the loop walks CHARACTERS,
+    every one fails to match a heading, and the doc_type silently vanishes from keyword
+    search. That is the single most likely authoring mistake here, so it must fail at
+    load rather than at query time."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"index_headings must be a mapping of doc_type -> list of "
+                         f"heading names, got {type(raw).__name__}")
+    for doc_type, headings in raw.items():
+        if isinstance(headings, str):
+            raise ValueError(
+                f"index_headings[{doc_type!r}] is a string, not a list. Write "
+                f"[{headings!r}] — a bare string is iterated CHARACTER BY CHARACTER, "
+                f"which silently empties this doc_type's search index.")
+        if not isinstance(headings, (list, tuple)) or not headings:
+            raise ValueError(f"index_headings[{doc_type!r}] must be a non-empty list of "
+                             f"heading names, got {headings!r}")
+        bad = [h for h in headings if not isinstance(h, str) or not h.strip()]
+        if bad:
+            raise ValueError(f"index_headings[{doc_type!r}] contains non-string or empty "
+                             f"heading(s): {bad!r}")
+    return dict(raw)
 
 
 def load(config_path: str | Path) -> CorpusConfig:
@@ -208,7 +261,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         citation_module=plugins.get("citation_module"),
         semantic_search_module=plugins.get("semantic_search_module"),
         retrieval_module=plugins.get("retrieval_module"),
-        index_headings=(raw.get("index_headings") or {}),
+        index_headings=_validated_index_headings(raw.get("index_headings")),
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
         issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),

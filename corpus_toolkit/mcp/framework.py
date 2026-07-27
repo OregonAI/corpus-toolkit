@@ -47,6 +47,12 @@ BIG_DOC_BYTES = 50_000
 # ---------- citation-scheme registry (populated by a corpus's citation_module) ----------
 
 _SCHEMES: list[tuple[str, "re.Pattern", str | None, object | None, str | None]] = []
+# Set while a CorpusFramework imports its citation module; see register_scheme.
+# A citation scheme is a property of ONE corpus, and this platform's premise is many
+# corpora sharing one toolkit — a process-wide registry made correctness depend on
+# never constructing two frameworks at once, which nothing enforced and the
+# cross-corpus feature actively invites.
+_COLLECTING: list | None = None
 
 
 def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
@@ -83,7 +89,15 @@ def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
     `url`. Default None = resolve locally, exactly as before."""
     if id_template is None and resolver is None:
         raise ValueError("register_scheme requires id_template or resolver")
-    _SCHEMES.append((name, re.compile(pattern), id_template, resolver, corpus))
+    entry = (name, re.compile(pattern), id_template, resolver, corpus)
+    # A CorpusFramework installs a collector around its citation_module import, so the
+    # schemes land on that instance instead of a process-wide list. The global remains
+    # for direct callers and tests. Corpus code is unchanged: it still imports and calls
+    # register_scheme at module scope exactly as before.
+    if _COLLECTING is not None:
+        _COLLECTING.append(entry)
+    else:
+        _SCHEMES.append(entry)
 
 
 def clear_schemes() -> None:
@@ -97,8 +111,20 @@ class CorpusFramework:
             "NON-AUTHORITATIVE curated copy for AI-agent reference. Not the "
             "official text — always cite and verify against source_url.")
         self._graph_cache = None
+        self._schemes: list = []
         if config.citation_module:
-            load_module(config.citation_module, config.root)
+            global _COLLECTING
+            _COLLECTING = self._schemes
+            try:
+                load_module(config.citation_module, config.root)
+            finally:
+                _COLLECTING = None
+            if not self._schemes:
+                # The module imported but registered nothing into this instance. Almost
+                # always a module already in sys.modules from an earlier load (its
+                # top-level register_scheme calls do not re-run), which would leave this
+                # corpus silently unable to resolve its own citations.
+                self._schemes = list(_SCHEMES)
         self._semantic = (load_module(config.semantic_search_module, config.root)
                           if config.semantic_search_module else None)
         # The retrieval seam. A corpus may supply its own via plugins.retrieval_module
@@ -126,6 +152,13 @@ class CorpusFramework:
             raise TypeError(f"retrieval_module {mod!r} produced {type(backend).__name__}, "
                             f"which does not satisfy RetrievalBackend: missing {missing}")
         return backend
+
+    @property
+    def schemes(self) -> list:
+        """This corpus's citation schemes. Falls back to the module-level registry for
+        callers that register directly (tests, scripts) rather than via a
+        citation_module."""
+        return self._schemes or _SCHEMES
 
     # ---------- retrieval (delegated to the backend) ----------
 
@@ -228,7 +261,7 @@ class CorpusFramework:
         matched_corpus = None
         cands: list[str] = []
         resolver_note = None
-        for name, pattern, id_template, resolver, scheme_corpus in _SCHEMES:
+        for name, pattern, id_template, resolver, scheme_corpus in self.schemes:
             m = pattern.search(c)
             if not m:
                 continue
@@ -252,8 +285,25 @@ class CorpusFramework:
                 except (IndexError, KeyError):
                     cands = []
             break
-        hits = [{"id": i, "title": nodes[i]["title"], "doc_type": nodes[i]["doc_type"]}
-                for i in cands if i in nodes]
+        # Existence is decided by the BACKEND, with the graph as a fast path.
+        #
+        # This used to consult `nodes` alone. graph() degrades to {} when graph_path is
+        # absent (a corpus that has not built one, or an ingest that outran the rebuild),
+        # so every candidate "did not exist" and the server reported documents it was
+        # actively serving as nonexistent — a false statement about its own contents,
+        # not merely a missing answer. backend.exists() is exactly the cheap probe this
+        # needs, and was added for it.
+        hits = []
+        for i in cands:
+            node = nodes.get(i)
+            if node is not None:
+                hits.append({"id": i, "title": node["title"],
+                             "doc_type": node["doc_type"]})
+                continue
+            found = self.backend.exists(i)
+            if found:
+                hits.append({"id": found["id"], "title": found.get("title", ""),
+                             "doc_type": found.get("doc_type", "")})
         out = {"citation": citation, "matches": hits,
                "corpus": self.config.id, "archetype": self.config.archetype}
 
@@ -294,7 +344,7 @@ class CorpusFramework:
                     f"scheme '{matched_scheme}' matched but no such document exists"
                     if matched_scheme else
                     "no citation scheme recognized this format — try search_corpus")
-            out["schemes_attempted"] = [s[0] for s in _SCHEMES]
+            out["schemes_attempted"] = [s[0] for s in self.schemes]
             out["search_fallback"] = [{"id": s["id"], "title": s["title"]}
                                       for s in self.search_corpus(c, limit=3)]
         return out

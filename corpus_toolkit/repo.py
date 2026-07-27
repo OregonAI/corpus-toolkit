@@ -167,6 +167,11 @@ def content_files(config: CorpusConfig):
             yield p
 
 
+class UnresolvableRef(RuntimeError):
+    """A caller-supplied git ref that git cannot resolve. Never downgraded to 'no
+    changes' — see changed_content_files()."""
+
+
 def changed_content_files(config: CorpusConfig, base_ref: str | None = None):
     """Content files added/modified relative to base_ref (default: merge-base with
     origin/main, else HEAD~1). Includes uncommitted working-tree changes. Returns a
@@ -175,11 +180,26 @@ def changed_content_files(config: CorpusConfig, base_ref: str | None = None):
         return subprocess.run(["git", "-C", str(config.root), *args],
                               capture_output=True, text=True)
 
+    explicit_base = base_ref is not None
     if base_ref is None:
         base_ref = "HEAD~1"
         mb = _git("merge-base", "origin/main", "HEAD")
         if mb.returncode == 0 and mb.stdout.strip():
             base_ref = mb.stdout.strip()
+
+    # A base ref the CALLER named explicitly and git cannot resolve is a hard error.
+    # Swallowing it made "the ref does not exist" indistinguishable from "nothing
+    # changed": --changed origin/main on a fork PR, a shallow checkout, or a renamed
+    # default branch returned [], both validators printed "No changed content files"
+    # and CI went GREEN having checked nothing. That is a guardrail switching itself off.
+    if explicit_base:
+        probe = _git("rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}")
+        if probe.returncode != 0:
+            raise UnresolvableRef(
+                f"base ref {base_ref!r} could not be resolved by git. Refusing to "
+                f"validate zero files and report success — that is how a guardrail "
+                f"silently switches itself off. (Shallow clone, fork PR, or a remote "
+                f"that is not 'origin' are the usual causes.)")
 
     names = set()
     for args in (("diff", "--name-only", "--diff-filter=d", f"{base_ref}...HEAD"),

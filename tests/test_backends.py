@@ -367,3 +367,93 @@ def test_summary_only_document_is_searchable_when_configured(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     fw = CorpusFramework(load_config(str(tmp_path / "_meta" / "corpus.yml")))
     assert [h["id"] for h in fw.search_corpus("SUMMARYWORD")] == ["d1"]
+
+
+# ---------- review findings: guardrails that used to pass silently ----------
+
+def test_scalar_index_headings_is_rejected_at_load(tmp_path):
+    """A YAML scalar is truthy AND iterable, so the loop walked CHARACTERS and emptied
+    the doc_type's index in total silence. The likeliest authoring mistake here."""
+    (tmp_path / "docs").mkdir(); (tmp_path / "_meta").mkdir()
+    (tmp_path / "_meta" / "corpus.yml").write_text(textwrap.dedent("""
+        corpus: {id: t, name: T, jurisdiction: oregon, archetype: document}
+        content_roots:
+          - {path: docs, doc_type: statute}
+        index_headings: {statute: "Full text"}
+    """).strip() + "\n")
+    with pytest.raises(ValueError, match="string, not a list"):
+        load_config(str(tmp_path / "_meta" / "corpus.yml"))
+
+
+def test_health_warns_when_configured_headings_match_nothing(corpus):
+    """Config validation cannot catch a well-formed list naming a heading no document
+    uses (["Full Text"] vs "## Full text"). health() must."""
+    cfg = corpus / "_meta" / "corpus.yml"
+    cfg.write_text(cfg.read_text() + 'index_headings:\n  statute: ["Full Text"]\n')
+    h = CorpusFramework(load_config(str(cfg))).backend.health()
+    assert "WARNING" in h["detail"]
+    assert h["empty_body_by_doc_type"] == {"statute": 2}
+
+
+def test_health_silent_for_unconfigured_doc_type_with_no_body(tmp_path):
+    """A doc_type nobody configured, holding metadata-only documents, is the corpus's
+    own choice — warning about it trains operators to ignore the message."""
+    (tmp_path / "docs").mkdir(); (tmp_path / "_meta").mkdir()
+    (tmp_path / "docs" / "x.md").write_text(DOC.format(
+        id="ref-1", title="T", doc_type="external_reference", citation="C",
+        sha="e" * 64, tag="x", glance="only a glance", body="").replace(
+            "## Full text\n\n\n", ""))
+    (tmp_path / "_meta" / "corpus.yml").write_text(textwrap.dedent("""
+        corpus: {id: t, name: T, jurisdiction: oregon, archetype: document}
+        content_roots:
+          - {path: docs, doc_type: external_reference}
+    """).strip() + "\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    h = CorpusFramework(load_config(str(tmp_path / "_meta" / "corpus.yml"))).backend.health()
+    assert "WARNING" not in h["detail"]
+
+
+def test_resolve_citation_consults_the_backend_when_there_is_no_graph(tmp_path):
+    """graph() degrades to {} with no graph.json, so resolve_citation reported documents
+    the server was actively serving as nonexistent — a false statement about its own
+    contents, not a missing answer."""
+    (tmp_path / "docs").mkdir(); (tmp_path / "_meta").mkdir()
+    (tmp_path / "docs" / "d.md").write_text(DOC.format(
+        id="ors-1.010", title="Water", doc_type="statute", citation="ORS 1.010",
+        sha="f" * 64, tag="ors", glance="g", body="Body."))
+    (tmp_path / "cite.py").write_text(
+        "from corpus_toolkit.mcp.framework import register_scheme\n"
+        "register_scheme('ors', r'\\bORS\\s+(\\d{1,3}\\.\\d{3})\\b', 'ors-{0}')\n")
+    (tmp_path / "_meta" / "corpus.yml").write_text(textwrap.dedent("""
+        corpus: {id: t, name: T, jurisdiction: oregon, archetype: document}
+        content_roots:
+          - {path: docs, doc_type: statute}
+        plugins: {citation_module: "cite"}
+    """).strip() + "\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    fw = CorpusFramework(load_config(str(tmp_path / "_meta" / "corpus.yml")))
+    assert not (tmp_path / "_meta" / "graph.json").is_file()
+    assert [m["id"] for m in fw.resolve_citation("ORS 1.010")["matches"]] == ["ors-1.010"]
+
+
+def test_two_corpora_do_not_share_a_scheme_registry(tmp_path):
+    """Every corpus here uses the same `src.citations` convention, so the first one
+    loaded was handed to all the others and their schemes never registered."""
+    frameworks = []
+    for name, scheme, pat in (("A", "ors", r"\bORS\s+(\d{1,3}\.\d{3})\b"),
+                              ("B", "measure", r"\b(HB)\s+(\d+)\b")):
+        r = tmp_path / name
+        (r / "src").mkdir(parents=True); (r / "docs").mkdir(); (r / "_meta").mkdir()
+        (r / "src" / "citations.py").write_text(
+            "from corpus_toolkit.mcp.framework import register_scheme\n"
+            f"register_scheme({scheme!r}, r'{pat}', 'x-{{0}}')\n")
+        (r / "_meta" / "corpus.yml").write_text(textwrap.dedent(f"""
+            corpus: {{id: corpus-{name}, name: {name}, jurisdiction: oregon, archetype: document}}
+            content_roots:
+              - {{path: docs, doc_type: statute}}
+            plugins: {{citation_module: "src.citations"}}
+        """).strip() + "\n")
+        subprocess.run(["git", "init", "-q"], cwd=r, check=True)
+        frameworks.append(CorpusFramework(load_config(str(r / "_meta" / "corpus.yml"))))
+    assert [s[0] for s in frameworks[0].schemes] == ["ors"]
+    assert [s[0] for s in frameworks[1].schemes] == ["measure"]

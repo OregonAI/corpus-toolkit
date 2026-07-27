@@ -322,9 +322,43 @@ class FileBackend:
         try:
             con = self.ensure_index()
             n = con.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+            # Documents present in the index but with NO searchable body. Config
+            # validation catches a malformed index_headings; it cannot catch a
+            # well-formed one naming a heading no document actually uses
+            # (["Full Text"] for "## Full text"). That mistake leaves rows in `docs`
+            # while `fts.body` is empty, so a row count alone reports a healthy corpus
+            # that returns nothing for every keyword query.
+            empty = dict(con.execute(
+                "SELECT d.doc_type, COUNT(*) FROM fts f JOIN docs d ON d.id = f.id "
+                "WHERE f.body = '' GROUP BY d.doc_type"))
         except Exception as e:                       # noqa: BLE001
             return {"reachable": False, "checked_at": None,
                     "detail": f"{type(e).__name__}: {e}"}
-        return {"reachable": n > 0, "checked_at": None,
-                "detail": f"{n} document(s) indexed" if n else
-                          "index is EMPTY — content_roots may be misconfigured"}
+        if not n:
+            return {"reachable": False, "checked_at": None,
+                    "detail": "index is EMPTY — content_roots may be misconfigured"}
+        detail = f"{n} document(s) indexed"
+        problems = {}
+        for dt, cnt in empty.items():
+            total = con.execute("SELECT COUNT(*) FROM docs WHERE doc_type = ?",
+                                (dt,)).fetchone()[0]
+            # Some documents legitimately have no body (a stub, a metadata-only record).
+            # A doc_type where ALL of them are empty is a configuration fault.
+            if total and cnt == total:
+                problems[dt] = cnt
+        # Only warn for doc_types someone CONFIGURED index_headings for. An
+        # unconfigured doc_type with no body is the corpus's own authoring choice --
+        # `external_reference` is summary-by-policy and deliberately has no
+        # "## Full text", and it stays findable through the title/citation/tags
+        # columns. Warning on that trains an operator to ignore the message, which
+        # costs more than the case it catches.
+        configured = set(getattr(self.config, "index_headings", None) or {})
+        problems = {dt: c for dt, c in problems.items() if dt in configured}
+        if problems:
+            detail += (f" — WARNING: index_headings is configured for doc_type "
+                       f"{sorted(problems)}, but EVERY one of those "
+                       f"{sum(problems.values())} document(s) indexed with empty "
+                       f"searchable text. The configured headings almost certainly do "
+                       f"not match the '## ' headings these documents actually use.")
+        return {"reachable": True, "checked_at": None, "detail": detail,
+                "empty_body_by_doc_type": problems}
