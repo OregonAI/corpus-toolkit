@@ -9,8 +9,12 @@ on:
   workflow_call:
     inputs:
       toolkit-ref:
+        description: >-
+          corpus-toolkit tag to install. Set this explicitly to the same tag you pin in
+          `uses:` — they are separate knobs and drift silently otherwise, because `uses:`
+          selects the WORKFLOW FILE while this selects the CODE it runs.
         type: string
-        default: v1.0.5
+        default: v1.4.0
       jobs:
         description: worker processes for corpus-verify-provenance (empty = CLI auto-detects cpu_count)
         type: string
