@@ -44,3 +44,33 @@ def test_a_prefixed_mount_does_not_also_answer_at_the_bare_path():
     the failure mode this flag exists to prevent would pass every smoke test."""
     mounted = _mounted("/oregon-legislature/mcp")
     assert "/mcp" not in mounted, mounted
+
+
+def test_session_manager_captures_security_settings_only_once():
+    """The ordering bug that broke --public-hostname in v1.5.0.
+
+    FastMCP creates its session manager on the FIRST streamable_http_app() call and
+    captures settings.transport_security at that instant, caching it for the process.
+    v1.5.0 added a mount check that built the app BEFORE applying --public-hostname, so
+    the allow-list stayed localhost-only and every tunnelled request 421'd — while the
+    correct hostname sat unused in settings, making it invisible from the config.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    late = FastMCP("test")
+    late.settings.streamable_http_path = "/c/mcp"
+    late.streamable_http_app()                       # freezes the session manager
+    late.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True, allowed_hosts=["example.com"])
+    late.streamable_http_app()
+    assert "example.com" not in getattr(
+        late._session_manager.security_settings, "allowed_hosts", []), (
+        "SDK no longer caches security settings on first build — the ordering guard in "
+        "server.py can be simplified, but verify before removing it")
+
+    early = FastMCP("test")
+    early.settings.streamable_http_path = "/c/mcp"
+    early.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True, allowed_hosts=["example.com"])
+    early.streamable_http_app()
+    assert "example.com" in early._session_manager.security_settings.allowed_hosts
