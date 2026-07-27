@@ -181,6 +181,16 @@ def changed_content_files(config: CorpusConfig, base_ref: str | None = None):
                               capture_output=True, text=True)
 
     explicit_base = base_ref is not None
+    # Git's all-zero SHA is not a broken ref — it is its documented sentinel for "this
+    # push CREATED the ref". GitHub sends it as `github.event.before` on the first push
+    # to a new branch, which both shipped workflows pass straight to --changed. Treating
+    # it as unresolvable would fail CI on every new branch, so it means "no base commit
+    # exists", and the default base (merge-base with origin/main) is the right answer:
+    # validate what the branch adds. Distinct from a ref that was NAMED and is missing,
+    # which stays a hard error below.
+    if explicit_base and base_ref.strip() and set(base_ref.strip()) == {"0"}:
+        base_ref, explicit_base = None, False
+
     if base_ref is None:
         base_ref = "HEAD~1"
         mb = _git("merge-base", "origin/main", "HEAD")
