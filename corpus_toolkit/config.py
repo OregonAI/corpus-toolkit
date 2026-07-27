@@ -62,6 +62,10 @@ class CorpusConfig:
     snapshot_slice_module: str | None
     citation_module: str | None
     semantic_search_module: str | None
+    # Attr path to a RetrievalBackend factory, e.g. "src.odata_backend:ODataBackend".
+    # None = the built-in FileBackend (markdown + FTS). An API-archetype corpus
+    # supplies its own; see corpus_toolkit/mcp/backends.py.
+    retrieval_module: str | None
     issuing_body_registry: Path | None
     issuing_body_registry_key: str
     issuing_body_profiles: Path | None
@@ -197,6 +201,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         snapshot_slice_module=plugins.get("snapshot_slice_module"),
         citation_module=plugins.get("citation_module"),
         semantic_search_module=plugins.get("semantic_search_module"),
+        retrieval_module=plugins.get("retrieval_module"),
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
         issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),
