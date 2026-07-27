@@ -15,6 +15,21 @@
 # Do NOT call this from a corpus that already deploys Pages itself — two workflows
 # deploying to one Pages site will fight over the `pages` concurrency group.
 #
+# THE CALLER MUST GRANT PERMISSIONS. The `permissions:` block on the job below cannot
+# obtain anything the caller does not already have — a reusable workflow can only REDUCE
+# the caller's permissions, never escalate. With this org's read-only default token, a
+# caller that omits them fails with `startup_failure` and NO job, so there is no log to
+# read. Your caller needs:
+#
+#   permissions:
+#     contents: read
+#     pages: write
+#     id-token: write
+#
+# Pages must also be enabled on the calling repo with the workflow builder:
+#   gh api -X PUT repos/<org>/<repo>/pages -f build_type=workflow
+# GitHub auto-enables the legacy Jekyll builder, which fights an Actions deploy.
+#
 # Built at deploy time and never committed: a committed index is a generated file that can
 # silently fall behind its own corpus, and that failure shows up in someone ELSE's
 # repository.
