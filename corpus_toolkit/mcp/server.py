@@ -115,6 +115,13 @@ def main():
                     help="Host header to additionally allow (e.g. mcp.example.com) — "
                          "required behind a reverse proxy/tunnel that forwards a "
                          "different Host header than --host.")
+    ap.add_argument("--path", default="/mcp",
+                    help="URL path to mount the streamable-HTTP endpoint on (default "
+                         "/mcp). Set this when several corpora share one hostname behind "
+                         "a path-routing proxy: a Cloudflare Tunnel matches on path but "
+                         "does NOT strip it, so the server must mount at the same prefix "
+                         "the route matches (e.g. /oregon-legislature/mcp) or every "
+                         "request 404s.")
     args = ap.parse_args()
 
     config = config_mod.load(args.config)
@@ -123,6 +130,23 @@ def main():
     if args.http:
         mcp.settings.host = args.host
         mcp.settings.port = args.port
+        # Assert rather than assume. This is a settings field on the MCP SDK's FastMCP, and
+        # the SDK has been reshaping this area (FastMCP -> MCPServer; the mount has appeared
+        # as both a setting and a run() kwarg). If a future version stops honouring it, the
+        # server would start happily and serve at /mcp while the proxy routes /<corpus>/mcp
+        # — every request 404s with nothing in any log to explain it. Fail at startup instead.
+        if not hasattr(mcp.settings, "streamable_http_path"):
+            sys.exit("ERROR: this mcp SDK has no settings.streamable_http_path, so --path "
+                     "cannot be honoured. Pin an SDK that supports it, or drop --path and "
+                     "give this corpus its own hostname.")
+        mcp.settings.streamable_http_path = args.path
+        mounted = [getattr(r, "path", None) for r in mcp.streamable_http_app().routes]
+        if args.path not in mounted:
+            sys.exit(f"ERROR: asked to mount at {args.path!r} but the app exposes {mounted!r}. "
+                     f"Refusing to start: behind a path-routing proxy this would 404 every "
+                     f"request with no other symptom.")
+        print(f"[corpus-mcp] {config.id}: serving streamable-http at {args.path}",
+              file=sys.stderr, flush=True)
         if args.public_hostname:
             from mcp.server.transport_security import TransportSecuritySettings
             mcp.settings.transport_security = TransportSecuritySettings(
