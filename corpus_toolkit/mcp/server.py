@@ -13,6 +13,8 @@ Requires the `mcp` SDK: `pip install corpus-toolkit[mcp]`. The query engine
 itself (framework.py) is stdlib-only and can be exercised without it."""
 import argparse
 
+import sys
+
 from mcp.server.fastmcp import FastMCP
 
 from corpus_toolkit import config as config_mod
@@ -21,7 +23,16 @@ from corpus_toolkit.mcp.framework import CorpusFramework
 
 def build_server(config) -> FastMCP:
     fw = CorpusFramework(config)
-    fw.ensure_index()  # warm the FTS cache before serving
+    # Warm the backend and REPORT what it found. ensure_index() was called directly here,
+    # which (a) raised AttributeError for any backend without an FTS index, making the
+    # non-file archetypes this seam exists for unstartable, and (b) warmed the cache
+    # without ever looking at the result — so an empty or unsearchable corpus started
+    # cleanly and answered "no results" to everything.
+    _h = fw.backend.health()
+    print(f"[corpus-mcp] {config.id}: {_h.get('detail', '')}", file=sys.stderr)
+    if not _h.get("reachable"):
+        print("[corpus-mcp] WARNING: backend reports itself UNREACHABLE — the server "
+              "will start, but expect every query to return nothing.", file=sys.stderr)
     mcp = FastMCP(
         config.mcp_server_name,
         instructions=(

@@ -78,6 +78,18 @@ def generate(config, today: datetime.date) -> str:
     return "\n".join(lines) + "\n"
 
 
+_VOLATILE = __import__("re").compile(
+    r"(?m)^.*(generated|last updated|as of)\b.*$|\b\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}\S*)?\b",
+    __import__("re").I)
+
+
+def _comparable(text: str) -> str:
+    """STATUS.md with its volatile parts removed, so --check compares CONTENT.
+
+    Same approach index.py already uses for its own staleness gate."""
+    return _VOLATILE.sub("", text).strip()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True, help="path to _meta/corpus.yml")
@@ -94,11 +106,20 @@ def main():
     if args.check:
         # freshness table would always differ by generation date; compare doc-count
         # section only, which is the part CI can meaningfully gate on.
+        # REGENERATE and compare, rather than checking for a marker string. The old
+        # test — "does the file contain '## Documents by type'?" — could not fail: a
+        # file listing 0 documents and dated 1970 passed, as did one whose counts were
+        # months out of date. A gate that cannot fail is worse than no gate, because it
+        # reads as coverage. Generation timestamps are excluded from the comparison,
+        # since those legitimately differ on every run.
         current = out_path.read_text() if out_path.is_file() else ""
-        if "## Documents by type" not in current:
-            print(f"{args.output} is missing or stale — run corpus-generate-status")
+        if not current:
+            print(f"{args.output} is missing — run corpus-generate-status")
             sys.exit(1)
-        print(f"{args.output} present.")
+        if _comparable(current) != _comparable(content):
+            print(f"{args.output} is STALE — regenerate with corpus-generate-status")
+            sys.exit(1)
+        print(f"{args.output} is current.")
         return
 
     out_path.write_text(content)
