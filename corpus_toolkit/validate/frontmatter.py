@@ -112,6 +112,24 @@ def _relationship_findings(paths, universe, config):
     return out
 
 
+SCHEMA_NAME = "document.frontmatter.v1.schema.json"
+
+
+def bundled_schema() -> dict:
+    """The frontmatter schema shipped inside this package.
+
+    It lives here rather than at the repo root so that `pip install corpus-toolkit` is
+    enough to validate a corpus. Previously the only copy was reachable at
+    `.toolkit/schemas/...`, a path created solely by the reusable workflows' second
+    checkout — so every command in every corpus's CONTRIBUTING/AGENTS docs was unrunnable
+    for an actual contributor, and the definition-of-done for a content PR could only be
+    met by pushing and waiting for CI.
+    """
+    from importlib.resources import files
+    return json.loads(files("corpus_toolkit").joinpath("schemas", SCHEMA_NAME)
+                      .read_text(encoding="utf-8"))
+
+
 def _graph_node_ids(config):
     """All document ids known to the (CI-fresh) authority graph — a fast corpus-wide
     universe for relationship resolution without re-parsing every frontmatter."""
@@ -208,8 +226,9 @@ def _run_relationships_only(config, paths, r):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True, help="path to _meta/corpus.yml")
-    ap.add_argument("--schema", help="path to document.frontmatter.v1.schema.json "
-                    "(required unless --check-relationships)")
+    ap.add_argument("--schema", help="path to a frontmatter JSON schema. Defaults to the "
+                    "one bundled with this package, which is what CI validates against — "
+                    "pass this only to validate against a different schema.")
     ap.add_argument("--check-relationships", action="store_true",
                     help="run only the relationship-graph resolution check")
     ap.add_argument("--changed", nargs="?", const="", metavar="REF",
@@ -235,10 +254,7 @@ def main():
         _run_relationships_only(config, paths, r)
         return
 
-    if not args.schema:
-        ap.error("--schema is required unless --check-relationships is set")
-
-    doc_schema = json.loads(open(args.schema).read())
+    doc_schema = json.loads(open(args.schema).read()) if args.schema else bundled_schema()
     registry = _load_registry(config)
 
     docs = {}

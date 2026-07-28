@@ -44,13 +44,10 @@ jobs:
             pull_request)
               git fetch --no-tags origin "${{ github.base_ref }}"
               corpus-validate-frontmatter --config _meta/corpus.yml \
-                --schema .toolkit/schemas/document.frontmatter.v1.schema.json \
                 --changed "origin/${{ github.base_ref }}" $JOBS_ARG ;;
             push)
               corpus-validate-frontmatter --config _meta/corpus.yml \
-                --schema .toolkit/schemas/document.frontmatter.v1.schema.json \
                 --changed "${{ github.event.before }}" $JOBS_ARG ;;
             *)  # schedule / workflow_dispatch — full corpus
-              corpus-validate-frontmatter --config _meta/corpus.yml \
-                --schema .toolkit/schemas/document.frontmatter.v1.schema.json $JOBS_ARG ;;
+              corpus-validate-frontmatter --config _meta/corpus.yml $JOBS_ARG ;;
           esac

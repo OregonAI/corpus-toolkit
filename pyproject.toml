@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corpus-toolkit"
-version = "1.5.2"
+version = "1.5.3"
 description = "Shared validation, provenance, and MCP framework for the civic corpus platform"
 requires-python = ">=3.10"
 dependencies = [
@@ -27,3 +27,10 @@ corpus-mcp-serve = "corpus_toolkit.mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["corpus_toolkit*"]
+
+# The frontmatter schema ships INSIDE the package so `pip install corpus-toolkit` is
+# sufficient to validate a corpus. It used to live at the repo root, reachable only by
+# checking the toolkit out into .toolkit/ — which the reusable workflows do, but no
+# contributor does, so every documented local validation command was unrunnable.
+[tool.setuptools.package-data]
+corpus_toolkit = ["schemas/*.json"]

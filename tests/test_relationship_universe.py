@@ -91,3 +91,19 @@ def test_graph_is_preferred_when_present(corpus):
     universe = _resolution_universe(config, set())
     assert "from-graph" in universe
     assert "beta" not in universe, "graph present — should not have paid for a full scan"
+
+
+def test_bundled_schema_is_importable_without_a_toolkit_checkout():
+    """The schema must come from the INSTALLED package.
+
+    It used to exist only at the repo root, reachable at `.toolkit/schemas/...` — a path
+    created solely by the reusable workflows' second checkout. Every local validation
+    command in every corpus's docs pointed there, so none of them could be run by an actual
+    contributor, and `pip install corpus-toolkit` could not supply it either: packages.find
+    included only `corpus_toolkit*`, so `schemas/` shipped in neither the wheel nor as
+    package data.
+    """
+    from corpus_toolkit.validate.frontmatter import bundled_schema
+    s = bundled_schema()
+    assert s["properties"]["doc_type"]["enum"], s
+    assert "id" in s["properties"]
