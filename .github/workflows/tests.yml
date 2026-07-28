@@ -34,7 +34,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[test]"
+        # The mcp extra is a TEST dependency, not just a runtime one: test_mount_path.py
+        # imports mcp.server.fastmcp to prove --path actually moves the streamable-HTTP
+        # mount. Installing only .[test] made that module unimportable, and CI went red at
+        # v1.5.0 and stayed red through v1.5.3 while every release reported "N tests pass"
+        # from a laptop that happened to have mcp installed.
+        run: pip install -e ".[mcp,test]"
       - name: Run tests
         run: python -m pytest tests/ -q
 
