@@ -78,6 +78,34 @@ All relationship edges of a node grouped by type, including remote
 Implements both extension sets plus `join_lookup(document_id | dataset_key)`
 returning the mapped counterparts.
 
+## How the extensions above are implemented (toolkit >= 1.6.0)
+
+`corpus-mcp-serve` registers the tools common to every corpus. The extension
+sets on this page are corpus-specific by definition — only the corpus knows
+its datasets, its query dialect, and its joins — so it supplies them via
+`plugins.tools_module` in `corpus.yml`:
+
+```yaml
+plugins:
+  tools_module: "src.budget_tools:register"    # register(mcp, framework)
+```
+
+The callable runs after every built-in tool, so it can add tools but never
+silently replace one. It receives the live `CorpusFramework`, so a corpus tool
+reaches retrieval, the graph, and citation resolution without reimplementing
+them.
+
+Before 1.6.0 the built-in tools were a closed set, and the only way to add
+behaviour was to enrich `get_document` — which cannot express any of the
+signatures above, because `query_dataset` and `join_lookup(dataset_key)` are
+keyed on something that is not a document id.
+
+**A failure to load is fatal, deliberately.** Starting anyway would yield a
+server that answers every built-in call correctly while silently missing the
+tools the corpus exists to provide, and a caller cannot distinguish "this
+corpus has no `join_lookup`" from "`join_lookup` failed to load". Declaring
+the hook and registering nothing is likewise an error rather than a no-op.
+
 ## Response conventions (all tools)
 
 1. Every response carries `corpus`, `archetype`, and `authoritative_source`
