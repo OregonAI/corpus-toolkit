@@ -95,6 +95,35 @@ def build_server(config) -> FastMCP:
                 and what this corpus holds for it. Accepts a slug or name fragment."""
                 return fw.issuing_body_profile(slug_or_query)
 
+    # Corpus-specific tools, registered LAST so they see a fully-built server and cannot
+    # be shadowed by a built-in added later. The seam exists because the built-in seven
+    # are a closed set: a hybrid corpus needs tools keyed on a dataset rather than a
+    # document id, and there was no way to express that short of forking this file.
+    #
+    # A FAILURE HERE IS FATAL, DELIBERATELY. Catching the import and starting anyway
+    # would produce a server that looks healthy, answers every built-in call correctly,
+    # and is silently missing the tools the corpus was built to provide — the caller has
+    # no way to tell "this corpus has no join_lookup" from "join_lookup failed to load".
+    # Refusing to start is the only signal that reaches anyone.
+    if config.tools_module:
+        from corpus_toolkit.plugins import load_attr
+        # FastMCP.list_tools is a coroutine; the tool manager's is not. Using the sync one
+        # keeps this out of an event loop for what is only a before/after name diff.
+        def _tool_names():
+            return {t.name for t in mcp._tool_manager.list_tools()}
+
+        before = _tool_names()
+        register = load_attr(config.tools_module, config.root)
+        register(mcp, fw)
+        added = sorted(_tool_names() - before)
+        if not added:
+            raise RuntimeError(
+                f"plugins.tools_module '{config.tools_module}' registered no tools. "
+                f"Declaring the hook and adding nothing is almost certainly a mistake — "
+                f"remove the key, or register the tools it promises.")
+        print(f"[corpus-mcp] {config.id}: +{len(added)} corpus tool(s): "
+              f"{', '.join(added)}", file=sys.stderr)
+
     llms_txt_path = config.root / "llms.txt"
     if llms_txt_path.is_file():
         @mcp.resource("repo://llms.txt", name="Corpus index (llms.txt)",

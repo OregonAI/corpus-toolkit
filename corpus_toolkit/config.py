@@ -66,6 +66,16 @@ class CorpusConfig:
     # None = the built-in FileBackend (markdown + FTS). An API-archetype corpus
     # supplies its own; see corpus_toolkit/mcp/backends.py.
     retrieval_module: str | None
+    # Attr path to a callable registering CORPUS-SPECIFIC MCP tools, e.g.
+    # "src.budget_tools:register". Called as register(mcp, framework) after every
+    # built-in tool, so a corpus can add tools the shared contract cannot know about
+    # (dataset queries, join lookups) without forking the server. None = built-ins only.
+    #
+    # The seven built-in tools were previously the complete, closed set, which forced
+    # corpora to smuggle extra behaviour through get_document enrichment — workable for
+    # attaching data to a document, useless for a tool that takes a dataset key rather
+    # than a document id.
+    tools_module: str | None
     # doc_type -> ordered list of '## ' headings whose text feeds the searchable body
     # column. A doc_type ABSENT from this map keeps the historical behaviour exactly
     # ('## Full text', else '## Key provisions'), so an existing corpus that does not
@@ -261,6 +271,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         citation_module=plugins.get("citation_module"),
         semantic_search_module=plugins.get("semantic_search_module"),
         retrieval_module=plugins.get("retrieval_module"),
+        tools_module=plugins.get("tools_module"),
         index_headings=_validated_index_headings(raw.get("index_headings")),
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
         issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
