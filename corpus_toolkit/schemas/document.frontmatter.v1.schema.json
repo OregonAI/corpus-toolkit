@@ -57,6 +57,7 @@
       "additionalProperties": false
     },
     "joins": {
+      "description": "Hybrid-corpus joins between a document and rows of a live dataset. WHAT IS CHECKED, precisely, because this used to be shape-only and read as fully covered: this schema validates the SHAPE of each entry, and corpus-validate-frontmatter resolves each `document_id` against the corpus's document ids (dangling = error). NOTHING in the toolkit validates `{dataset, key}` — only the corpus knows what one of its dataset keys means or which rows it should select, so a corpus that ships joins MUST provide its own referential-integrity check (e.g. `python3 src/build_joins.py --check`) and wire it into the `generated` CI job. A join is what lets an agent state that this document relates to that spending; a join selecting zero rows answers nothing, and 'no relationship recorded' is indistinguishable from 'no relationship exists'.",
       "type": "array",
       "items": {
         "type": "object",

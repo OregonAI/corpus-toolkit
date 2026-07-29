@@ -180,3 +180,105 @@ in `tests/test_cross_corpus.py::TestBackwardCompatibility`).
 2. Add a `siblings:` entry per corpus you cite.
 3. Pass `corpus="<sibling id>"` on the schemes in your `citation_module`
    whose citations that sibling owns.
+
+## v1.7.0 — graph tools stop lying, and a tag starts meaning something
+
+Five defects found by a Product Operating Model baseline measurement of the
+platform on 2026-07-28 (corpus-toolkit#3–#8). Four of them share one shape —
+**code that reports success, or reports confidently, without having done its
+job** — which is why every fix here ships with a test that was run against the
+broken behaviour first.
+
+- [x] **`graph_neighbors` no longer raises on an external edge target**
+      (#4). `nodes[t]` assumed every edge target was a local node.
+      `oregon-records-retention` reports `n_edges: 440, n_edges_external: 440`
+      — every edge is an OAR citation held by a sibling — so the tool raised
+      `KeyError` for **every document in that corpus**, surfacing to the caller
+      as a tool error whose entire message was the citation string. A
+      non-local target is now `{citation, external: true}`, enriched to
+      `{id, title, doc_type, corpus, url, resolved_via}` through the same
+      sibling index `resolve_citation` already uses (one index load per tool
+      call, grouped per sibling — not one per edge), and marked
+      `sibling_unavailable` when the sibling cannot be consulted.
+      **`authority_chain` had the identical unguarded lookup** and raised the
+      same way whenever an `implements`/`implemented_by` edge crossed corpora,
+      which is precisely what a cross-corpus authority chain is; the issue
+      named only `graph_neighbors`.
+- [x] **The graph tools stop reporting a missing GRAPH as a missing
+      DOCUMENT** (#5). `graph()` degrades to `({}, {})` when `graph_path` is
+      absent, so `doc_id not in nodes` was true for every id in the corpus and
+      both tools answered `"no document with id X"` about documents the same
+      server was serving with full provenance. Three conditions are now
+      distinct: `no_graph` (the corpus has no graph), `not_in_graph` (the graph
+      is stale relative to the corpus — rebuild it), and the genuine
+      `"no document with id X"`. Reported via `_graph_lookup`, which consults
+      `backend.exists()` for the middle case exactly as `resolve_citation`
+      already did for the same class of false statement.
+
+      Considered and **rejected**: not registering the graph tools when
+      `graph_path` is absent. `graph_neighbors` is a mandatory core tool for
+      all archetypes and the contract says servers must not remove core tools;
+      an agent would get "no such tool" where the truthful answer is "no
+      relationships recorded". (`oregon-legislature/_meta/corpus.yml` asserts
+      these tools are "NOT OFFERED for this archetype" — that comment is
+      wrong and is filed against that repo.)
+- [x] **`corpus.authoritative_source`** (#6). New optional key in the
+      `corpus:` block, read by `config.py`, emitted on **every** object-shaped
+      response including errors. `get_document` still prefers the document's
+      own `source_url`, which answers the same question more precisely. A
+      corpus that declares none gets an explicit `null` plus a
+      `config_warning` on `corpus_overview` and a warning from
+      `corpus-validate-frontmatter` — an absent key would read as "the server
+      did not look". `search_corpus` cannot comply (it returns a bare list);
+      that is stated in the contract and tracked as #10 for v2.
+- [x] **`joins[].document_id` is resolved** (#3). The frontmatter schema
+      validated the *shape* of a `joins:` entry and nothing anywhere read it,
+      so a corpus could ship joins pointing at documents that do not exist with
+      every gate green. `corpus-validate-frontmatter` now resolves each
+      `document_id` against the same corpus-wide universe relationships use,
+      on both the full and `--check-relationships` paths. `{dataset, key}` is
+      explicitly **not** checked and cannot be — only the corpus knows what one
+      of its dataset keys means — and `docs/provenance-schema-v1.md` now says
+      so instead of claiming "CI checks referential integrity".
+- [x] **`docs/mcp-interface-contract.md` re-audited against the shipped
+      implementation** (#7). `agency_profile(agency)` was documented and has
+      never existed; `issuing_body_profile(slug_or_query)` is what ships, is
+      the term the whole platform uses (`issuing_body` frontmatter,
+      `issuing_body_registry` config, the `issuing_body` search filter), and is
+      the correct word — the SoS Archives Division and the Legislature issue
+      documents and are not agencies. **The contract was stale, not the
+      implementation.** Also corrected while there: `search_corpus`'s
+      documented `status`/`tags` filters do not exist (its real parameters are
+      `doc_type`, `issuing_body`, `limit`, `mode`); `get_document` takes a
+      `part` argument and pages documents over 50 KB; `corpus_overview`'s field
+      list was aspirational. Documentation-only, so still contract v1.
+- [x] **A release gate that drives a real corpus** (#8).
+      `.github/scripts/contract_smoke.py` instantiates `corpus-template`,
+      writes a verbatim document plus its snapshot, runs
+      `build_graph`/`validate-frontmatter`/`verify-provenance`/
+      `generate-index --check`, then builds the MCP server and **calls** every
+      mandatory core tool, asserting the answers. `.github/workflows/
+      release-gate.yml` runs it on every PR and push to main, and on a tag
+      deletes the tag if it fails — GitHub has no pre-tag hook, so the only
+      way a tag can mean something is a continuously verified main plus a
+      backstop that unpublishes a bad ref before four corpora pin it.
+
+      Verified by reintroducing each defect and watching the gate: #4's
+      `nodes[t]` reproduces the original error verbatim
+      (`Error executing tool graph_neighbors: 'OAR 166-300-0015'`), an
+      unregistered core tool, a search that silently returns nothing, and a
+      `get_document` that returns metadata without a body all fail it.
+
+### Adopting it in a corpus repo
+1. Bump both pins (`uses:` **and** `toolkit-ref:`) to `v1.7.0`.
+2. Add one line to `_meta/corpus.yml` under `corpus:`:
+   `authoritative_source: "<URL of the official text>"`. Until you do,
+   validation warns and `corpus_overview` carries `authoritative_source: null`
+   with a `config_warning`; nothing fails.
+3. If this corpus ships `joins:`, run `corpus-validate-frontmatter` locally
+   before bumping — a dangling `document_id` is now an **error**. `{dataset,
+   key}` integrity remains yours; wire your own `--check` into the `generated`
+   CI job.
+4. Nothing else changes. Graph tool responses gained fields
+   (`corpus`/`archetype`/`authoritative_source`, and `external`/`corpus`/`url`
+   on non-local neighbours) and lost none.

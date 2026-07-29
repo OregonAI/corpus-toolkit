@@ -52,6 +52,14 @@ class CorpusConfig:
     name: str
     jurisdiction: str
     archetype: str
+    # URL of the CORPUS-LEVEL authoritative source — the ORS/OAR landing page, the SoS
+    # Archives schedules page, the legislature's bill site. Required by
+    # docs/mcp-interface-contract.md response convention 1 and emitted on every MCP
+    # response. Optional here rather than required because four corpora already ship
+    # without one and a hard load failure would take their servers down on a pin bump;
+    # `corpus-validate-frontmatter` reports the omission instead, and corpus_overview
+    # says so on the response.
+    authoritative_source: str | None
     schema_version: int
     contract_version: int
     content_roots: list[ContentRoot]
@@ -259,6 +267,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         name=corpus.get("name", corpus.get("id", "")),
         jurisdiction=corpus.get("jurisdiction", ""),
         archetype=corpus.get("archetype", "document"),
+        authoritative_source=(corpus.get("authoritative_source") or "").strip() or None,
         schema_version=int(corpus.get("schema_version", 1)),
         contract_version=int(corpus.get("contract_version", 1)),
         content_roots=content_roots,
