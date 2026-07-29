@@ -194,6 +194,23 @@ class TestExternalEdgeTargets(GraphToolTestCase):
         self.assertEqual(got["sibling_unavailable"], "executive-regulatory-frameworks")
         self.assertIn("NOT evidence it is absent", got["note"])
 
+    def test_a_corpus_resolver_that_raises_does_not_break_the_tool(self):
+        """A scheme's `resolver` is corpus-supplied code. Before external targets were
+        resolved at all, a broken resolver could only break resolve_citation; now it is
+        reachable from the graph tools too, and it must not turn a corpus's own citation
+        bug back into the opaque tool failure this whole fix removed."""
+        cfg = self.corpus(edges=self.EXTERNAL_EDGE)
+        register_scheme("exploding", r"OAR", resolver=lambda m: 1 / 0,
+                        corpus="executive-regulatory-frameworks")
+
+        try:
+            out = self.framework(cfg).graph_neighbors("schedule-employment")
+        except Exception as e:                                   # noqa: BLE001
+            self.fail(f"a raising corpus resolver broke graph_neighbors: "
+                      f"{type(e).__name__}: {e}")
+        self.assertEqual(out["related"], [{"citation": "OAR 166-300-0015",
+                                           "external": True}])
+
     def test_local_targets_keep_their_historical_shape(self):
         cfg = self.corpus(
             extra_docs=[("schedule-parks", "Parks Records Schedule", "166-400")],
