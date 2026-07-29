@@ -181,10 +181,36 @@ the hook and registering nothing is likewise an error rather than a no-op.
    `corpus-validate-frontmatter` — an absent key would read as "the server
    did not look", which is not what happened.
 
-   **`search_corpus` is the one exception and cannot comply**: it returns a
-   bare JSON list of hits, which has nowhere to put corpus-level fields.
-   Wrapping it in an object is a response-shape change and therefore a v2
-   matter, not a v1 one. Tracked as corpus-toolkit#10.
+   **`search_corpus` is exempt, deliberately, and stays a bare JSON list.**
+   This convention was written as if it applied to every tool; it does not,
+   and the exemption is a design decision rather than a gap to close later.
+
+   A search result is a *list of hits*, and the MCP SDK already treats it as
+   one. Returning `list[dict]` produces a machine-readable output schema and
+   one content block per hit; returning a bare `dict` produces **neither** —
+   an unconstrained `dict` cannot be described, so the SDK emits no output
+   schema at all. Measured on both SDK majors:
+
+   | tool return | output schema | content blocks (40 hits) |
+   |---|---|---|
+   | `search_corpus -> list[dict]` | `{"result": [...]}` | 40, one per hit |
+   | any tool `-> dict` | **none** | 1 |
+
+   So wrapping the list in an object to satisfy this convention would make
+   the response *less* machine-readable, not more, and would collapse
+   per-hit content blocks into one opaque blob. The convention would be
+   satisfied in the JSON text and lost everywhere a client actually looks.
+
+   The cost of the exemption is real but small: a client fanning search out
+   across corpora must track which response came from which server. It
+   already must, because it chose which server to call.
+
+   **What this convention does NOT yet buy anywhere**: none of the
+   dict-returning tools declares an output schema either, so `corpus`,
+   `archetype` and `authoritative_source` are present in the response text
+   and invisible to schema-driven validation on every tool. That is the real
+   gap and it is tracked as corpus-toolkit#15 — additive, non-breaking, and
+   unrelated to response shape.
 2. Document content responses include the provenance block (source_url,
    retrieved, source_sha256, last_verified).
 3. Live-data responses include executed_query + executed_at.
