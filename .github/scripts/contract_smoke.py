@@ -246,11 +246,12 @@ def check_mcp_tools(dest: Path) -> None:
     entire lifetime of both graph bugs: graph_neighbors was registered, listed, and
     raised KeyError on every call in oregon-records-retention."""
     from corpus_toolkit import config as config_mod
+    from corpus_toolkit.mcp import _sdk
     from corpus_toolkit.mcp.server import build_server
 
     config = config_mod.load(dest / "_meta" / "corpus.yml")
     mcp = build_server(config)
-    listed = {t.name for t in mcp._tool_manager.list_tools()}
+    listed = _sdk.tool_names(mcp)
     say(f"  tools/list: {', '.join(sorted(listed))}")
 
     missing = [t for t in MANDATORY_CORE_TOOLS if t not in listed]
@@ -273,7 +274,7 @@ def check_mcp_tools(dest: Path) -> None:
         if name not in listed:
             continue
         try:
-            results[name] = asyncio.run(mcp._tool_manager.call_tool(name, args))
+            results[name] = asyncio.run(_sdk.call_tool(mcp, name, args))
         except Exception as e:                                   # noqa: BLE001
             # Record and continue. A raising tool must not abort the run before the
             # others report — that turns one broken tool into an unreadable crash and

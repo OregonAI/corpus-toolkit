@@ -28,6 +28,16 @@ jobs:
         # the corpus workflows actually pin. A corpus on 3.10 must not be broken by
         # syntax only 3.12 accepts.
         python-version: ["3.10", "3.12"]
+        # BOTH SDK MAJORS, because a corpus pins a toolkit TAG and never pins the SDK —
+        # so the SDK floats at image-build time however carefully the toolkit pin is
+        # managed. That is exactly how mcp 2.0.0 broke every corpus image: same toolkit,
+        # different SDK, unstartable server.
+        #
+        # Ranges, not exact pins, deliberately. `>=1.28,<2` resolves to the newest 1.x
+        # available on the day CI runs, so the next breaking change WITHIN a major shows
+        # up here as a red build instead of in a deploy. An exact `==1.28.1` would make
+        # this matrix a museum piece that can never discover anything new.
+        mcp-spec: ["mcp[cli]>=1.28,<2", "mcp[cli]>=2,<3"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,11 +45,23 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         # The mcp extra is a TEST dependency, not just a runtime one: test_mount_path.py
-        # imports mcp.server.fastmcp to prove --path actually moves the streamable-HTTP
-        # mount. Installing only .[test] made that module unimportable, and CI went red at
-        # v1.5.0 and stayed red through v1.5.3 while every release reported "N tests pass"
-        # from a laptop that happened to have mcp installed.
-        run: pip install -e ".[mcp,test]"
+        # exercises the streamable-HTTP mount for real. Installing only .[test] made that
+        # module unimportable, and CI went red at v1.5.0 and stayed red through v1.5.3
+        # while every release reported "N tests pass" from a laptop that happened to have
+        # mcp installed.
+        run: pip install -e ".[mcp,test]" "${{ matrix.mcp-spec }}"
+      - name: Report which SDK is actually under test
+        # Not decoration. The whole matrix is worthless if both legs silently resolve to
+        # the same SDK — the suite would pass twice and prove one thing. Print the major
+        # the compat seam SELECTED, and fail if it disagrees with the leg's intent.
+        run: |
+          set -euo pipefail
+          want=$(case "${{ matrix.mcp-spec }}" in *'>=2'*) echo 2;; *) echo 1;; esac)
+          got=$(python -c "from corpus_toolkit.mcp import _sdk; print(_sdk.SDK_MAJOR)")
+          ver=$(python -c "from corpus_toolkit.mcp import _sdk; print(_sdk.sdk_version())")
+          cls=$(python -c "from corpus_toolkit.mcp import _sdk; print(_sdk.Server.__module__)")
+          echo "mcp $ver -> SDK_MAJOR $got via $cls (wanted major $want)"
+          [ "$got" = "$want" ] || { echo "::error::matrix leg '${{ matrix.mcp-spec }}' resolved to SDK major $got, not $want"; exit 1; }
       - name: Run tests
         run: python -m pytest tests/ -q
 
@@ -49,17 +71,28 @@ jobs:
   # backend.health()), where the old call raised AttributeError for any non-file backend.
   # This is a smoke test, not coverage: it proves the module imports and the console
   # scripts resolve under a real install.
+  #
+  # ALSO MATRIXED OVER THE SDK MAJOR, and this job is the one that would have caught mcp
+  # 2.0.0 on day one: `import corpus_toolkit.mcp.server` is precisely what stopped
+  # working, and precisely what a corpus container does at startup. It is the cheapest
+  # check in the repo and the one with the highest yield.
   entrypoints:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mcp-spec: ["mcp[cli]>=1.28,<2", "mcp[cli]>=2,<3"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install with the mcp extra
-        run: pip install -e ".[mcp,test]"
+        run: pip install -e ".[mcp,test]" "${{ matrix.mcp-spec }}"
       - name: Import the MCP server module
-        run: python -c "import corpus_toolkit.mcp.server; print('server module imports')"
+        run: |
+          python -c "import corpus_toolkit.mcp.server; print('server module imports')"
+          python -c "from corpus_toolkit.mcp import _sdk; print('mcp', _sdk.sdk_version(), 'major', _sdk.SDK_MAJOR)"
       - name: Every console script resolves
         run: |
           set -euo pipefail

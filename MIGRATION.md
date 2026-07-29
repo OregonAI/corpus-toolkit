@@ -282,3 +282,83 @@ broken behaviour first.
 4. Nothing else changes. Graph tool responses gained fields
    (`corpus`/`archetype`/`authoritative_source`, and `external`/`corpus`/`url`
    on non-local neighbours) and lost none.
+
+## v1.8.0 — survive the MCP SDK's major version, in both directions
+
+corpus-toolkit#13. The `mcp` extra was an unbounded `mcp[cli]`, so it floated onto
+**mcp 2.0.0** the day that shipped — and 2.0.0 deleted `mcp.server.fastmcp` outright
+(no alias, no deprecation shim, the name does not appear in the wheel). `server.py`
+imported `FastMCP` at module scope.
+
+**Where the failure landed is the point.** A corpus image does:
+
+```dockerfile
+RUN pip install --no-cache-dir -r requirements.txt        # -> mcp 2.0.0
+RUN python3 -c "...corpus_toolkit.mcp.framework import CorpusFramework...ensure_index()"
+```
+
+The build's own smoke step imports `framework`, which is stdlib-only and imports fine on
+both majors. The container runs `server`, which did not. So **the image built green and
+could not start** — measured, not inferred, by installing exactly what
+`oregon-budget/requirements.txt` pins:
+
+```
+$ pip install --target ./v160 "corpus-toolkit[mcp] @ git+...@v1.6.0"
+mcp resolved to: 2.0.0
+$ python3 -c "from corpus_toolkit.mcp.framework import CorpusFramework"   # exit 0
+$ python3 -c "import corpus_toolkit.mcp.server"                            # exit 1
+ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+```
+
+- [x] **`corpus_toolkit/mcp/_sdk.py`** — the one place that knows which SDK major is
+      installed. `server.py` and `.github/scripts/contract_smoke.py` go through it and
+      contain no version branching of their own.
+- [x] **Both majors supported, not one picked.** A corpus pins a toolkit TAG and never
+      pins the SDK, so the SDK floats at image-build time however carefully the toolkit
+      pin is managed — which is exactly how this happened. Supporting one major and
+      bounding the other just moves the cliff to `mcp` 3.0.
+- [x] **`mcp = ["mcp[cli]>=1.28,<3"]`** — the bound is exactly what has been run, no
+      wider. Verified against **1.28.1 and 2.0.0** by running the full suite and the
+      release gate under each, not by reading a changelog.
+- [x] **CI matrixed over `mcp-spec`** in `tests.yml` (both `pytest` and `entrypoints`)
+      and in `release-gate.yml`. Ranges (`>=1.28,<2`, `>=2,<3`) rather than exact pins,
+      so the next breaking change *within* a major surfaces as a red build instead of a
+      crash loop. The `pytest` leg asserts the SDK major it actually resolved matches the
+      one the leg intended — two legs silently resolving to the same SDK would pass twice
+      and prove once.
+- [x] **The startup guards now assert behaviour, not SDK internals.** `main()` checked
+      `hasattr(settings, "streamable_http_path")`; 2.0 moved the mount to a `run()` kwarg
+      and deleted the setting, so that guard would have refused to start on a perfectly
+      working SDK while a genuinely wrong mount went undetected. It now builds the app and
+      asks whether it answers at the routed path.
+- [x] **One `http_kwargs` dict feeds both the verification build and `run()`.** Not
+      tidiness: on 2.x `run()` constructs its own app from its own arguments, so a mount
+      verified from a separately-argued build would be a check on a different object than
+      the one served.
+
+### What actually differs between the majors (measured)
+
+| | 1.28.1 | 2.0.0 |
+|---|---|---|
+| class | `mcp.server.fastmcp.FastMCP` | `mcp.server.mcpserver.MCPServer` |
+| `@x.tool()`, `@x.resource()` | identical | identical |
+| `_tool_manager.list_tools()` | sync | sync |
+| `_tool_manager.call_tool()` | `context` optional | `context` **required** |
+| host/port/path/security | mutable `settings.*` | kwargs on `run()`/`streamable_http_app()` |
+| session manager | `_session_manager` | `session_manager` (public) |
+| `TransportSecuritySettings` | `mcp.server.transport_security` | same path |
+| `requires-python` | `>=3.10` | `>=3.10` |
+
+The settings→kwargs move is an improvement: on 1.x the session manager captured
+`settings.transport_security` at the FIRST `streamable_http_app()` call and cached it for
+the process, so anything set afterwards was silently ignored — the bug that made every
+tunnelled request 421 in v1.5.0. On 2.0 each build honours its own kwargs (verified: two
+builds with different settings each take effect). The guard stays regardless; its purpose
+was never to describe one SDK's caching.
+
+### Adopting it in a corpus repo
+1. Bump both pins to `v1.8.0`. Nothing else changes — no config, no response shape.
+2. **If your image was built from a toolkit tag earlier than v1.7.0 and cannot start**,
+   this is why. Either bump the pin, or add `mcp<2` to the corpus's own
+   `requirements.txt` as an immediate mitigation — an old tag's unbounded dependency
+   cannot be fixed retroactively from here.

@@ -10,18 +10,25 @@ Oregon-specific tool, wording, or citation logic here).
   corpus-mcp-serve --config _meta/corpus.yml --http --public-hostname mcp.example.com
 
 Requires the `mcp` SDK: `pip install corpus-toolkit[mcp]`. The query engine
-itself (framework.py) is stdlib-only and can be exercised without it."""
+itself (framework.py) is stdlib-only and can be exercised without it.
+
+Works against mcp 1.x AND 2.x. The SDK class moved (`FastMCP` -> `MCPServer`) and 2.0.0
+deleted the old module outright, so everything version-dependent is behind
+`corpus_toolkit.mcp._sdk` — read that file's header before changing anything here. The
+corpus pins a toolkit tag but never pins the SDK, so the SDK floats at image-build time
+no matter how carefully the pin is managed; spanning both majors is the only thing that
+survives that."""
 import argparse
 
 import sys
 
-from mcp.server.fastmcp import FastMCP
+from corpus_toolkit.mcp import _sdk
 
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.mcp.framework import CorpusFramework
 
 
-def build_server(config) -> FastMCP:
+def build_server(config):
     fw = CorpusFramework(config)
     # Warm the backend and REPORT what it found. ensure_index() was called directly here,
     # which (a) raised AttributeError for any backend without an FTS index, making the
@@ -33,7 +40,10 @@ def build_server(config) -> FastMCP:
     if not _h.get("reachable"):
         print("[corpus-mcp] WARNING: backend reports itself UNREACHABLE — the server "
               "will start, but expect every query to return nothing.", file=sys.stderr)
-    mcp = FastMCP(
+    # Log the SDK. The failure that motivated the compat seam is invisible in the
+    # toolkit's own version number: same toolkit, different SDK major, unstartable server.
+    _sdk.report()
+    mcp = _sdk.Server(
         config.mcp_server_name,
         instructions=(
             f"Non-authoritative knowledge base for {config.name} ({config.jurisdiction}, "
@@ -107,15 +117,10 @@ def build_server(config) -> FastMCP:
     # Refusing to start is the only signal that reaches anyone.
     if config.tools_module:
         from corpus_toolkit.plugins import load_attr
-        # FastMCP.list_tools is a coroutine; the tool manager's is not. Using the sync one
-        # keeps this out of an event loop for what is only a before/after name diff.
-        def _tool_names():
-            return {t.name for t in mcp._tool_manager.list_tools()}
-
-        before = _tool_names()
+        before = _sdk.tool_names(mcp)
         register = load_attr(config.tools_module, config.root)
         register(mcp, fw)
-        added = sorted(_tool_names() - before)
+        added = sorted(_sdk.tool_names(mcp) - before)
         if not added:
             raise RuntimeError(
                 f"plugins.tools_module '{config.tools_module}' registered no tools. "
@@ -157,45 +162,45 @@ def main():
     mcp = build_server(config)
 
     if args.http:
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-        # Assert rather than assume. This is a settings field on the MCP SDK's FastMCP, and
-        # the SDK has been reshaping this area (FastMCP -> MCPServer; the mount has appeared
-        # as both a setting and a run() kwarg). If a future version stops honouring it, the
-        # server would start happily and serve at /mcp while the proxy routes /<corpus>/mcp
-        # — every request 404s with nothing in any log to explain it. Fail at startup instead.
-        if not hasattr(mcp.settings, "streamable_http_path"):
-            sys.exit("ERROR: this mcp SDK has no settings.streamable_http_path, so --path "
-                     "cannot be honoured. Pin an SDK that supports it, or drop --path and "
-                     "give this corpus its own hostname.")
-        mcp.settings.streamable_http_path = args.path
-
-        # EVERY setting must be applied before the first streamable_http_app() call below.
-        # That call creates FastMCP's session manager, which captures
-        # settings.transport_security AT THAT MOMENT and is then cached for the process —
-        # so anything set afterwards is silently ignored. Setting --public-hostname after
-        # the mount check left the allow-list at localhost-only and made every tunnelled
-        # request 421, with the correct value sitting unused in settings.
+        security = None
         if args.public_hostname:
-            from mcp.server.transport_security import TransportSecuritySettings
-            mcp.settings.transport_security = TransportSecuritySettings(
+            security = _sdk.TransportSecuritySettings(
                 allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*",
-                              args.public_hostname],
+                               args.public_hostname],
                 allowed_origins=["http://127.0.0.1:*", "http://localhost:*",
                                  "http://[::1]:*", f"https://{args.public_hostname}"],
             )
+        # ONE dict, used for the verification build AND for run(). This is not tidiness.
+        # On mcp 2.x, run() constructs its own app from its own arguments, so verifying a
+        # separately-argued build would be a check on a different object than the one
+        # served — it would pass while the served app mounted somewhere else. Deriving
+        # both from the same dict removes the possibility.
+        http = _sdk.http_kwargs(host=args.host, port=args.port, path=args.path,
+                                transport_security=security)
 
-        # First build: validates the mount AND freezes the settings above into the session
-        # manager that run() will reuse.
-        mounted = [getattr(r, "path", None) for r in mcp.streamable_http_app().routes]
+        # Assert rather than assume, and assert on BEHAVIOUR rather than on the SDK's
+        # internals. The previous version checked `hasattr(settings,
+        # "streamable_http_path")`, which was a check on a 1.x implementation detail: mcp
+        # 2.0 moved the mount to a run() kwarg and deleted the setting, so that guard
+        # would have exited on a perfectly working SDK while a genuinely broken mount
+        # went undetected. What actually matters is whether the app answers at the path
+        # the proxy routes — a Cloudflare Tunnel matches on path but does NOT strip it,
+        # so a wrong mount 404s every request with nothing in any log to explain it.
+        app = _sdk.build_http_app(mcp, http)
+        mounted = [getattr(r, "path", None) for r in app.routes]
         if args.path not in mounted:
             sys.exit(f"ERROR: asked to mount at {args.path!r} but the app exposes {mounted!r}. "
                      f"Refusing to start: behind a path-routing proxy this would 404 every "
                      f"request with no other symptom.")
         # Report what the session manager actually captured, not what was requested — the
-        # two diverged once already.
-        _sec = getattr(mcp._session_manager, "security_settings", None)
-        _hosts = getattr(_sec, "allowed_hosts", []) if _sec else []
+        # two diverged once already. On 1.x the manager froze settings.transport_security
+        # at the first app build and silently ignored anything set afterwards, which left
+        # the allow-list at localhost-only and made every tunnelled request 421 while the
+        # correct hostname sat unused in config. 2.x honours each build's own kwargs, so
+        # the trap is gone there — the check stays anyway, because its purpose was never
+        # to describe one SDK's caching but to refuse to serve a configuration that was
+        # dropped somewhere between here and the socket.
+        _hosts = _sdk.session_allowed_hosts(mcp)
         if args.public_hostname and args.public_hostname not in _hosts:
             sys.exit(f"ERROR: --public-hostname {args.public_hostname!r} did not reach the "
                      f"session manager (allowed_hosts={_hosts!r}). Refusing to start: every "
@@ -203,7 +208,7 @@ def main():
         print(f"[corpus-mcp] {config.id}: serving streamable-http at {args.path} "
               f"(allowed hosts: {', '.join(_hosts) or 'defaults'})",
               file=sys.stderr, flush=True)
-        mcp.run(transport="streamable-http")
+        _sdk.run_http(mcp, http)
     else:
         mcp.run()
 

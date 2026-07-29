@@ -38,6 +38,14 @@ jobs:
   corpus-end-to-end:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both SDK majors. A tag is consumed by corpus images that resolve the SDK fresh
+        # at build time, so "this tag serves the contract" is only true if it is true on
+        # whichever SDK pip happens to hand them. mcp 2.0.0 made that concrete: same
+        # toolkit tag, image builds green, container will not start.
+        mcp-spec: ["mcp[cli]>=1.28,<2", "mcp[cli]>=2,<3"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,9 +66,11 @@ jobs:
       # would skip step 5 entirely — which is the only step that would have caught the
       # two graph bugs.
       - name: Install the candidate ref
-        run: pip install -e "./toolkit[mcp,test]"
+        run: pip install -e "./toolkit[mcp,test]" "${{ matrix.mcp-spec }}"
       - name: A real corpus must validate and serve every mandatory contract tool
-        run: python3 toolkit/.github/scripts/contract_smoke.py --template "$PWD/template"
+        run: |
+          python3 -c "from corpus_toolkit.mcp import _sdk; print('mcp', _sdk.sdk_version(), 'major', _sdk.SDK_MAJOR)"
+          python3 toolkit/.github/scripts/contract_smoke.py --template "$PWD/template"
 
   # Only on a tag, and only if the gate above failed. GitHub cannot refuse a tag; it can
   # unpublish one. A red tag left in place is worse than no tag at all — `uses:
