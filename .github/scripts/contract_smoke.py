@@ -70,6 +70,9 @@ PLACEHOLDERS = {
     "DOC_TYPE": "schedule",
     "CORPUS_SCOPE_DESCRIPTION": "a scratch corpus built by the toolkit release gate",
     "OWNER-PLACEHOLDER": "OregonAI/maintainers",
+    # Must be a real URL: corpus-validate-frontmatter errors on a non-URL here, which is
+    # itself something worth exercising on every release.
+    "AUTHORITATIVE_SOURCE_URL": "https://sos.oregon.gov/archives/records/Pages/default.aspx",
 }
 
 
