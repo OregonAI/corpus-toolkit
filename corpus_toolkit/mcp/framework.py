@@ -342,7 +342,15 @@ class CorpusFramework:
         """Annotate external neighbour records in place with a sibling-corpus hit."""
         by_sibling: dict[str, list[tuple[dict, list[str]]]] = {}
         for rec in recs:
-            _, sib_id, cands, _ = self._match_schemes(rec["citation"])
+            # Guarded HERE and not inside _match_schemes, so resolve_citation keeps its
+            # exact behaviour. A scheme's `resolver` is corpus-supplied code; letting it
+            # raise through a graph tool would turn a corpus's own citation bug into the
+            # same opaque "tool failed" this method was written to eliminate — and for
+            # neighbours, enrichment is a bonus. The edge is still reported as external.
+            try:
+                _, sib_id, cands, _ = self._match_schemes(rec["citation"])
+            except Exception:                              # noqa: BLE001
+                continue
             if sib_id and cands:
                 by_sibling.setdefault(sib_id, []).append((rec, cands))
         for sib_id, items in by_sibling.items():
