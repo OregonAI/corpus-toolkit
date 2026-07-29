@@ -40,7 +40,26 @@ requiredness rules expressed per archetype. Machine form:
   replaced by `last_verified` against the live schema; the CI schema-drift
   job updates a `live_schema_hash` field.
 - **Hybrid** join files use `doc_type: dataset_doc` plus a `joins:` list of
-  `{document_id, dataset, key}` entries; CI checks referential integrity.
+  `{document_id, dataset, key}` entries.
+
+  **Referential integrity is split, and only half of it is the toolkit's.**
+  This page previously said "CI checks referential integrity" full stop,
+  which was not true of any half: the field was shape-validated only and
+  nothing read it, so a corpus could ship joins pointing at documents that
+  do not exist with every gate green (corpus-toolkit#3). What holds now:
+
+  | part | checked by | on failure |
+  |---|---|---|
+  | entry shape `{document_id, dataset, key}` | the frontmatter JSON schema | error |
+  | `document_id` resolves to a document in this corpus | `corpus-validate-frontmatter` | error |
+  | `{dataset, key}` selects at least one row | **the corpus, not the toolkit** | — |
+
+  The last row cannot move into the toolkit. Only the corpus knows what one
+  of its dataset keys means, so a corpus shipping `joins:` owes itself a
+  `--check` of its own (`oregon-budget`'s is `src/build_joins.py --check`)
+  wired into the `generated` CI job. Without it a join whose key matches
+  zero rows is silent — and "no relationship recorded" reads exactly like
+  "no relationship exists".
 
 ## Versioning policy
 
