@@ -1,0 +1,87 @@
+name: release-gate
+
+# A toolkit tag must mean something, because every corpus pins one.
+#
+# Measured across the org on 2026-07-28, corpus-toolkit had the WORST CI pass rate of the
+# six repos (36.8% over 19 runs, against 98.0% for executive-regulatory-frameworks) while
+# being the only repo all the others depend on. A defect here is not one bug: it is one
+# bug per corpus, found N times and fixed N times. corpus-toolkit#1 is titled "CI has
+# been red since v1.5.0" — a tag was cut while CI was failing and downstream found out.
+#
+# `tests` covers the toolkit in isolation and passes. Nothing checked that a tag drives a
+# REAL corpus, and that gap has a measured cost: both graph defects filed on 2026-07-28
+# (#4 external edge targets raising KeyError on every document of a cross-corpus corpus,
+# #5 the false "no document with id X") were live on four servers with 73 unit tests
+# green, because no test ever built a corpus and called a tool. contract_smoke.py does.
+#
+# WHY IT ALSO RUNS ON PR AND MAIN, not only on tags. GitHub has no pre-tag hook: by the
+# time a workflow can run, the ref already exists and a downstream `uses: ...@vX.Y.Z` can
+# already resolve it. The only way to make a tag trustworthy is to keep main
+# continuously verified so that tagging a green main is safe. The tag job below is the
+# backstop for the case where that is not true, and it DELETES the offending tag rather
+# than leaving a red one for four corpora to pin.
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  corpus-end-to-end:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: toolkit
+      # The template is the corpus every new corpus starts as, so verifying against it
+      # verifies the shape all of them share. Its own default branch, deliberately: a
+      # toolkit release must work against the template as it stands today, not against
+      # some pinned historical copy that would let the two drift apart unnoticed.
+      - uses: actions/checkout@v4
+        with:
+          repository: OregonAI/corpus-template
+          path: template
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The mcp extra is not optional here: contract_smoke.py builds the real FastMCP
+      # server and calls tools through the SDK's tool manager. Installing without it
+      # would skip step 5 entirely — which is the only step that would have caught the
+      # two graph bugs.
+      - name: Install the candidate ref
+        run: pip install -e "./toolkit[mcp,test]"
+      - name: A real corpus must validate and serve every mandatory contract tool
+        run: python3 toolkit/.github/scripts/contract_smoke.py --template "$PWD/template"
+
+  # Only on a tag, and only if the gate above failed. GitHub cannot refuse a tag; it can
+  # unpublish one. A red tag left in place is worse than no tag at all — `uses:
+  # OregonAI/corpus-toolkit/...@v1.7.0` resolves it silently and four corpora inherit the
+  # defect, which is exactly the history this file is trying to end.
+  unpublish-a-failed-tag:
+    needs: corpus-end-to-end
+    if: always() && failure() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete the tag the gate rejected
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          echo "::error::release gate FAILED for $TAG — deleting the tag so no corpus can"
+          echo "::error::pin a ref that does not serve the contract. Fix main, re-tag."
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}"
+          echo "deleted tag $TAG"
+          exit 1

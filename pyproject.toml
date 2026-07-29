@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corpus-toolkit"
-version = "1.6.0"
+version = "1.7.0"
 description = "Shared validation, provenance, and MCP framework for the civic corpus platform"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,7 +13,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp[cli]"]
+# UPPER BOUND, not decoration. This was unbounded, so it floated onto mcp 2.0.0 the day
+# that shipped and took `mcp.server.fastmcp` with it -- `corpus_toolkit/mcp/server.py`
+# imports FastMCP at module scope, so the server module stopped importing, and CI on main
+# went red with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` on a commit
+# that touched no Python at all. server.py's own comment predicted exactly this ("the SDK
+# has been reshaping this area (FastMCP -> MCPServer)"); the dependency did not say so.
+#
+# A floating MAJOR version on the one package every corpus's MCP server is built from is
+# the shared layer betting that nobody upstream ever makes a breaking change. Migrating to
+# the 2.0 API is real work with a real design in it, not something a `pip install` should
+# perform silently on four production servers. Tracked in #13.
+mcp = ["mcp[cli]<2"]
 test = ["pytest"]
 
 [project.scripts]

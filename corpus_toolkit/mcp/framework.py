@@ -185,6 +185,22 @@ class CorpusFramework:
 
     # ---------- graph ----------
 
+    def _envelope(self) -> dict:
+        """The three fields docs/mcp-interface-contract.md, response convention 1,
+        requires on every response. Assembled in ONE place because it kept being
+        assembled in several and they disagreed: `corpus_overview` carried
+        corpus/archetype but never `authoritative_source`, so all four live corpora
+        answered the "call this first" tool without ever telling the agent where the
+        authoritative text is — while the same response's disclaimer instructed it to
+        "verify at source".
+
+        `authoritative_source` is None when a corpus has not declared one. Emitting the
+        key as null is deliberate: an absent key reads as "the server did not look",
+        a null one as "this corpus declared none", and only the second is true."""
+        return {"corpus": self.config.id,
+                "archetype": self.config.archetype,
+                "authoritative_source": self.config.authoritative_source}
+
     def graph(self):
         if self._graph_cache is None:
             if not self.config.graph_path.is_file():
@@ -197,6 +213,162 @@ class CorpusFramework:
                     edges.setdefault(e["from"], {}).setdefault(e["type"], []).append(e["to"])
                 self._graph_cache = (nodes, edges)
         return self._graph_cache
+
+    def _graph_lookup(self, doc_id: str):
+        """(node, error) for the graph-backed tools. `error` is None on success.
+
+        Three conditions used to collapse into one message, and the one reported was the
+        only one that was FALSE. graph() degrades to ({}, {}) when graph_path is absent
+        — a legitimate state for a corpus that has not built a graph yet — so
+        `doc_id not in nodes` was true for every id in the corpus and both tools answered
+        "no document with id X" about documents they were actively serving. Measured on
+        oregon-legislature: graph_neighbors("measure-2025r1-hb3592") denied a document
+        that search_corpus returns and get_document serves with full provenance. An agent
+        told a document does not exist stops looking; the corpus in fact has it and simply
+        has no relationship graph. Response convention 5 requires errors to be explicit,
+        and an explicit lie is worse than silence.
+
+        The middle case matters just as much and is not in the issue: a graph that EXISTS
+        but predates the document. That is the exact silent failure the corpus-side
+        `generated` CI job exists to catch, and naming it points at the rebuild instead of
+        at a nonexistent document."""
+        nodes, _ = self.graph()
+        node = nodes.get(doc_id)
+        if node is not None:
+            return node, None
+
+        if not nodes:
+            try:
+                rel = self.config.graph_path.relative_to(self.config.root)
+            except ValueError:
+                rel = self.config.graph_path
+            return None, {**self._envelope(), "no_graph": True,
+                          "error": "this corpus has no relationship graph",
+                          "note": (f"graph_path {str(rel)!r} does not exist, so no "
+                                   f"document has neighbours here. This is NOT a "
+                                   f"statement about whether {doc_id!r} exists — try "
+                                   f"get_document or search_corpus.")}
+
+        # The graph is real but does not know this id. Ask the backend whether the
+        # DOCUMENT is real before reporting it missing. Guarded because a remote backend's
+        # exists() is a network call, and a probe that raises would turn a precise error
+        # into an opaque tool failure — the exact shape of the bug this method fixes.
+        try:
+            found = self.backend.exists(doc_id)
+        except Exception:                                  # noqa: BLE001
+            found = None
+        if found:
+            return None, {**self._envelope(), "not_in_graph": True,
+                          "error": f"document {doc_id!r} exists but is not a node in the "
+                                   f"relationship graph",
+                          "note": ("the graph is stale relative to the corpus — rebuild "
+                                   "it (the corpus's graph builder, e.g. "
+                                   "`python3 src/build_graph.py`) and commit the result")}
+        return None, {**self._envelope(),
+                      "error": f"no document with id {doc_id!r}"}
+
+    # ---------- citation schemes ----------
+
+    def _match_schemes(self, c: str):
+        """Run this corpus's citation schemes over `c`, returning
+        (scheme_name, sibling_corpus_id, candidate_ids, resolver_note).
+
+        Extracted from resolve_citation so the graph tools decide what an edge target
+        MEANS the same way citation resolution does. They did not before, and the
+        divergence was the whole of issue #4: `resolve_citation("OAR 166-300-0015")`
+        resolved into the sibling corpus correctly while `graph_neighbors` treated the
+        identical string as a missing local node and raised KeyError."""
+        nodes, _ = self.graph()
+        for name, pattern, id_template, resolver, scheme_corpus in self.schemes:
+            m = pattern.search(c)
+            if not m:
+                continue
+            note = None
+            if resolver is not None:
+                try:
+                    nparams = len(inspect.signature(resolver).parameters)
+                except (TypeError, ValueError):
+                    nparams = 1
+                result = resolver(m, nodes) if nparams >= 2 else resolver(m)
+                if isinstance(result, tuple):
+                    cands, note = list(result[0] or []), result[1]
+                else:
+                    cands = list(result or [])
+            else:
+                try:
+                    cid = id_template.format(**m.groupdict()) if m.groupdict() \
+                        else id_template.format(*m.groups())
+                    cands = [cid]
+                except (IndexError, KeyError):
+                    cands = []
+            return name, scheme_corpus, cands, note
+        return None, None, [], None
+
+    # ---------- graph edge targets ----------
+
+    def _neighbour_records(self, targets, nodes) -> list[dict]:
+        """Edge targets -> neighbour records, resolving anything that is not a local node
+        as an EXTERNAL reference instead of raising.
+
+        `nodes[t]` assumed every edge target was local. It is not, and for the corpora
+        this platform exists to connect it is usually not: oregon-records-retention's
+        graph reports n_edges 440 / n_edges_external 440 — every edge points at an OAR
+        citation held by executive-regulatory-frameworks — so `graph_neighbors` raised
+        KeyError for EVERY document in that corpus, surfacing to the caller as a tool
+        error whose entire message was the citation string. The contract lists remote
+        `corpus:id` edges as a specified feature of this tool, not an edge case.
+
+        External targets are resolved through the same sibling index resolve_citation
+        uses, so a neighbour comes back as {corpus, id, url} where the sibling can be
+        consulted. Grouped per sibling: one index load per tool call, not one per edge.
+        A sibling that cannot be consulted leaves the record marked `sibling_unavailable`
+        rather than silently bare — "could not check" and "not there" are opposite
+        answers and must never collapse (response convention 5)."""
+        out: list[dict] = []
+        external: list[dict] = []
+        for t in targets:
+            node = nodes.get(t)
+            if node is not None:
+                out.append({"id": t, "title": node["title"], "doc_type": node["doc_type"]})
+            else:
+                rec = {"citation": t, "external": True}
+                out.append(rec)
+                external.append(rec)
+        if external:
+            self._resolve_external_neighbours(external)
+        return out
+
+    def _resolve_external_neighbours(self, recs: list[dict]) -> None:
+        """Annotate external neighbour records in place with a sibling-corpus hit."""
+        by_sibling: dict[str, list[tuple[dict, list[str]]]] = {}
+        for rec in recs:
+            # Guarded HERE and not inside _match_schemes, so resolve_citation keeps its
+            # exact behaviour. A scheme's `resolver` is corpus-supplied code; letting it
+            # raise through a graph tool would turn a corpus's own citation bug into the
+            # same opaque "tool failed" this method was written to eliminate — and for
+            # neighbours, enrichment is a bonus. The edge is still reported as external.
+            try:
+                _, sib_id, cands, _ = self._match_schemes(rec["citation"])
+            except Exception:                              # noqa: BLE001
+                continue
+            if sib_id and cands:
+                by_sibling.setdefault(sib_id, []).append((rec, cands))
+        for sib_id, items in by_sibling.items():
+            all_cands = sorted({c for _, cands in items for c in cands})
+            hits, status = self._resolve_in_sibling(sib_id, all_cands)
+            by_id = {h["id"]: h for h in hits}
+            for rec, cands in items:
+                hit = next((by_id[c] for c in cands if c in by_id), None)
+                if hit is not None:
+                    rec.update(hit)
+                    rec["resolved_via"] = f"sibling:{sib_id}"
+                    if status.get("stale"):
+                        rec["sibling_index_stale"] = True
+                elif not status.get("available"):
+                    rec["sibling_unavailable"] = sib_id
+                    rec["note"] = (
+                        f"belongs to sibling corpus {sib_id!r}, whose index could not be "
+                        f"loaded ({status['reason']}) — NOT evidence it is absent")
 
     # ---------- tools ----------
 
@@ -220,9 +392,21 @@ class CorpusFramework:
         rec = self.backend.get(doc_id, part=part)
         if rec.get("error") and "id" not in rec:
             sug = self.search_corpus(doc_id.replace("-", " "), limit=3)
-            return {**rec, "did_you_mean": [{"id": s["id"], "title": s["title"]} for s in sug]}
-        return {**rec, "corpus": self.config.id, "archetype": self.config.archetype,
-                "disclaimer": self.disclaimer}
+            # The not-found branch used to return the bare backend error, so the one
+            # response an agent gets when it guesses an id wrong was the only one with no
+            # corpus/archetype on it — it could not even tell which corpus said no.
+            return {**self._envelope(), **rec,
+                    "did_you_mean": [{"id": s["id"], "title": s["title"]} for s in sug]}
+        # Envelope FIRST so the record wins: a document's own `authoritative_source`
+        # (its source_url) is the more precise answer to "where is the official text",
+        # and the corpus-level URL is only the fallback — for a backend that emits none,
+        # or a document whose source_url is empty.
+        out = {**self._envelope(), **rec,
+               "corpus": self.config.id, "archetype": self.config.archetype,
+               "disclaimer": self.disclaimer}
+        if not out.get("authoritative_source"):
+            out["authoritative_source"] = self.config.authoritative_source
+        return out
 
     # ---------- cross-corpus resolution ----------
 
@@ -257,34 +441,7 @@ class CorpusFramework:
     def resolve_citation(self, citation: str) -> dict:
         nodes, _ = self.graph()
         c = citation.strip()
-        matched_scheme = None
-        matched_corpus = None
-        cands: list[str] = []
-        resolver_note = None
-        for name, pattern, id_template, resolver, scheme_corpus in self.schemes:
-            m = pattern.search(c)
-            if not m:
-                continue
-            matched_scheme = name
-            matched_corpus = scheme_corpus
-            if resolver is not None:
-                try:
-                    nparams = len(inspect.signature(resolver).parameters)
-                except (TypeError, ValueError):
-                    nparams = 1
-                result = resolver(m, nodes) if nparams >= 2 else resolver(m)
-                if isinstance(result, tuple):
-                    cands, resolver_note = list(result[0] or []), result[1]
-                else:
-                    cands = list(result or [])
-            else:
-                try:
-                    cid = id_template.format(**m.groupdict()) if m.groupdict() \
-                        else id_template.format(*m.groups())
-                    cands = [cid]
-                except (IndexError, KeyError):
-                    cands = []
-            break
+        matched_scheme, matched_corpus, cands, resolver_note = self._match_schemes(c)
         # Existence is decided by the BACKEND, with the graph as a fast path.
         #
         # This used to consult `nodes` alone. graph() degrades to {} when graph_path is
@@ -304,8 +461,7 @@ class CorpusFramework:
             if found:
                 hits.append({"id": found["id"], "title": found.get("title", ""),
                              "doc_type": found.get("doc_type", "")})
-        out = {"citation": citation, "matches": hits,
-               "corpus": self.config.id, "archetype": self.config.archetype}
+        out = {"citation": citation, "matches": hits, **self._envelope()}
 
         sibling_status = None
         if matched_corpus and cands:
@@ -351,8 +507,9 @@ class CorpusFramework:
 
     def authority_chain(self, doc_id: str, direction: str = "both", depth: int = 3) -> dict:
         nodes, edges = self.graph()
-        if doc_id not in nodes:
-            return {"error": f"no document with id {doc_id!r}"}
+        node, err = self._graph_lookup(doc_id)
+        if err is not None:
+            return err
         depth = max(1, min(int(depth), 6))
 
         def walk(start, key):
@@ -360,19 +517,29 @@ class CorpusFramework:
             for _ in range(depth):
                 nxt = []
                 for i in frontier:
-                    for t in edges.get(i, {}).get(key, []):
-                        if t not in seen:
-                            seen.add(t)
-                            nxt.append({"id": t, "title": nodes[t]["title"],
-                                        "doc_type": nodes[t]["doc_type"], "via": i})
+                    # dict.fromkeys, not a set: order is the graph's edge order, and a
+                    # target listed twice on one node must still only appear once (the
+                    # old loop got that from marking `seen` inside the loop body).
+                    fresh = list(dict.fromkeys(
+                        t for t in edges.get(i, {}).get(key, []) if t not in seen))
+                    seen.update(fresh)
+                    # Same external-target rule as graph_neighbors — this walk had the
+                    # identical unguarded nodes[t] and raised KeyError the moment an
+                    # implements/implemented_by edge pointed at a sibling corpus, which
+                    # is precisely what a cross-corpus authority chain IS.
+                    for rec in self._neighbour_records(fresh, nodes):
+                        nxt.append({**rec, "via": i})
                 if not nxt:
                     break
                 levels.append(nxt)
-                frontier = [n["id"] for n in nxt]
+                # An external neighbour has no local edges to continue from, so only
+                # local ids extend the frontier. Following a `citation` key here would
+                # walk nothing and re-add it at every level.
+                frontier = [n["id"] for n in nxt if "id" in n and not n.get("external")]
             return levels
 
-        out = {"id": doc_id, "title": nodes[doc_id]["title"],
-               "doc_type": nodes[doc_id]["doc_type"]}
+        out = {**self._envelope(), "id": doc_id, "title": node["title"],
+               "doc_type": node["doc_type"]}
         if direction in ("up", "both"):
             out["up_implements"] = walk(doc_id, "implements")
         if direction in ("down", "both"):
@@ -381,24 +548,34 @@ class CorpusFramework:
 
     def graph_neighbors(self, doc_id: str) -> dict:
         nodes, edges = self.graph()
-        if doc_id not in nodes:
-            return {"error": f"no document with id {doc_id!r}"}
-        out = {"id": doc_id, "title": nodes[doc_id]["title"]}
+        node, err = self._graph_lookup(doc_id)
+        if err is not None:
+            return err
+        out = {**self._envelope(), "id": doc_id, "title": node["title"]}
         for k, targets in edges.get(doc_id, {}).items():
-            out[k] = [{"id": t, "title": nodes[t]["title"], "doc_type": nodes[t]["doc_type"]}
-                      for t in targets]
+            out[k] = self._neighbour_records(targets, nodes)
         return out
 
     def corpus_overview(self) -> dict:
-        return {
-            "corpus": self.config.id,
-            "archetype": self.config.archetype,
+        out = {
+            **self._envelope(),
             "jurisdiction": self.config.jurisdiction,
             "disclaimer": self.disclaimer,
             **self.backend.overview(),
             "graph_edges": sum(len(v) for d in self.graph()[1].values() for v in d.values()),
             "contract_version": self.config.contract_version,
         }
+        if not self.config.authoritative_source:
+            # Do not let the omission pass as a fact about the world. The disclaimer on
+            # this very response tells the agent to "verify at source" and then declines
+            # to say where the source is; naming the missing config key is the only way
+            # the gap reaches anyone who can close it.
+            out["config_warning"] = (
+                "this corpus declares no `corpus.authoritative_source` in "
+                "_meta/corpus.yml, which docs/mcp-interface-contract.md response "
+                "convention 1 requires on every response — set it to the URL where the "
+                "official text lives")
+        return out
 
     # ---------- document-corpus extension: issuing-body profile ----------
 

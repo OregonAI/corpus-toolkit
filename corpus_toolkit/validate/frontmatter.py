@@ -112,6 +112,44 @@ def _relationship_findings(paths, universe, config):
     return out
 
 
+def _join_findings(paths, universe, config):
+    """`joins[].document_id` must resolve to a document in this corpus.
+
+    The schema validated the SHAPE of a joins entry — {document_id, dataset, key} — and
+    nothing anywhere read it. A hybrid corpus could therefore ship joins pointing at
+    documents that do not exist and every gate in the platform stayed green, which is the
+    worst possible failure mode for this particular field: a join is what lets an agent
+    state that *this appropriation* relates to *that spending*, and a join pointing at a
+    nonexistent document does not error, it just answers nothing. "No relationship
+    recorded" is indistinguishable from "no relationship exists". (oregon-budget alone
+    carries 836 join entries across 418 documents; corpus-toolkit#3.)
+
+    A `document_id` is a document reference BY CONSTRUCTION — unlike a relationships
+    target, which is legitimately allowed to be a citation string for a sibling corpus —
+    so a dangling one is an error, not a warning.
+
+    `{dataset, key}` is deliberately NOT checked here and cannot be: only the corpus
+    knows what one of its dataset keys means or which rows it should select. That check
+    belongs in the corpus's own `--check` step (see docs/provenance-schema-v1.md), and
+    the toolkit says so rather than implying coverage it does not have."""
+    out = []
+    for path in paths:
+        rel = path.relative_to(config.root)
+        try:
+            fm, _ = parse_frontmatter(path)
+        except ValueError:
+            continue
+        for i, entry in enumerate(fm.get("joins") or []):
+            if not isinstance(entry, dict):
+                continue                      # shape is the schema's job, not this one's
+            target = entry.get("document_id")
+            if target and target not in universe:
+                out.append((rel, "error",
+                            f"joins[{i}].document_id: '{target}' does not resolve to any "
+                            f"document in this corpus"))
+    return out
+
+
 SCHEMA_NAME = "document.frontmatter.v1.schema.json"
 
 
@@ -175,6 +213,35 @@ def _load_registry(config):
     return {e["slug"] for e in data.get(config.issuing_body_registry_key, [])}
 
 
+def _check_config(config, r):
+    """Corpus-level config checks — things the per-document schema cannot see.
+
+    `corpus.authoritative_source` is required by docs/mcp-interface-contract.md response
+    convention 1 and was carried by none of the four live corpora (corpus-toolkit#6): the
+    "call this first" tool told every agent the copy was non-authoritative and to "verify
+    at source" without ever saying where the source is.
+
+    WARN, NOT ERROR, and deliberately so. Every existing corpus omits the key, and a hard
+    failure here would turn all four CIs red on the next toolkit pin bump — punishing them
+    for a gap in the shared layer. Promote it to an error once they have all declared one;
+    tracked in corpus-toolkit#11. A corpus adopts it by adding one line under `corpus:` in
+    `_meta/corpus.yml`:
+
+        authoritative_source: "https://www.oregonlegislature.gov/bills_laws/Pages/ORS.aspx"
+    """
+    rel = config.config_path.relative_to(config.root)
+    if not config.authoritative_source:
+        r.warn(rel, "corpus.authoritative_source is not set — MCP responses will carry "
+                    "`authoritative_source: null`, so an agent is told to verify at "
+                    "source without being told where the source is (response "
+                    "convention 1). Set it to the URL where the official text lives.")
+    elif not str(config.authoritative_source).startswith(("http://", "https://")):
+        # A non-URL here is worse than nothing: convention 1 says the field IS a URL, so a
+        # caller will try to follow it.
+        r.error(rel, f"corpus.authoritative_source must be a URL, got "
+                     f"{config.authoritative_source!r}")
+
+
 def _check_extra_schemas(config, r):
     """Validate corpus-declared {path, schema} pairs against a JSON schema.
     `path` may be a glob (e.g. `_meta/sources/*.yml`) to validate many files
@@ -218,7 +285,8 @@ def _run_relationships_only(config, paths, r):
         if fm.get("id"):
             docs[fm["id"]] = p.relative_to(config.root)
     universe = _resolution_universe(config, docs)
-    for rel, level, msg in _relationship_findings(paths, universe, config):
+    for rel, level, msg in (_relationship_findings(paths, universe, config)
+                            + _join_findings(paths, universe, config)):
         (r.error if level == "error" else r.warn)(rel, msg)
     r.finish(f"OK: relationship graph consistent across {len(paths)} content file(s).")
 
@@ -274,9 +342,11 @@ def main():
             docs[doc_id] = rel
 
     universe = _resolution_universe(config, docs)
-    for rel, level, msg in _relationship_findings(paths, universe, config):
+    for rel, level, msg in (_relationship_findings(paths, universe, config)
+                            + _join_findings(paths, universe, config)):
         (r.error if level == "error" else r.warn)(rel, msg)
 
+    _check_config(config, r)
     _check_extra_schemas(config, r)
 
     scope = f"{len(paths)} changed" if scoped else f"{len(paths)}"
