@@ -1,11 +1,14 @@
 """The retrieval seam: protocol conformance, backend selection, and the guarantee that
 introducing it changed nothing for file-backed corpora.
 
-The parity guarantee is the important one. `FileBackend` is a pure refactor of code that
-previously lived inline in `CorpusFramework`, and the FTS schema is load-bearing in ways
-that do not fail loudly: `snippet(fts, 5, ...)` addresses the `body` column BY INDEX, so
-reordering the virtual table returns the wrong text rather than an error. These tests
-build a real corpus on disk and assert on actual responses.
+The parity guarantee is the important one. The FTS schema is load-bearing in ways that do
+not fail loudly, so these tests build a real corpus on disk and assert on actual
+responses rather than on the index's internals.
+
+That distinction became literal with contentless FTS (corpus-toolkit#17): the `fts` table
+no longer stores text, so reading any of its columns returns NULL instead of raising.
+Tests that inspected `fts.body` were asserting on an implementation detail; they now
+assert on what a caller can observe — whether a term is findable.
 """
 import json
 import subprocess
@@ -310,8 +313,21 @@ def _corpus_with(tmp_path, doc_type, index_headings=None):
 
 
 def _body_col(fw):
-    con = fw.backend.ensure_index()
-    return con.execute("SELECT body FROM fts WHERE id='d1'").fetchone()[0]
+    """The text that FEEDS fts.body, taken from the function that produces it.
+
+    Was `SELECT body FROM fts WHERE id='d1'`. That stopped being possible with contentless
+    FTS -- both the selected column and the WHERE clause read NULL -- and it was the wrong
+    observable anyway: every assertion below is about which SECTIONS get indexed, which is
+    `_searchable_body`'s job, not SQLite's.
+
+    The end-to-end property (indexed text is actually findable, non-indexed text is not) is
+    covered separately by `test_indexed_sections_are_searchable_and_others_are_not`, which
+    goes through a real MATCH.
+    """
+    from corpus_toolkit.repo import parse_frontmatter
+    p = fw.config.root / "docs" / "d1.md"
+    fm, body = parse_frontmatter(p)
+    return fw.backend._searchable_body(body, fm["doc_type"])
 
 
 def test_unconfigured_doc_type_keeps_historical_behaviour(tmp_path):
@@ -367,6 +383,105 @@ def test_summary_only_document_is_searchable_when_configured(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     fw = CorpusFramework(load_config(str(tmp_path / "_meta" / "corpus.yml")))
     assert [h["id"] for h in fw.search_corpus("SUMMARYWORD")] == ["d1"]
+
+
+# ---------- contentless FTS (corpus-toolkit#17) ----------
+
+def test_excerpt_marks_matches_and_keeps_citations_whole():
+    """The excerpt builder replaces snippet(). Two things it must not get wrong: a citation
+    is one token (the word pattern accepts '.' and '-'), and trailing sentence punctuation
+    belongs OUTSIDE the markers -- '[Diem.]' looks like a corpus typo."""
+    from corpus_toolkit.mcp.backends import make_excerpt
+    got = make_excerpt("Payment of Per Diem. See ORS 192.355 and OAR 137-090-0000.",
+                       ["diem", "192.355", "137-090-0000"], width=20)
+    assert "[Diem]." in got and "[Diem.]" not in got
+    assert "[192.355]" in got
+    assert "[137-090-0000]" in got
+
+
+def test_excerpt_windows_on_the_densest_region():
+    from corpus_toolkit.mcp.backends import make_excerpt
+    text = ("filler " * 40) + "alpha beta gamma " + ("filler " * 40) + "alpha "
+    got = make_excerpt(text, ["alpha", "beta", "gamma"], width=8)
+    assert "[alpha] [beta] [gamma]" in got
+    assert got.startswith(" … ") and got.endswith(" … ")   # truncated both ends
+
+
+def test_excerpt_falls_back_to_the_head_when_nothing_matches():
+    """A document can be a legitimate hit on its title, citation or tags and contain no
+    query term in its body. That must produce readable text, not an empty string."""
+    from corpus_toolkit.mcp.backends import make_excerpt
+    got = make_excerpt("The department shall keep records of every application.", ["zebra"])
+    assert got.startswith("The department shall keep")
+    assert "[" not in got
+
+
+def test_excerpt_approximates_porter_stemming():
+    """Highlighting only -- FTS5 already decided what matched. Inflections must still be
+    marked, or excerpts for a stemmed hit show no highlight at all."""
+    from corpus_toolkit.mcp.backends import _stem_match
+    assert _stem_match("governed", "governing")
+    assert _stem_match("governs", "governing")
+    assert not _stem_match("car", "cat")        # short words: exact or nothing
+
+def test_indexed_sections_are_searchable_and_others_are_not(tmp_path):
+    """The end-to-end half of what _body_col used to assert, through a real MATCH.
+
+    This is the test that would catch a broken docs<->fts join: contentless FTS returns
+    NULL for `f.id`, so the previous `JOIN docs d ON d.id = f.id` matched zero rows and
+    every query came back empty while the index itself was perfectly fine.
+    """
+    fw = _corpus_with(tmp_path, "dataset_doc", {"dataset_doc": ["Summary", "Full text"]})
+    assert [h["id"] for h in fw.search_corpus("SUMMARYWORD")] == ["d1"]
+    assert [h["id"] for h in fw.search_corpus("FULLTEXTWORD")] == ["d1"]
+    # Boilerplate is excluded from the index, so it must not be findable.
+    assert fw.search_corpus("PROVENANCEWORD") == []
+
+
+def test_search_returns_a_real_excerpt_not_null(tmp_path):
+    """snippet() returns NULL on a contentless table rather than failing, so a naive port
+    ships every result with an empty (or crashing) snippet. Assert there is real text and
+    that the matched term is marked in it."""
+    fw = _corpus_with(tmp_path, "dataset_doc", {"dataset_doc": ["Summary", "Full text"]})
+    hit = fw.search_corpus("FULLTEXTWORD")[0]
+    assert hit["snippet"], "snippet is empty — snippet() NULL leaked through"
+    assert "[FULLTEXTWORD]" in hit["snippet"]
+
+
+def test_stale_schema_forces_a_rebuild_even_when_content_is_unchanged(tmp_path):
+    """A toolkit upgrade under a warm cache must rebuild.
+
+    The content state key cannot detect this: the corpus has not changed, so it matches,
+    and the index is reused with a `docs` table that lacks columns the new queries select.
+    Without the schema key that is an OperationalError on the first request of every
+    deployed server simultaneously.
+    """
+    import sqlite3
+    fw = _corpus_with(tmp_path, "statute")
+    db = fw.backend._db_path
+    fw.backend.ensure_index().close()
+
+    con = sqlite3.connect(db)
+    con.execute("UPDATE meta SET v='1' WHERE k='schema'")   # pretend an older builder
+    # Empty the catalog. A rebuild is the only thing that can put the row back, so this
+    # detects reuse without needing ALTER TABLE ... DROP COLUMN (sqlite >= 3.35, which the
+    # 3.10 CI runners cannot be assumed to have).
+    con.execute("DELETE FROM docs")
+    con.commit(); con.close()
+
+    assert fw.backend.index_status()[0] is False
+    con = fw.backend.ensure_index()          # must rebuild rather than reuse
+    assert con.execute("SELECT COUNT(*) FROM docs WHERE body_chars > 0").fetchone()[0] == 1
+    assert con.execute("SELECT v FROM meta WHERE k='schema'").fetchone()[0] == "2"
+
+
+def test_empty_body_health_warning_still_fires(tmp_path):
+    """This check read `fts.body = ''`, which on a contentless table is never true — so it
+    would have gone quiet forever while reporting a healthy corpus. It now reads
+    docs.body_chars. Deleting that column's use must fail this test."""
+    fw = _corpus_with(tmp_path, "dataset_doc", {"dataset_doc": ["No Such Heading"]})
+    detail = fw.backend.health()["detail"]
+    assert "WARNING" in detail and "dataset_doc" in detail
 
 
 # ---------- review findings: guardrails that used to pass silently ----------

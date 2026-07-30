@@ -11,15 +11,38 @@ same method names. Two implementations of one surface drift within a release, an
 two corpora disagree about response shape — destroying the single property the whole
 franchise depends on: that one client config works against every server.
 
-CONTRACT NOTE. `FileBackend` is a PURE REFACTOR. Its method bodies are moved verbatim
-from `CorpusFramework`, not rewritten — the FTS schema in particular is load-bearing in
-ways that are easy to miss (`snippet(fts, 5, ...)` addresses the `body` column BY INDEX,
-so reordering the virtual table silently returns the wrong text). Any behaviour change
-here is a bug.
+CONTRACT NOTE. `FileBackend` began as a PURE REFACTOR: its method bodies were moved
+verbatim from `CorpusFramework`, not rewritten. That is still the rule for retrieval
+semantics — ranking in particular. The FTS schema is load-bearing in ways that are easy
+to miss, so it changes only deliberately and with the reason written down (see
+CONTENTLESS FTS below).
 
 A backend owns RETRIEVAL only. Citation schemes, the authority graph, the disclaimer and
 response assembly stay in `CorpusFramework`: those are corpus-shaped concerns, not
 storage-shaped ones, and duplicating them per backend is how the shapes drift.
+
+CONTENTLESS FTS (corpus-toolkit#17). The `fts` table is declared `content=''`, so FTS5
+tokenizes each document but does NOT keep a copy of the text. Measured on
+executive-regulatory-frameworks: that copy was `fts_content` = 304 MiB of a 437 MiB
+index, duplicating text that already exists in the working tree.
+
+Three consequences, all of them silent if you do not know to look for them — the reason
+this note is long:
+
+  * READING AN FTS COLUMN RETURNS NULL. `SELECT f.id FROM fts f` yields None, so the old
+    `JOIN docs d ON d.id = f.id` matched NOTHING rather than failing. Every join is now on
+    `rowid`, which is why the build inserts into `fts` with the rowid `docs` just assigned
+    instead of letting FTS5 pick its own.
+  * `snippet()` RETURNS NULL, not an error. Excerpts are therefore built in Python from
+    the document on disk — see `make_excerpt` — and only for the rows actually returned,
+    which is strictly less work than the old query did for the whole candidate pool.
+  * `columnsize=0` WOULD save a further 1.1 MiB and is NOT used. It requires an explicit
+    rowid (fine, we now have one) but it also drops the per-column token counts that
+    `bm25()` normalizes by, which CHANGES RANKING. Verified on sqlite 3.45.1: identical
+    corpus, bm25 went from -1.633e-06 to -2.34e-06. 1.1 MiB is not worth moving results.
+
+`bm25()` itself is unaffected by `content=''` — verified byte-identical scores — so
+ranking is preserved. Only excerpt TEXT changes.
 """
 from __future__ import annotations
 
@@ -32,6 +55,114 @@ from typing import Protocol, runtime_checkable
 from ..repo import content_files, extract_fulltext, parse_frontmatter, repo_state
 
 BIG_DOC_BYTES = 50 * 1024
+
+# Bumped whenever the shape of the cache db changes. Checked ALONGSIDE the content state
+# key, because the two answer different questions: the state key says "is this index built
+# from the current corpus", and it is completely blind to "was this index built by code that
+# agrees with me about the schema". Without this, upgrading the toolkit under an existing
+# cache leaves a valid-looking index whose `docs` table lacks a column the new queries
+# select -- an OperationalError on the first request, on every deployed server at once.
+SCHEMA_VERSION = 2
+
+# What FTS5's own tokenizer would treat as a word, near enough for locating matches. Kept
+# identical to the pattern the query side uses so a term that can MATCH can also be found
+# in the text for highlighting.
+_WORD = re.compile(r"[\w.\-]+")
+
+# Column offsets into the tuples _fts_rows() returns. Named because the previous positional
+# reads (r[1] for the snippet, r[7] for bm25) had to be found and re-counted by hand every
+# time the SELECT changed -- and one of them, `snippet(fts, 5, ...)`, addressed a column by
+# index too, which the module docstring used to carry a standing warning about.
+KW_ID, KW_TITLE, KW_CITATION, KW_DOCTYPE, KW_ISSUER, KW_PATH, KW_BM25 = range(7)
+
+
+def _stem_match(token: str, term: str) -> bool:
+    """Would FTS5's porter tokenizer plausibly have matched these?
+
+    APPROXIMATE, and only ever used to decide what to put brackets around -- never to
+    decide what is a hit. FTS5 already decided that; this function's worst failure is an
+    excerpt that fails to bracket a word, or brackets one word too many.
+
+    Reimplementing porter here to be exact was the alternative. It is ~200 lines to make
+    the highlighting in an excerpt marginally better, and it would then have to track
+    whatever tokenizer a corpus configured. Not worth it: accept an approximation and say
+    so.
+
+    Known and accepted: it is LOOSE on long words. "information"/"informant" share seven
+    of nine characters and are treated as a match though porter keeps them distinct. The
+    result is one extra pair of brackets in an excerpt. Tightening the tolerance would
+    start missing real matches like "governed"/"governing", which is the worse trade.
+    """
+    a, b = token.lower(), term.lower()
+    if a == b:
+        return True
+    n = min(len(a), len(b))
+    if n < 4:                       # short words: exact or nothing, else "cat" hits "car"
+        return False
+    common = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        common += 1
+    # Agree on everything but a suffix or two -- "governing"/"governs" share 6 of 7.
+    return common >= 4 and common >= n - 2
+
+
+def make_excerpt(text: str, terms: list[str], *, width: int = 24,
+                 open_mark: str = "[", close_mark: str = "]",
+                 ellipsis: str = " … ") -> str:
+    """A search excerpt: the `width`-token window of `text` densest in `terms`.
+
+    Replaces `snippet(fts, 5, '[', ']', ' … ', 24)`, which returns NULL on a contentless
+    table. Deliberately NOT byte-identical to it -- SQLite's exact windowing was never the
+    contract, and asserting it would freeze an implementation detail of one tokenizer.
+
+    Falls back to the head of the text when nothing matches, which happens legitimately:
+    a document can be a hit on its title, citation or tags columns and contain no query
+    term in its body at all.
+    """
+    if not text:
+        return ""
+    toks = list(_WORD.finditer(text))
+    if not toks:
+        return text[:200].strip()
+    # `_WORD` accepts '.' and '-' so citations tokenize whole ("192.355", "137-090-0000").
+    # The cost is that sentence-final punctuation rides along, which both inflates the
+    # length comparison in _stem_match ("governed." vs "governing" fails where "governed"
+    # passes) and would end up inside the brackets. Strip it once, use the core for both.
+    cores = [t.group(0).rstrip(".-") or t.group(0) for t in toks]
+    hit = [any(_stem_match(c, q) for q in terms) for c in cores]
+
+    start = 0
+    if any(hit):
+        # Densest window, earliest on a tie. A rolling count rather than re-summing each
+        # window: bodies here run to thousands of tokens.
+        run = sum(hit[:width])
+        best = run
+        for i in range(1, max(1, len(toks) - width + 1)):
+            run += hit[i + width - 1] if i + width - 1 < len(toks) else 0
+            run -= hit[i - 1]
+            if run > best:
+                best, start = run, i
+    end = min(len(toks), start + width)
+
+    # Slice from the ORIGINAL text between token spans, so punctuation and spacing survive
+    # instead of being rebuilt from a word list.
+    out, cur = [], toks[start].start()
+    for j in range(start, end):
+        t = toks[j]
+        word = t.group(0)
+        out.append(text[cur:t.start()])
+        if hit[j]:
+            trail = word[len(cores[j]):]
+            out.append(f"{open_mark}{cores[j]}{close_mark}{trail}")
+        else:
+            out.append(word)
+        cur = t.end()
+
+    body = " ".join("".join(out).split())
+    return (("" if start == 0 else ellipsis) + body
+            + ("" if end >= len(toks) else ellipsis))
 
 
 @runtime_checkable
@@ -98,6 +229,48 @@ class FileBackend:
         m = re.search(rf"^## {re.escape(heading)}\s*$(.*?)(?=^## |\Z)", body, re.M | re.S)
         return m.group(1).strip() if m else None
 
+    def index_status(self, state: str | None = None) -> tuple[bool, str]:
+        """Would ensure_index() reuse the cache as-is? -> (current, reason).
+
+        `state` lets a caller that has already computed the content key pass it in.
+        repo_state() shells out to git twice and costs ~114 ms on a 75k-file corpus, and
+        this runs on EVERY tool call via ensure_index -- computing it a second time here
+        would double that for no new information.
+
+        Exists so a deploy script can ask this question WITHOUT reimplementing it. The
+        answer depends on two independent keys (see ensure_index), and platform-deploy was
+        comparing only one of them -- which meant a toolkit upgrade looked "current" to the
+        deployer while the server would rebuild under live traffic on the first request.
+        That rebuild is unlocked and uses a fixed temp filename, so a concurrent warm and
+        a live rebuild collide on it (`disk I/O error`). One implementation, one answer.
+
+        Never raises: every failure is a reason to rebuild, and a checker that throws is a
+        checker whose caller learns nothing.
+        """
+        if not self._db_path.exists():
+            return False, "no index on disk"
+        try:
+            live = state if state is not None else repo_state(self.config.root)
+            if live.startswith(":"):
+                # repo_state() swallows git failures and returns sha256(b"")[:16] with an
+                # empty sha. Indistinguishable from a real key to everything downstream,
+                # so name it here rather than let it be compared as if it were valid.
+                return False, f"git is not working: key would be the constant {live}"
+            con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            try:
+                got = dict(con.execute(
+                    "SELECT k, v FROM meta WHERE k IN ('state','schema')"))
+            finally:
+                con.close()
+        except Exception as e:                       # noqa: BLE001
+            return False, f"{type(e).__name__}: {e}"
+        if got.get("schema") != str(SCHEMA_VERSION):
+            return False, (f"built by schema {got.get('schema') or 'unknown'}, "
+                           f"this toolkit is {SCHEMA_VERSION}")
+        if got.get("state") != live:
+            return False, f"content changed (stored {got.get('state')!r} != live {live!r})"
+        return True, "current"
+
     def ensure_index(self) -> sqlite3.Connection:
         """Open the FTS cache, rebuilding it if the corpus has changed. Builds into a
         fresh temp file and atomically renames it into place, so a concurrent reader
@@ -105,15 +278,10 @@ class FileBackend:
         file."""
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         state = repo_state(self.config.root)
-        if self._db_path.exists():
-            con = sqlite3.connect(self._db_path)
-            try:
-                row = con.execute("SELECT v FROM meta WHERE k='state'").fetchone()
-                if row and row[0] == state:
-                    return con
-            except sqlite3.OperationalError:
-                pass
-            con.close()
+        # BOTH the content key and the schema version must match; index_status() owns that
+        # rule so the deploy tooling can ask the same question and get the same answer.
+        if self.index_status(state)[0]:
+            return sqlite3.connect(self._db_path)
 
         tmp_path = self._db_path.with_suffix(".db.tmp")
         tmp_path.unlink(missing_ok=True)
@@ -121,30 +289,44 @@ class FileBackend:
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=NORMAL")
         con.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+        # body_chars: length of the text that went into fts.body. Exists because the
+        # health() check for "indexed but unsearchable" documents used to read `f.body = ''`
+        # off the FTS table, and on a contentless table that column reads NULL -- so the
+        # comparison is never true and the check silently stops finding anything. Storing
+        # the length here keeps the check working and makes it a plain integer scan.
         con.execute("""CREATE TABLE docs (
             id TEXT PRIMARY KEY, path TEXT, doc_type TEXT, issuing_body TEXT,
             issuing_body_slug TEXT, citation TEXT, title TEXT, status TEXT,
             source_url TEXT, retrieved TEXT, effective_date TEXT, content_mode TEXT,
-            content_exception TEXT, size INTEGER)""")
+            content_exception TEXT, size INTEGER, body_chars INTEGER)""")
+        # content='': tokenize but do not store the text. See CONTENTLESS FTS in the module
+        # docstring -- in particular, columnsize=0 is omitted deliberately.
         con.execute("""CREATE VIRTUAL TABLE fts USING fts5(
-            id, citation, title, tags, glance, body, tokenize='porter unicode61')""")
+            id, citation, title, tags, glance, body,
+            tokenize='porter unicode61', content='')""")
         con.execute("BEGIN")
         for p in content_files(self.config):
             fm, body = parse_frontmatter(p)
             glance = self._extract_section(body, "At a glance") or ""
             ft = self._searchable_body(body, fm.get("doc_type", ""))
             rel = p.relative_to(self.config.root)
-            con.execute("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            cur = con.execute("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 fm["id"], str(rel), fm["doc_type"],
                 fm.get("issuing_body", ""), self.config.scope_slug_for(rel.parts) or "",
                 fm.get("citation", ""), fm["title"],
                 fm.get("status", ""), fm.get("source_url", ""), str(fm.get("retrieved", "")),
                 str(fm.get("effective_date") or ""), fm.get("content_mode", ""),
-                fm.get("content_exception") or "", p.stat().st_size))
-            con.execute("INSERT INTO fts VALUES (?,?,?,?,?,?)", (
-                fm["id"], fm.get("citation", ""), fm["title"],
-                " ".join(fm.get("tags") or []), glance, ft))
+                fm.get("content_exception") or "", p.stat().st_size, len(ft)))
+            # EXPLICIT rowid, matching the row just written to `docs`. Every query joins
+            # these two tables on rowid, because a contentless fts cannot be read back to
+            # join on `id`. Letting FTS5 assign its own would happen to line up today and
+            # break the first time an insert is skipped or reordered.
+            con.execute("INSERT INTO fts(rowid, id, citation, title, tags, glance, body) "
+                        "VALUES (?,?,?,?,?,?,?)", (
+                            cur.lastrowid, fm["id"], fm.get("citation", ""), fm["title"],
+                            " ".join(fm.get("tags") or []), glance, ft))
         con.execute("INSERT INTO meta VALUES ('state', ?)", (state,))
+        con.execute("INSERT INTO meta VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
         con.commit()
         con.close()
         con = sqlite3.connect(tmp_path)
@@ -181,14 +363,21 @@ class FileBackend:
 
     # ---------- retrieval ----------
 
+    @staticmethod
+    def _terms(query: str) -> list[str]:
+        return _WORD.findall(query)
+
     def _fts_rows(self, con, query, doc_type, issuing_body, limit):
-        terms = re.findall(r"[\w.\-]+", query)
+        terms = self._terms(query)
         if not terms:
             return {}, []
         match = " ".join(f'"{t}"' for t in terms)
-        sql = ("SELECT f.id, snippet(fts, 5, '[', ']', ' … ', 24), d.title, d.citation, "
-               "d.doc_type, d.issuing_body, d.path, bm25(fts) FROM fts f "
-               "JOIN docs d ON d.id = f.id WHERE fts MATCH ?")
+        # d.* not f.*: reading a column off a contentless fts table returns NULL. Joining
+        # on rowid for the same reason -- `f.id` is NULL too, so the old `d.id = f.id`
+        # join would match zero rows and report an empty corpus.
+        sql = ("SELECT d.id, d.title, d.citation, d.doc_type, d.issuing_body, d.path, "
+               "bm25(fts) FROM fts f "
+               "JOIN docs d ON d.rowid = f.rowid WHERE fts MATCH ?")
         sql_args = [match]
         if doc_type:
             sql += " AND d.doc_type = ?"; sql_args.append(doc_type)
@@ -197,8 +386,27 @@ class FileBackend:
         sql += " ORDER BY bm25(fts) LIMIT ?"
         sql_args.append(max(1, min(int(limit), 40)))
         rows = {r[0]: r for r in con.execute(sql, sql_args).fetchall()}
-        order = sorted(rows, key=lambda i: rows[i][7])
+        order = sorted(rows, key=lambda i: rows[i][KW_BM25])
         return rows, order
+
+    def _excerpt(self, rel_path: str, doc_type: str, terms: list[str]) -> str:
+        """Build a search excerpt from the document on disk.
+
+        Excerpts come from `_searchable_body`, NOT the raw file, so what is shown is the
+        text that was actually indexed. Showing a passage the query could never have
+        matched is worse than showing none.
+
+        Called only for rows being returned -- at most `limit` of them, where the candidate
+        pool can be 40 -- so this does less work than the old SQL did, not more.
+        """
+        p = self.config.root / rel_path
+        try:
+            _fm, body = parse_frontmatter(p)
+        except (OSError, ValueError) as e:
+            # A contentless index depends on the tree still being there at query time.
+            # Say so instead of returning "" and looking like a document with no body.
+            return f"(excerpt unavailable: {type(e).__name__})"
+        return make_excerpt(self._searchable_body(body, doc_type), terms)
 
     def _semantic_available(self) -> bool:
         if self._semantic is None:
@@ -250,12 +458,15 @@ class FileBackend:
                 sem_order = keep
             final = sem_order[:n] if mode == "semantic" else self._rrf([kw_order, sem_order])[:n]
 
+        terms = self._terms(query)
         out = []
         for i in final:
             r = rows.get(i)
             if r:
-                out.append({"id": r[0], "title": r[2], "citation": r[3], "doc_type": r[4],
-                            "issuing_body": r[5], "path": r[6], "snippet": r[1][:400]})
+                out.append({"id": r[KW_ID], "title": r[KW_TITLE], "citation": r[KW_CITATION],
+                            "doc_type": r[KW_DOCTYPE], "issuing_body": r[KW_ISSUER],
+                            "path": r[KW_PATH],
+                            "snippet": self._excerpt(r[KW_PATH], r[KW_DOCTYPE], terms)[:400]})
             else:
                 mr = self._doc_meta_row(con, i)
                 if mr:
@@ -328,9 +539,14 @@ class FileBackend:
             # (["Full Text"] for "## Full text"). That mistake leaves rows in `docs`
             # while `fts.body` is empty, so a row count alone reports a healthy corpus
             # that returns nothing for every keyword query.
+            #
+            # Reads docs.body_chars, NOT fts.body. On a contentless fts table `f.body`
+            # reads NULL, so `f.body = ''` is never true and this check would report a
+            # clean bill of health for every corpus, forever. body_chars is written from
+            # the same string that goes into the index.
             empty = dict(con.execute(
-                "SELECT d.doc_type, COUNT(*) FROM fts f JOIN docs d ON d.id = f.id "
-                "WHERE f.body = '' GROUP BY d.doc_type"))
+                "SELECT doc_type, COUNT(*) FROM docs WHERE body_chars = 0 "
+                "GROUP BY doc_type"))
         except Exception as e:                       # noqa: BLE001
             return {"reachable": False, "checked_at": None,
                     "detail": f"{type(e).__name__}: {e}"}

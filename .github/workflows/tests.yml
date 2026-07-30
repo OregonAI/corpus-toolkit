@@ -106,3 +106,33 @@ jobs:
               print(f"  ok  {name} -> {target}")
           print(f"{len(scripts)} console scripts resolve")
           PY
+
+  # A SINGLE STABLE NAME for branch protection to require.
+  #
+  # Branch protection names checks as literal strings, and a matrix job's name embeds its
+  # matrix values. Adding the `mcp-spec` dimension in 95ccec0 therefore renamed every job:
+  # `pytest (3.10)` became `pytest (3.10, mcp[cli]>=1.28,<2)`. The three contexts main
+  # required — `pytest (3.10)`, `pytest (3.12)`, `entrypoints` — stopped existing, so they
+  # sat "Expected — waiting for status to be reported" on every PR since, permanently amber
+  # and blocking merge, while the tests they were meant to gate ran green beside them.
+  #
+  # Requiring this job instead makes protection independent of the matrix: change the
+  # dimensions freely and the required context keeps the same name.
+  tests-pass:
+    # `always()` so this still runs — and still FAILS — when a dependency fails, is skipped,
+    # or is cancelled. Without it the gate is skipped alongside them, and a skipped required
+    # check reads as success.
+    if: always()
+    needs: [pytest, entrypoints]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every matrix leg must have succeeded
+        run: |
+          echo 'needs: ${{ toJSON(needs) }}'
+          if ${{ contains(needs.*.result, 'failure')
+                 || contains(needs.*.result, 'cancelled')
+                 || contains(needs.*.result, 'skipped') }}; then
+            echo "::error::a required job did not succeed"
+            exit 1
+          fi
+          echo "all matrix legs succeeded"
