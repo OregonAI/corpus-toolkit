@@ -572,3 +572,26 @@ def test_two_corpora_do_not_share_a_scheme_registry(tmp_path):
         frameworks.append(CorpusFramework(load_config(str(r / "_meta" / "corpus.yml"))))
     assert [s[0] for s in frameworks[0].schemes] == ["ors"]
     assert [s[0] for s in frameworks[1].schemes] == ["measure"]
+
+
+# ---------- audit_report doc_type (oregon-audits, Phase 7) ----------
+
+def test_audit_report_is_a_valid_doc_type_and_is_state_authored():
+    """`audit_report` must be in THREE coupled places or it half-works.
+
+    The enum alone makes the type valid. But if it is missing from the schema's
+    state-authored conditional it stops requiring source_sha256/content_mode, and if it is
+    missing from provenance.STATE_AUTHORED it stops requiring content_mode: verbatim. Either
+    omission yields a doc_type that validates cleanly while skipping the verbatim guarantee
+    -- which for an audit finding means a paraphrase could ship as the record.
+    """
+    import json
+    from pathlib import Path
+    from corpus_toolkit.validate.provenance import STATE_AUTHORED
+    schema = json.loads((Path(__file__).parent.parent / "corpus_toolkit" / "schemas"
+                         / "document.frontmatter.v1.schema.json").read_text())
+    assert "audit_report" in schema["properties"]["doc_type"]["enum"]
+    assert "audit_report" in schema["allOf"][0]["if"]["properties"]["doc_type"]["enum"], \
+        "audit_report is a valid type but is not required to carry a snapshot hash"
+    assert "audit_report" in STATE_AUTHORED, \
+        "audit_report would not be required to be verbatim"
