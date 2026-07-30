@@ -462,12 +462,15 @@ def test_stale_schema_forces_a_rebuild_even_when_content_is_unchanged(tmp_path):
     fw.backend.ensure_index().close()
 
     con = sqlite3.connect(db)
-    con.execute("UPDATE meta SET v='1' WHERE k='schema'")     # pretend an older builder
-    con.execute("ALTER TABLE docs DROP COLUMN body_chars")    # ...with the older shape
+    con.execute("UPDATE meta SET v='1' WHERE k='schema'")   # pretend an older builder
+    # Empty the catalog. A rebuild is the only thing that can put the row back, so this
+    # detects reuse without needing ALTER TABLE ... DROP COLUMN (sqlite >= 3.35, which the
+    # 3.10 CI runners cannot be assumed to have).
+    con.execute("DELETE FROM docs")
     con.commit(); con.close()
 
-    # Must not raise, and must have restored the column by rebuilding.
-    con = fw.backend.ensure_index()
+    assert fw.backend.index_status()[0] is False
+    con = fw.backend.ensure_index()          # must rebuild rather than reuse
     assert con.execute("SELECT COUNT(*) FROM docs WHERE body_chars > 0").fetchone()[0] == 1
     assert con.execute("SELECT v FROM meta WHERE k='schema'").fetchone()[0] == "2"
 
