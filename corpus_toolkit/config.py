@@ -96,6 +96,11 @@ class CorpusConfig:
     extra_schema_checks: list[dict]
     mcp_server_name: str
     mcp_transports: list[str]
+    # Frontmatter keys a corpus promises to serve on get_document, beyond the fixed set
+    # every corpus shares. Opt-in and explicit: the response shape is an interface
+    # contract, so a corpus declares what it adds rather than leaking whatever happens to
+    # be in its frontmatter.
+    mcp_extra_document_fields: list[str]
     reverify_days: int
     coverage_fail_threshold: float
     coverage_warn_threshold: float
@@ -288,6 +293,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         extra_schema_checks=plugins.get("extra_schema_checks", []) or [],
         mcp_server_name=mcp.get("server_name", corpus.get("id", "corpus")),
         mcp_transports=mcp.get("transports", ["stdio", "http"]),
+        mcp_extra_document_fields=list(mcp.get("extra_document_fields", []) or []),
         reverify_days=int(status.get("reverify_days", 90)),
         coverage_fail_threshold=float(provenance.get("coverage_fail_threshold", 0.70)),
         coverage_warn_threshold=float(provenance.get("coverage_warn_threshold", 0.90)),

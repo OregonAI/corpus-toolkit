@@ -499,6 +499,21 @@ class FileBackend:
                 "authoritative_source": r[6]}
         if r[10]:
             meta["content_exception"] = r[10]
+        # Corpus-specific frontmatter this corpus has declared it serves.
+        #
+        # Without this the fixed key set above is all an agent ever sees, and a field can
+        # be REQUIRED by a corpus's own schema checks and still be unreachable — which is
+        # not a gap so much as a trap, because the field validates and then vanishes.
+        # oregon-audits hit it with `audited_period_start`: the value that stops a 2019
+        # finding being read as current was invisible to every caller.
+        #
+        # Allow-listed rather than "return everything": the response shape is an interface
+        # contract, and a corpus adding a frontmatter key should not silently change what
+        # its server emits. Missing keys are skipped, so declaring a field a document does
+        # not carry is harmless.
+        for key in self.config.mcp_extra_document_fields:
+            if key in fm:
+                meta[key] = fm[key]
         headings = re.findall(r"^## (.+)$", body, re.M)
         if part == "auto" and r[11] > BIG_DOC_BYTES:
             glance = self._extract_section(body, "At a glance")
