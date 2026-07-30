@@ -595,3 +595,53 @@ def test_audit_report_is_a_valid_doc_type_and_is_state_authored():
         "audit_report is a valid type but is not required to carry a snapshot hash"
     assert "audit_report" in STATE_AUTHORED, \
         "audit_report would not be required to be verbatim"
+
+
+# ---------- mcp.extra_document_fields (corpus-toolkit#21) ----------
+
+def _corpus_with_custom_field(tmp_path: Path, declare: bool) -> CorpusFramework:
+    """A corpus whose documents carry a domain field the toolkit knows nothing about."""
+    (tmp_path / "statutes").mkdir()
+    (tmp_path / "_meta").mkdir()
+    doc = DOC.format(id="ors-1.010", title="T", doc_type="statute", citation="ORS 1.010",
+                     sha="a" * 64, tag="ors", glance="G", body="B")
+    doc = doc.replace("tags: [\"ors\"]",
+                      "tags: [\"ors\"]\naudited_period_start: \"2018-07-01\"")
+    (tmp_path / "statutes" / "ors-1.010.md").write_text(doc)
+    cfg = textwrap.dedent("""
+        corpus: {id: t, name: T, jurisdiction: oregon, archetype: document}
+        content_roots:
+          - path: statutes
+            doc_type: statute
+    """).strip() + "\n"
+    if declare:
+        cfg += "mcp:\n  extra_document_fields: [audited_period_start]\n"
+    (tmp_path / "_meta" / "corpus.yml").write_text(cfg)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    return CorpusFramework(load_config(str(tmp_path / "_meta" / "corpus.yml")))
+
+
+def test_custom_frontmatter_is_absent_unless_declared(tmp_path):
+    """The default must not change: a corpus adding a frontmatter key does not silently
+    change what its server emits. The response shape is an interface contract."""
+    d = _corpus_with_custom_field(tmp_path, declare=False).get_document("ors-1.010")
+    assert "audited_period_start" not in d
+
+
+def test_declared_custom_frontmatter_reaches_get_document(tmp_path):
+    """The bug this fixes. Without it a field can be REQUIRED by a corpus's own schema
+    checks and still be unreachable by every caller -- it validates, then vanishes.
+    oregon-audits hit exactly this: `audited_period_start` is the value that stops a 2019
+    finding being read as current, and no agent could see it."""
+    d = _corpus_with_custom_field(tmp_path, declare=True).get_document("ors-1.010")
+    assert d.get("audited_period_start") == "2018-07-01"
+
+
+def test_declaring_a_field_no_document_carries_is_harmless(tmp_path):
+    """Declaring is a promise to serve the field WHEN PRESENT, not an assertion that every
+    document has it. A KeyError here would make the config brittle for no benefit."""
+    fw = _corpus_with_custom_field(tmp_path, declare=True)
+    fw.config.mcp_extra_document_fields = ["audited_period_start", "no_such_field"]
+    d = fw.get_document("ors-1.010")
+    assert d.get("audited_period_start") == "2018-07-01"
+    assert "no_such_field" not in d
