@@ -19,7 +19,8 @@
       "type": "string",
       "enum": ["statute", "rule", "executive_order", "policy", "procedure",
                "standard", "manual", "schedule", "ordinance", "entity_doc",
-               "dataset_doc", "external_reference"]
+               "dataset_doc", "external_reference",
+               "audit_report"]
     },
     "citation": { "type": "string", "minLength": 1 },
     "authority_level": { "type": "string" },
@@ -74,7 +75,7 @@
   "allOf": [
     {
       "if": {
-        "properties": { "doc_type": { "enum": ["statute", "rule", "executive_order", "policy", "procedure", "standard", "manual", "schedule", "ordinance"] } },
+        "properties": { "doc_type": { "enum": ["statute", "rule", "executive_order", "policy", "procedure", "standard", "manual", "schedule", "ordinance", "audit_report"] } },
         "not": {
           "anyOf": [
             { "required": ["content_exception"] },

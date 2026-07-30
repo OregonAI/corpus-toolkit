@@ -38,7 +38,10 @@ from corpus_toolkit.repo import (
 )
 
 STATE_AUTHORED = {"statute", "rule", "executive_order", "policy", "procedure",
-                  "standard", "manual", "schedule", "ordinance"}
+                  "standard", "manual", "schedule", "ordinance",
+                  # Audits Division reports: state-authored, and quoted verbatim like any
+                  # other. A finding paraphrased is a finding changed.
+                  "audit_report"}
 
 _CONFIG = None
 _SLICE_FN = None
