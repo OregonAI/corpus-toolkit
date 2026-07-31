@@ -65,6 +65,37 @@ def _open_issue(source_id, url, old, new):
                     "--title", title, "--body", body])
 
 
+def _warn_recheck_is_not_honoured(config) -> int:
+    """Say out loud that `recheck:` configures nothing. Returns the number of declarations.
+
+    Manifests declare a re-check cadence, top-level and per-source, and NOTHING reads it.
+    The real cadence is whatever the calling workflow's cron says. Two ways that bites, and
+    the second is the one that actually did: a curator writing `recheck: annual` believes
+    they configured something, and a REVIEWER reading the human-approved manifest has no
+    reason to go read the cron — so `recheck: annual` beside a weekly cron reads as
+    deliberate restraint. oregon-audits declared annual, because an audit report is
+    immutable once published, and re-fetched 242 PDFs every week.
+
+    Deleting the key would put cadence in exactly one place, but it is already written into
+    manifests across the platform and carries real curator intent about how an upstream
+    should be treated. Warning keeps that intent legible and makes the dead key
+    self-documenting, which is what it was missing.
+    """
+    seen: list[str] = []
+    for group in config_mod.load_source_manifest_groups(config):
+        if group.get("recheck"):
+            seen.append(f"{group.get('group') or 'manifest'} (group-level)")
+        for s in group.get("sources") or []:
+            if isinstance(s, dict) and s.get("recheck"):
+                seen.append(str(s.get("id", "<unnamed>")))
+    if seen:
+        shown = ", ".join(seen[:5]) + (f", +{len(seen) - 5} more" if len(seen) > 5 else "")
+        print(f"NOTE: {len(seen)} `recheck:` declaration(s) in the source manifest are NOT "
+              f"honoured — this tool checks every source on every run. The real cadence is "
+              f"the workflow's cron schedule. ({shown})", file=sys.stderr)
+    return len(seen)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True, help="path to _meta/corpus.yml")
@@ -74,6 +105,7 @@ def main():
     args = ap.parse_args()
 
     config = config_mod.load(args.config)
+    _warn_recheck_is_not_honoured(config)
 
     changed, failed = [], []
     for s in iter_manifest_sources(config):

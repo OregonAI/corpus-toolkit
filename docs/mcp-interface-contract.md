@@ -218,7 +218,8 @@ the hook and registering nothing is likewise an error rather than a no-op.
    corpus_overview and any response an agent is likely to quote from.
 5. Errors are explicit, never silently empty, and never report a different
    condition than the one that occurred: `unresolved`, `no_graph`,
-   `not_in_graph`, `sibling_unavailable`, `stale` (past recheck cadence),
+   `not_in_graph`, `sibling_unavailable`, `stale` (past the corpus's own
+   freshness window — NOT the manifest's `recheck`, which nothing reads),
    `schema_drift` (API shape changed since last_verified). "Could not
    check" and "is not there" are opposite answers and must never collapse
    into one message.
