@@ -17,9 +17,16 @@ large-scale ingestion).
 ## 2. Discover (agent labor, human gate #1)
 - Seed an agent with the authoritative index pages for the domain.
 - Agent proposes `_meta/source-manifest.yml`: every candidate source with
-  citation, title, URL, doc_type, recheck cadence, why-relevant, and what
+  citation, title, URL, doc_type, recheck cadence (advisory — see below),
+  why-relevant, and what
   it references outward.
 - **Human approves/prunes the manifest via PR before any ingestion.**
+
+  > `recheck:` is ADVISORY. The toolkit carries it through and never interprets it:
+  > `corpus-detect-changes` checks every source on every run, and the cadence that
+  > actually applies is the cron in the calling workflow. Write it to record intent,
+  > not to configure behaviour — and set the cron to match. `corpus-detect-changes`
+  > prints a NOTE when it sees the key.
 
 ## 3. Configure guardrails (30 min)
 - CODEOWNERS: assign content dirs.

@@ -62,7 +62,9 @@ CHANGELOG.md       Keep a Changelog + domain change types
 _meta/
   corpus.yml       corpus config: id, jurisdiction, archetype, versions, siblings
   corpus-index.json     generated compact id→[title,doc_type,path] index siblings resolve against
-  source-manifest.yml   every upstream source, recheck cadence, hashes
+  source-manifest.yml   every upstream source, hashes, and a `recheck` cadence that
+                        records curator INTENT only — nothing reads it; the real cadence
+                        is the calling workflow's cron (corpus-toolkit#20)
   templates/       document template(s)
   snapshots/       pinned source snapshots (document/hybrid)
 <content dirs>     archetype-dependent
