@@ -54,7 +54,15 @@ VERBATIM_REQUIRED = {"statute", "rule", "executive_order", "policy", "procedure"
                      # Audits Division reports. A finding paraphrased is a finding changed.
                      "audit_report",
                      # Federal instruments we are entitled to mirror in full.
-                     "federal_instrument"}
+                     "federal_instrument",
+                     # Annual Performance Progress Reports: an agency's own report to the
+                     # Legislature against its Key Performance Measures. State-authored, so
+                     # we may reproduce it -- and A REPORTED NUMBER PARAPHRASED IS A
+                     # DIFFERENT NUMBER. This corpus exists to be read against budget
+                     # figures, so an actual, a target, or a green/yellow/red assessment
+                     # restated rather than mirrored becomes a claim WE made instead of one
+                     # the agency made. That is the whole distinction the corpus carries.
+                     "performance_report"}
 
 # Deprecated alias. The old name is inaccurate now but was importable, so it stays.
 STATE_AUTHORED = VERBATIM_REQUIRED

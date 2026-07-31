@@ -574,9 +574,10 @@ def test_two_corpora_do_not_share_a_scheme_registry(tmp_path):
     assert [s[0] for s in frameworks[1].schemes] == ["measure"]
 
 
-# ---------- audit_report doc_type (oregon-audits, Phase 7) ----------
+# ---------- mirrored doc_types (oregon-audits P7, federal-reference P8, oregon-kpm P10) ----------
 
-@pytest.mark.parametrize("doc_type", ["audit_report", "federal_instrument"])
+@pytest.mark.parametrize("doc_type",
+                         ["audit_report", "federal_instrument", "performance_report"])
 def test_mirrored_doc_type_is_wired_in_all_three_places(doc_type):
     """A doc_type we reproduce must be in THREE coupled places or it half-works.
 
