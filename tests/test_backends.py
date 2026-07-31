@@ -576,25 +576,51 @@ def test_two_corpora_do_not_share_a_scheme_registry(tmp_path):
 
 # ---------- audit_report doc_type (oregon-audits, Phase 7) ----------
 
-def test_audit_report_is_a_valid_doc_type_and_is_state_authored():
-    """`audit_report` must be in THREE coupled places or it half-works.
+@pytest.mark.parametrize("doc_type", ["audit_report", "federal_instrument"])
+def test_mirrored_doc_type_is_wired_in_all_three_places(doc_type):
+    """A doc_type we reproduce must be in THREE coupled places or it half-works.
 
-    The enum alone makes the type valid. But if it is missing from the schema's
-    state-authored conditional it stops requiring source_sha256/content_mode, and if it is
-    missing from provenance.STATE_AUTHORED it stops requiring content_mode: verbatim. Either
-    omission yields a doc_type that validates cleanly while skipping the verbatim guarantee
-    -- which for an audit finding means a paraphrase could ship as the record.
+    The enum alone makes the type valid. Missing from the schema's verbatim-required
+    conditional it stops requiring source_sha256/content_mode; missing from
+    provenance.VERBATIM_REQUIRED it stops requiring content_mode: verbatim. Either omission
+    yields a type that validates cleanly while SKIPPING the guarantee that the text is the
+    real text -- for an audit finding that means a paraphrase ships as the record, and for
+    a federal requirement it means a paraphrase ships as the law.
+
+    Parametrized so the next mirrored type cannot be added to the enum alone.
     """
     import json
     from pathlib import Path
-    from corpus_toolkit.validate.provenance import STATE_AUTHORED
+    from corpus_toolkit.validate.provenance import VERBATIM_REQUIRED
     schema = json.loads((Path(__file__).parent.parent / "corpus_toolkit" / "schemas"
                          / "document.frontmatter.v1.schema.json").read_text())
-    assert "audit_report" in schema["properties"]["doc_type"]["enum"]
-    assert "audit_report" in schema["allOf"][0]["if"]["properties"]["doc_type"]["enum"], \
-        "audit_report is a valid type but is not required to carry a snapshot hash"
-    assert "audit_report" in STATE_AUTHORED, \
-        "audit_report would not be required to be verbatim"
+    assert doc_type in schema["properties"]["doc_type"]["enum"]
+    assert doc_type in schema["allOf"][0]["if"]["properties"]["doc_type"]["enum"], \
+        f"{doc_type} is valid but is not required to carry a snapshot hash"
+    assert doc_type in VERBATIM_REQUIRED, f"{doc_type} would not be required to be verbatim"
+
+
+def test_external_reference_stays_summary_only():
+    """The other half of the copyright determination, and it must not drift.
+
+    federal_instrument means "we may reproduce this"; external_reference means "we may
+    not". If external_reference ever stopped forcing summary, third-party or
+    distribution-restricted material could be mirrored in full with nothing objecting.
+    """
+    import json
+    from pathlib import Path
+    schema = json.loads((Path(__file__).parent.parent / "corpus_toolkit" / "schemas"
+                         / "document.frontmatter.v1.schema.json").read_text())
+    cond = next(c for c in schema["allOf"]
+                if c["if"]["properties"]["doc_type"].get("const") == "external_reference")
+    assert cond["then"]["properties"]["content_mode"]["const"] == "summary"
+
+
+def test_state_authored_alias_still_resolves():
+    """The old name was importable, so it stays. Renaming it silently would break callers
+    that never see a deprecation warning."""
+    from corpus_toolkit.validate.provenance import STATE_AUTHORED, VERBATIM_REQUIRED
+    assert STATE_AUTHORED is VERBATIM_REQUIRED
 
 
 # ---------- mcp.extra_document_fields (corpus-toolkit#21) ----------

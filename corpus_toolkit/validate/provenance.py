@@ -9,7 +9,8 @@ slicing rules.
 For every content file: the source snapshot must exist and match the
 recorded content hash (hash_snapshot — deterministic, no re-extraction).
 
-content_mode: verbatim (required for state-authored doc_types):
+content_mode: verbatim (required for doc_types in VERBATIM_REQUIRED —
+material we are entitled to reproduce, state or federal):
   - a '## Full text' section must exist;
   - every non-empty line of it, whitespace-normalized, must appear in the
     snapshot text IN ORDER — mechanically prevents fabrication;
@@ -37,11 +38,26 @@ from corpus_toolkit.repo import (
     extract_verbatim_quotes, hash_snapshot, normalize_ws, parse_frontmatter,
 )
 
-STATE_AUTHORED = {"statute", "rule", "executive_order", "policy", "procedure",
-                  "standard", "manual", "schedule", "ordinance",
-                  # Audits Division reports: state-authored, and quoted verbatim like any
-                  # other. A finding paraphrased is a finding changed.
-                  "audit_report"}
+# Doc types whose content we MIRROR and therefore verify line-by-line against a snapshot.
+#
+# Named VERBATIM_REQUIRED rather than STATE_AUTHORED because it stopped being about the
+# state: federal_instrument is authored in Washington, not Salem. What the set actually
+# means is "we are entitled to reproduce this, so we must reproduce it faithfully".
+#
+# The reproduction question is carried by the DOC TYPE, which is what makes it enforceable:
+#   federal_instrument   material we MAY reproduce (17 U.S.C. § 105 works)  -> verbatim
+#   external_reference   material we may NOT (third-party, or restricted)   -> summary
+# A federal document we can only summarize -- an incorporated ISO standard, a CJIS version
+# with its own distribution terms -- is an external_reference, not a federal_instrument.
+VERBATIM_REQUIRED = {"statute", "rule", "executive_order", "policy", "procedure",
+                     "standard", "manual", "schedule", "ordinance",
+                     # Audits Division reports. A finding paraphrased is a finding changed.
+                     "audit_report",
+                     # Federal instruments we are entitled to mirror in full.
+                     "federal_instrument"}
+
+# Deprecated alias. The old name is inaccurate now but was importable, so it stays.
+STATE_AUTHORED = VERBATIM_REQUIRED
 
 _CONFIG = None
 _SLICE_FN = None
@@ -116,7 +132,7 @@ def check_file(path):
     checked = 1
 
     mode = fm.get("content_mode")
-    state_authored = fm.get("doc_type") in STATE_AUTHORED
+    state_authored = fm.get("doc_type") in VERBATIM_REQUIRED
     excused = bool(fm.get("content_exception") or fm.get("migration_pending"))
 
     if state_authored and mode != "verbatim":
