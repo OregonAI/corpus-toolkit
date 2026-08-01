@@ -149,21 +149,34 @@ def quantize_int8(vecs):
     return np.clip(np.rint(vecs * 127.0), -127, 127).astype(np.int8)
 
 
-def _paths_and_dir(config_path: str):
+def _paths_and_dir(config_path: str, out: str | None = None):
+    """(config, content paths, artifact dir, body headings).
+
+    `out` exists because `_meta/embeddings/` is not always free. oregon-legislature already
+    keeps a DIFFERENT artifact there -- a measure-level index built by its own
+    src/build_measure_embeddings.py and consumed by its topic map, with `granularity:
+    measure` and `rows.jsonl` instead of `chunks.jsonl`. Writing a chunk-level search index
+    to the same path would overwrite it, and the topic map's staleness check keys on a
+    fingerprint that would still match, so the damage would not surface until someone looked
+    at the map.
+    """
     cfg = config_mod.load(config_path)
-    root = cfg.root
     body_headings = None
     plugins = getattr(cfg, "raw", {}).get("plugins") if hasattr(cfg, "raw") else None
     if isinstance(plugins, dict):
         bh = plugins.get("semantic_body_headings")
         if isinstance(bh, list) and bh:
             body_headings = bh
-    return cfg, list(content_files(cfg)), root / "_meta" / "embeddings", body_headings
+    d = Path(out) if out else cfg.root / "_meta" / "embeddings"
+    if not d.is_absolute():
+        d = cfg.root / d
+    return cfg, list(content_files(cfg)), d, body_headings
 
 
-def build(config_path: str, backend="auto", limit=None, dim=384, model=None) -> int:
+def build(config_path: str, backend="auto", limit=None, dim=384, model=None,
+          out=None) -> int:
     import numpy as np
-    cfg, paths, emb_dir, body_headings = _paths_and_dir(config_path)
+    cfg, paths, emb_dir, body_headings = _paths_and_dir(config_path, out)
     if limit:
         paths = paths[:limit]
     emb = make_embedder(backend, dim, model)
@@ -221,9 +234,9 @@ def build(config_path: str, backend="auto", limit=None, dim=384, model=None) -> 
     return 0
 
 
-def check(config_path: str) -> int:
+def check(config_path: str, out=None) -> int:
     """Is the artifact current for this corpus's content? Offline, no model needed."""
-    cfg, paths, emb_dir, body_headings = _paths_and_dir(config_path)
+    cfg, paths, emb_dir, body_headings = _paths_and_dir(config_path, out)
     meta_p = emb_dir / "meta.json"
     if not meta_p.is_file():
         # SOFT PASS. The artifact is gitignored and absent from every fresh clone and from
@@ -253,10 +266,12 @@ def main() -> int:
     ap.add_argument("--dim", type=int, default=384, help="hashing backend only")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--out", help="artifact directory (default _meta/embeddings); use when "
+                                  "that path already holds a different artifact")
     a = ap.parse_args()
     if a.check:
-        return check(a.config)
-    return build(a.config, a.backend, a.limit, a.dim, a.model)
+        return check(a.config, a.out)
+    return build(a.config, a.backend, a.limit, a.dim, a.model, a.out)
 
 
 if __name__ == "__main__":
