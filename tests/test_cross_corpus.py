@@ -168,6 +168,50 @@ class TestSiblingResolution(CrossCorpusTestCase):
         self.assertNotIn("sibling_unavailable", out)     # we DID look; it isn't there
         self.assertIn("holds no document", out["note"])
 
+    def test_illegal_candidate_id_is_a_scheme_bug_not_an_absent_document(self):
+        """The distinction this whole class turns on.
+
+        `test_sibling_available_but_document_absent_says_so` above is the true absence:
+        we looked, the sibling answered, the document is not there. THIS is a different
+        thing wearing the same clothes — the scheme built an id outside the frontmatter
+        schema's charset (`^[a-z0-9][a-z0-9._-]+$`), so nothing could have matched no
+        matter what the sibling holds.
+
+        Told apart only by the note, and told apart matters: reported as an absence, two
+        corpora filed coverage-gap issues against a sibling holding every document they
+        claimed was missing. `ors-{num}` templated straight from citation text produced
+        `ors-279A.010` while the sibling held `ors-279a.010`, for all 37 lettered ORS
+        chapters."""
+        idx = self.tmp / "sibling-index.json"
+        idx.write_text(json.dumps(SIBLING_INDEX))
+        cfg = make_corpus(self.tmp / "repo", index_path=idx)
+        register_scheme("oar-rule", r"OAR\s+(?P<num>[\dA-Za-z-]+)", "oar-{num}",
+                        corpus="executive-regulatory-frameworks")
+
+        out = self.framework(cfg).resolve_citation("OAR 166-300-0040X")
+
+        self.assertTrue(out["unresolved"])
+        self.assertEqual(out["matches"], [])
+        self.assertIn("citation-scheme bug", out["note"])
+        self.assertIn("oar-166-300-0040X", out["note"])   # names the id it built
+        self.assertIn("oar-rule", out["note"])            # and the scheme that built it
+        # Must NOT read as a coverage gap — that phrasing is what sent the issues.
+        self.assertNotIn("holds no document", out["note"])
+
+    def test_legal_lowercase_candidate_still_resolves_normally(self):
+        """The guard drops only ids that could never match. Same scheme, legal id."""
+        idx = self.tmp / "sibling-index.json"
+        idx.write_text(json.dumps(SIBLING_INDEX))
+        cfg = make_corpus(self.tmp / "repo", index_path=idx)
+        register_scheme("oar-rule", r"OAR\s+(?P<num>[\dA-Za-z-]+)", "oar-{num}",
+                        corpus="executive-regulatory-frameworks")
+
+        out = self.framework(cfg).resolve_citation("OAR 166-300-0040")
+
+        self.assertNotIn("unresolved", out)
+        self.assertEqual(out["matches"][0]["id"], "oar-166-300-0040")
+        self.assertIsNone(out.get("note"))
+
     def test_scheme_names_an_undeclared_sibling(self):
         cfg = make_corpus(self.tmp / "repo")             # no siblings: block at all
         register_scheme("oar-rule", r"OAR\s+(?P<num>\d+-\d+-\d+)", "oar-{num}",
