@@ -47,6 +47,11 @@ BIG_DOC_BYTES = 50_000
 # ---------- citation-scheme registry (populated by a corpus's citation_module) ----------
 
 _SCHEMES: list[tuple[str, "re.Pattern", str | None, object | None, str | None]] = []
+
+# Kept identical to `properties.id.pattern` in schemas/document.frontmatter.v1.schema.json.
+# A candidate id outside this charset can never match a validated document; see the check in
+# _match_scheme, which is the only place it is used.
+_LEGAL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]+$")
 # Set while a CorpusFramework imports its citation module; see register_scheme.
 # A citation scheme is a property of ONE corpus, and this platform's premise is many
 # corpora sharing one toolkit — a process-wide registry made correctness depend on
@@ -301,6 +306,26 @@ class CorpusFramework:
                     cands = [cid]
                 except (IndexError, KeyError):
                     cands = []
+            # AN ID THAT NO DOCUMENT IS ALLOWED TO HAVE IS A SCHEME BUG, NOT A MISS.
+            # `document.frontmatter.v1` pins ids to `^[a-z0-9][a-z0-9._-]+$`, so a candidate
+            # outside that charset cannot match anything — not because the corpus lacks the
+            # document, but because the scheme built an id the corpus could never contain.
+            # Reported identically to a genuine absence, that is indistinguishable from a
+            # coverage gap: two corpora templated `ors-{num}` straight from the citation
+            # text, produced `ors-279A.010` against a corpus holding `ors-279a.010`, and
+            # every lettered ORS chapter silently resolved to nothing. It was filed against
+            # the OTHER corpus as missing chapters, twice, before anyone looked at the id.
+            #
+            # Dropped rather than raised: this runs inside a live MCP server answering a
+            # user's question, and a malformed scheme should degrade to a clear diagnosis
+            # rather than a stack trace. The note is what makes it loud.
+            bad = [c for c in cands if not _LEGAL_ID.match(str(c))]
+            if bad:
+                cands = [c for c in cands if c not in bad]
+                note = (f"citation-scheme bug, not a coverage gap: scheme {name!r} produced "
+                        f"{', '.join(repr(b) for b in bad[:3])}, which cannot match any "
+                        f"document — ids are lowercase, matching {_LEGAL_ID.pattern}. "
+                        f"Fix the scheme's id_template/resolver.")
             return name, scheme_corpus, cands, note
         return None, None, [], None
 
