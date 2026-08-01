@@ -101,6 +101,23 @@ class CorpusConfig:
     # contract, so a corpus declares what it adds rather than leaking whatever happens to
     # be in its frontmatter.
     mcp_extra_document_fields: list[str]
+    # Relations `authority_chain` should walk IN ADDITION to implements/implemented_by,
+    # each returned under its own response key. Shape: {"up"|"down": {name: [rel, ...]}}.
+    #
+    # WHY THIS IS CONFIG AND NOT A SECOND HARDCODED KEY. There is no single citation-style
+    # relation across the org: oregon-counties, oregon-budget, oregon-legislature and
+    # oregon-audits record external citations as `references_external`, while
+    # oregon-records-retention puts its external OAR citations under `related`. Hardcoding
+    # one fixes four corpora and leaves another empty.
+    #
+    # WHY THEY GET THEIR OWN KEY. `references_external` is not `implements`. A county
+    # ordinance citing ORS 215.203 is usually implementing it, and usually is not a fact —
+    # which is why oregon-counties records citations rather than asserting implementation.
+    # Returning those under a key named `up_implements` would assert the relationship the
+    # graph deliberately declined to claim.
+    #
+    # Empty by default, so a corpus that declares nothing gets byte-identical responses.
+    mcp_authority_relations: dict[str, dict[str, list[str]]]
     reverify_days: int
     coverage_fail_threshold: float
     coverage_warn_threshold: float
@@ -200,6 +217,62 @@ def iter_manifest_sources(config: "CorpusConfig"):
         yield from (g.get("sources", []) or [])
 
 
+# The five keys `relationships` may contain — document.frontmatter.v1.schema.json pins this
+# with additionalProperties: false, so a typo here can never match a real edge.
+_RELATION_KEYS = ("implements", "implemented_by", "references_external", "related",
+                  "supersedes")
+_ALWAYS_WALKED = {"up": "implements", "down": "implemented_by"}
+
+
+def _validated_authority_relations(raw) -> dict[str, dict[str, list[str]]]:
+    """Parse and CHECK `mcp.authority_relations`, loudly.
+
+    Every failure mode here is silent if unchecked, and each produces a tool that answers
+    confidently with nothing — which is the defect this whole feature exists to fix:
+
+      * a direction other than up/down is simply never walked
+      * a relation key that is not one of the five legal ones matches no edge, ever
+      * a name colliding with `implements`/`implemented_by` would overwrite the
+        unconditional result and silently redefine what the corpus claims
+    """
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("mcp.authority_relations must be a mapping of "
+                         "{'up'|'down': {name: [relation, ...]}}")
+    out: dict[str, dict[str, list[str]]] = {}
+    for direction, group in raw.items():
+        if direction not in ("up", "down"):
+            raise ValueError(f"mcp.authority_relations: unknown direction {direction!r} "
+                             f"(expected 'up' or 'down')")
+        if not group:
+            continue
+        if not isinstance(group, dict):
+            raise ValueError(f"mcp.authority_relations.{direction} must be a mapping of "
+                             f"{{name: [relation, ...]}}")
+        named: dict[str, list[str]] = {}
+        for name, rels in group.items():
+            if name in _ALWAYS_WALKED.values():
+                raise ValueError(
+                    f"mcp.authority_relations.{direction}: {name!r} is walked "
+                    f"unconditionally and cannot be redefined — pick another name so the "
+                    f"asserted relation and the configured one stay distinguishable")
+            rels = [rels] if isinstance(rels, str) else list(rels or [])
+            bad = [r for r in rels if r not in _RELATION_KEYS]
+            if bad:
+                raise ValueError(
+                    f"mcp.authority_relations.{direction}.{name}: "
+                    f"{', '.join(map(repr, bad))} is not a relationship key. "
+                    f"Legal keys: {', '.join(_RELATION_KEYS)}")
+            if not rels:
+                raise ValueError(f"mcp.authority_relations.{direction}.{name} is empty — "
+                                 f"remove it, or name the relations it should walk")
+            named[name] = rels
+        if named:
+            out[direction] = named
+    return out
+
+
 def _validated_index_headings(raw) -> dict:
     """Validate `index_headings` shape LOUDLY.
 
@@ -294,6 +367,8 @@ def load(config_path: str | Path) -> CorpusConfig:
         mcp_server_name=mcp.get("server_name", corpus.get("id", "corpus")),
         mcp_transports=mcp.get("transports", ["stdio", "http"]),
         mcp_extra_document_fields=list(mcp.get("extra_document_fields", []) or []),
+        mcp_authority_relations=_validated_authority_relations(
+            mcp.get("authority_relations")),
         reverify_days=int(status.get("reverify_days", 90)),
         coverage_fail_threshold=float(provenance.get("coverage_fail_threshold", 0.70)),
         coverage_warn_threshold=float(provenance.get("coverage_warn_threshold", 0.90)),

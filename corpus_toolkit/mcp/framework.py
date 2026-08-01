@@ -512,16 +512,22 @@ class CorpusFramework:
             return err
         depth = max(1, min(int(depth), 6))
 
-        def walk(start, key):
+        def walk(start, keys):
+            # `keys` may name several relations. They are merged per node rather than
+            # walked separately and concatenated, because `walk` seeds `seen` with the
+            # start node per call — two relations naming the same target would otherwise
+            # emit it twice.
+            keys = (keys,) if isinstance(keys, str) else tuple(keys)
             seen, levels, frontier = {start}, [], [start]
             for _ in range(depth):
                 nxt = []
                 for i in frontier:
+                    rels = edges.get(i, {})
+                    targets = [t for k in keys for t in rels.get(k, [])]
                     # dict.fromkeys, not a set: order is the graph's edge order, and a
                     # target listed twice on one node must still only appear once (the
                     # old loop got that from marking `seen` inside the loop body).
-                    fresh = list(dict.fromkeys(
-                        t for t in edges.get(i, {}).get(key, []) if t not in seen))
+                    fresh = list(dict.fromkeys(t for t in targets if t not in seen))
                     seen.update(fresh)
                     # Same external-target rule as graph_neighbors — this walk had the
                     # identical unguarded nodes[t] and raised KeyError the moment an
@@ -540,10 +546,18 @@ class CorpusFramework:
 
         out = {**self._envelope(), "id": doc_id, "title": node["title"],
                "doc_type": node["doc_type"]}
+        # implements/implemented_by are ALWAYS walked and are not configurable. They are the
+        # asserted authority relation; everything else a corpus declares is returned beside
+        # them, never merged into them — see config._validated_authority_relations for why.
+        configured = self.config.mcp_authority_relations
         if direction in ("up", "both"):
             out["up_implements"] = walk(doc_id, "implements")
+            for name, keys in (configured.get("up") or {}).items():
+                out[f"up_{name}"] = walk(doc_id, keys)
         if direction in ("down", "both"):
             out["down_implemented_by"] = walk(doc_id, "implemented_by")
+            for name, keys in (configured.get("down") or {}).items():
+                out[f"down_{name}"] = walk(doc_id, keys)
         return out
 
     def graph_neighbors(self, doc_id: str) -> dict:

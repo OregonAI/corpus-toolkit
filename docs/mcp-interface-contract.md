@@ -110,6 +110,30 @@ corpus without a graph answers the first row above.
   up to statute or down to standards, cross-corpus edges included. Same
   neighbour shape and same three graph conditions as `graph_neighbors`.
   Registered for the `document` and `hybrid` archetypes.
+
+  `implements` / `implemented_by` are always walked, and return under
+  `up_implements` / `down_implemented_by`. A corpus **may declare further
+  relations** in `mcp.authority_relations`; each returns under its own key
+  (`up_<name>` / `down_<name>`) and is **never merged into the implements
+  result**:
+
+  ```yaml
+  mcp:
+    authority_relations:
+      up: {cites: [references_external]}    # -> up_cites
+  ```
+
+  The separation is the point, not a formality. `implements` asserts that this
+  document implements that one; `references_external` records only that it
+  cites it. A county ordinance citing ORS 215.203 is usually implementing it,
+  and *usually* is not a fact — so a corpus that records citations must not
+  have them served back as implementation claims. **Reading `up_cites` as an
+  authority relation is a misreading of the data, not of this contract.**
+
+  Declaring nothing leaves the response byte-identical, so this is additive for
+  every corpus that predates it. Configured relations obey the same
+  external-frontier rule: an external neighbour is enriched from the sibling
+  index but never extends the walk, so a cross-corpus chain is one level deep.
 - `issuing_body_profile(slug_or_query)` — who the issuing body is, what it
   holds in this corpus. Takes a registry slug **or** free text, which falls
   back to a unique case-insensitive substring match on the registry name;
