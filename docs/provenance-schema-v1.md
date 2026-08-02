@@ -14,9 +14,9 @@ requiredness rules expressed per archetype. Machine form:
 | `jurisdiction` | ✅ | all | e.g. `oregon`, `oregon/marion-county`, `oregon/salem` |
 | `id` | ✅ | all | stable slug = filename |
 | `title` | ✅ | all | |
-| `doc_type` | ✅ | all | enum extended per corpus in corpus.yml (base: statute, rule, executive_order, policy, procedure, standard, manual, schedule, ordinance, entity_doc, dataset_doc, external_reference) |
+| `doc_type` | ✅ | all | shared enum (statute, rule, executive_order, policy, procedure, standard, manual, schedule, ordinance, entity_doc, dataset_doc, external_reference, audit_report, federal_instrument, performance_report), extensible per corpus since v1.19.0 via corpus.yml `schema.doc_types: [{name, verbatim}]` — this claim predated the mechanism (corpus-toolkit#40) |
 | `citation` | ✅ | all | human citation string |
-| `authority_level` | ✅ | doc/hybrid docs | ranked enum, corpus.yml may extend |
+| `authority_level` | ✅ | doc/hybrid docs | free string; no toolkit code ranks or validates it (an earlier claim of a ranked, extensible enum described a design that was never built) |
 | `issuing_body` | ✅ | all | |
 | `legal_authority` | – | doc/hybrid docs | upstream citations |
 | `source_url` | ✅ | all | pinned URL or API base for entity docs |

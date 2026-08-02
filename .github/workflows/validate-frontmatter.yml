@@ -14,7 +14,7 @@ on:
           `uses:` — they are separate knobs and drift silently otherwise, because `uses:`
           selects the WORKFLOW FILE while this selects the CODE it runs.
         type: string
-        default: v1.4.0
+        required: true
       jobs:
         description: worker processes for corpus-validate-frontmatter (empty = CLI auto-detects cpu_count)
         type: string

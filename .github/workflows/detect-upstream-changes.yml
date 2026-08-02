@@ -11,7 +11,7 @@ on:
           `uses:` — they are separate knobs and drift silently otherwise, because `uses:`
           selects the WORKFLOW FILE while this selects the CODE it runs.
         type: string
-        default: v1.4.0
+        required: true
 
 jobs:
   detect:

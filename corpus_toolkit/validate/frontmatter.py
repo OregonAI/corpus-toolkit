@@ -168,6 +168,29 @@ def bundled_schema() -> dict:
                       .read_text(encoding="utf-8"))
 
 
+def schema_with_extensions(doc_schema, config):
+    """The shared schema, plus this corpus's declared doc_types (corpus-toolkit#40).
+
+    Extends exactly two spots: the doc_type enum, and — for types declared
+    verbatim: true — the allOf conditional that makes provenance fields required.
+    Everything else about an extended type behaves like any other document. Before
+    this, "extended per corpus in corpus.yml" was a docs claim with no mechanism,
+    and each new vertical cost a toolkit release."""
+    extras = getattr(config, "extra_doc_types", {}) or {}
+    if not extras:
+        return doc_schema
+    import copy
+    s = copy.deepcopy(doc_schema)
+    s["properties"]["doc_type"]["enum"].extend(
+        n for n in extras if n not in s["properties"]["doc_type"]["enum"])
+    verbatim = [n for n, v in extras.items() if v]
+    for clause in s.get("allOf", []):
+        cond = (clause.get("if", {}).get("properties", {}).get("doc_type", {}))
+        if "enum" in cond:
+            cond["enum"].extend(n for n in verbatim if n not in cond["enum"])
+    return s
+
+
 def _graph_node_ids(config):
     """All document ids known to the (CI-fresh) authority graph — a fast corpus-wide
     universe for relationship resolution without re-parsing every frontmatter."""
@@ -323,6 +346,7 @@ def main():
         return
 
     doc_schema = json.loads(open(args.schema).read()) if args.schema else bundled_schema()
+    doc_schema = schema_with_extensions(doc_schema, config)
     registry = _load_registry(config)
 
     docs = {}

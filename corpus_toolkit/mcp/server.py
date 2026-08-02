@@ -29,6 +29,21 @@ from corpus_toolkit.mcp.framework import CorpusFramework
 
 
 def build_server(config):
+    # A DECLARED ARCHETYPE IS A PROMISE ABOUT THE TOOL SURFACE, enforced here because it
+    # was broken silently once: oregon-legislature declared `hybrid`, registered no
+    # tools_module, started clean, and stamped `archetype: hybrid` on every response while
+    # serving none of the hybrid extension tools — a client reading the archetype and
+    # calling list_datasets got tool-not-found with nothing anywhere saying why
+    # (corpus-toolkit#38, oregon-legislature#11). Same policy as the tools_module gate
+    # below: refusing to start beats starting as something the corpus does not claim to be.
+    if config.archetype in ("hybrid", "api") and not config.tools_module:
+        raise RuntimeError(
+            f"corpus.archetype is {config.archetype!r} but plugins.tools_module is not "
+            f"declared, so none of the {config.archetype} extension tools "
+            f"(list_datasets, query_dataset, ...) would exist. Declare the tools_module "
+            f"that registers them, or declare the archetype this corpus actually serves "
+            f"(corpus-toolkit#38; the live incident was oregon-legislature#11).")
+
     fw = CorpusFramework(config)
     # Warm the backend and REPORT what it found. ensure_index() was called directly here,
     # which (a) raised AttributeError for any backend without an FTS index, making the
@@ -98,12 +113,21 @@ def build_server(config):
             'down' toward what implements it, 'both' does both."""
             return fw.authority_chain(doc_id, direction, depth)
 
-        if config.issuing_body_registry:
+        # ...AND the backend must be able to answer it. issuing_body_profile counts the
+        # corpus's holdings with raw SQL through ensure_index(), so a custom backend
+        # without an FTS index would register a tool that raises on every call — the one
+        # configuration the release gate did not cover (corpus-toolkit#38). Registering
+        # nothing is honest; registering a landmine is not.
+        if config.issuing_body_registry and hasattr(fw.backend, "ensure_index"):
             @mcp.tool()
             def issuing_body_profile(slug_or_query: str) -> dict:
                 """Context about an issuing body: registry identity, curated notes,
                 and what this corpus holds for it. Accepts a slug or name fragment."""
                 return fw.issuing_body_profile(slug_or_query)
+        elif config.issuing_body_registry:
+            print(f"[corpus-mcp] {config.id}: issuing_body_profile NOT registered — the "
+                  f"backend ({fw.backend.name}) has no ensure_index(), and the tool "
+                  f"would raise on every call.", file=sys.stderr)
 
     # Corpus-specific tools, registered LAST so they see a fully-built server and cannot
     # be shadowed by a built-in added later. The seam exists because the built-in seven

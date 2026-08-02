@@ -284,6 +284,7 @@ class CorpusFramework:
         resolved into the sibling corpus correctly while `graph_neighbors` treated the
         identical string as a missing local node and raised KeyError."""
         nodes, _ = self.graph()
+        matched = []
         for name, pattern, id_template, resolver, scheme_corpus in self.schemes:
             m = pattern.search(c)
             if not m:
@@ -326,8 +327,32 @@ class CorpusFramework:
                         f"{', '.join(repr(b) for b in bad[:3])}, which cannot match any "
                         f"document — ids are lowercase, matching {_LEGAL_ID.pattern}. "
                         f"Fix the scheme's id_template/resolver.")
-            return name, scheme_corpus, cands, note
-        return None, None, [], None
+            matched.append((name, scheme_corpus, cands, note))
+        if not matched:
+            return None, None, [], None
+
+        # ALL matching schemes are kept — the first-wins `return` that used to sit in the
+        # loop meant `CJIS 5.9.4 and 2 CFR 200.303` resolved as CFR only and the CJIS
+        # version-gap REFUSAL was silently dropped, while `schemes_attempted` read as
+        # though every scheme had been consulted (federal-reference#12).
+        #
+        # Candidates merge only across schemes that target the SAME corpus, because the
+        # caller routes one candidate list to one place (local backend or one sibling).
+        # A match targeting a different corpus keeps its note and is named, not merged —
+        # honest partial coverage beats mis-routed candidates.
+        primary_corpus = next((c for _, c, cs, _ in matched if cs), matched[0][1])
+        names, cands_merged, notes = [], [], []
+        for name, corp, cs, note in matched:
+            names.append(name)
+            if corp == primary_corpus:
+                cands_merged.extend(i for i in cs if i not in cands_merged)
+            elif cs:
+                notes.append(f"scheme {name!r} also matched, targeting corpus "
+                             f"{corp or 'local'!r} — cite it separately to resolve there")
+            if note:
+                notes.append(note if len(matched) == 1 else f"[{name}] {note}")
+        merged_note = "; ".join(notes) if notes else None
+        return "+".join(names), primary_corpus, cands_merged, merged_note
 
     # ---------- graph edge targets ----------
 
@@ -456,6 +481,17 @@ class CorpusFramework:
                 continue
             hit = {"id": i, "title": row["title"], "doc_type": row["doc_type"],
                    "corpus": sibling_id}
+            # v1.19.0 rows carry status; surface anything not known-current LOUDLY.
+            # "" is UNKNOWN (an older index), and unknown is stated, never upgraded to
+            # current — the failure this field exists to close was a sibling serving
+            # superseded federal text as current law (corpus-toolkit#25).
+            status = row.get("status", "")
+            if status and status != "current":
+                hit["status"] = status
+                hit["note"] = (f"resolves, but the sibling records this document as "
+                               f"{status.upper()} — not current text")
+            elif not status:
+                hit["status"] = "unknown"
             url = sibling_document_url(sib, row["path"])
             if url:
                 hit["url"] = url
@@ -619,8 +655,12 @@ class CorpusFramework:
     # ---------- document-corpus extension: issuing-body profile ----------
 
     def issuing_body_profile(self, slug_or_query: str) -> dict:
+        # Every return path carries the envelope. This tool was the one convention-1
+        # violation on the surface — both its error shapes and its success shape omitted
+        # corpus/archetype/authoritative_source, undocumented (corpus-toolkit#38).
         if not self.config.issuing_body_registry:
-            return {"error": "this corpus has no issuing-body registry configured"}
+            return {**self._envelope(),
+                    "error": "this corpus has no issuing-body registry configured"}
         registry = yaml.safe_load(self.config.issuing_body_registry.read_text()) or {}
         entries = {e["slug"]: e for e in registry.get(self.config.issuing_body_registry_key, [])}
         curated = {}
@@ -633,7 +673,8 @@ class CorpusFramework:
             q = slug_or_query.lower()
             hits = [s for s, o in entries.items() if q in o.get("name", "").lower()]
             if len(hits) != 1:
-                return {"error": f"no unique issuing body match for {slug_or_query!r}",
+                return {**self._envelope(),
+                        "error": f"no unique issuing body match for {slug_or_query!r}",
                         "candidates": [{"slug": s, "name": entries[s].get("name")} for s in hits[:8]]}
             slug = hits[0]
 
@@ -642,6 +683,7 @@ class CorpusFramework:
             "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body_slug = ? "
             "GROUP BY content_mode", (slug,)).fetchall()
         return {
+            **self._envelope(),
             "slug": slug,
             "registry": entries[slug],
             "curated": curated.get(slug, {}),
