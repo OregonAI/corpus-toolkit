@@ -105,7 +105,17 @@ def _semantic_index():
         # CORPUS_SEMANTIC_LOW_MEMORY=1 keeps int8 resident and pays per query instead.
         vecs = prepare_vectors(np, vecs)
         _SEM = (np, vecs, doc_ids, embedder, meta)
-    except Exception:
+    except Exception as e:
+        # STILL SWALLOWED -- the caller must degrade to keyword rather than 500 -- but no
+        # longer SILENT. Every distinct cause reports `available() -> False` and the response
+        # says nothing, so a missing mount, an unreachable encoder, a model-id mismatch and a
+        # missing numpy are indistinguishable from outside. Each of those has now cost real
+        # debugging time on this platform; the last was a corpus reporting healthy and serving
+        # keyword-only because numpy was not installed.
+        #
+        # One line on stderr costs nothing and turns "semantic is off and nobody knows why"
+        # into a container log you can read.
+        print(f"semantic search unavailable: {type(e).__name__}: {e}", file=sys.stderr)
         _SEM = None
     return _SEM
 
