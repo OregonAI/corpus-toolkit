@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corpus-toolkit"
-version = "1.17.0"
+version = "1.18.0"
 description = "Shared validation, provenance, and MCP framework for the civic corpus platform"
 requires-python = ">=3.10"
 dependencies = [
@@ -30,6 +30,21 @@ dependencies = [
 # because it reads as a guarantee.
 mcp = ["mcp[cli]>=1.28,<3"]
 test = ["pytest"]
+# THE SEMANTIC ARM'S ONLY RUNTIME DEPENDENCY, and it is deliberately just numpy.
+#
+# corpus_toolkit/semantic/ imports numpy lazily, inside functions, so a corpus that never
+# enables semantic search pays nothing -- which is why this is an extra rather than a base
+# dependency. But a corpus that DOES enable it needs numpy present, and discovering that at
+# runtime is the worst way: the loader swallows every exception and reports
+# `available() -> False`, so a missing numpy looks exactly like a missing mount, and the
+# corpus serves keyword-only while reporting healthy. That is precisely what happened
+# deploying federal-reference.
+#
+# NOT torch, NOT sentence-transformers. Those live in the shared encoder service; a corpus
+# holds vectors and does one matmul against them. Keeping this extra to numpy is what makes
+# a corpus image ~50 MiB of dependency instead of ~2.5 GiB of CUDA wheel.
+semantic = ["numpy"]
+
 
 [project.scripts]
 corpus-validate-frontmatter = "corpus_toolkit.validate.frontmatter:main"
