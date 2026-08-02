@@ -144,10 +144,13 @@ def lookup(index: dict, doc_id: str) -> dict | None:
     None. Tolerates a longer row than the 3 fields written today."""
     row = (index.get("documents") or {}).get(doc_id)
     if isinstance(row, (list, tuple)) and len(row) >= 3:
-        return {"title": row[0], "doc_type": row[1], "path": row[2]}
+        # Element 4 (v1.19.0) is status; "" from a shorter/older row means UNKNOWN,
+        # which callers must never collapse into "current" (corpus-toolkit#25).
+        return {"title": row[0], "doc_type": row[1], "path": row[2],
+                "status": row[3] if len(row) >= 4 else ""}
     if isinstance(row, dict):             # forward-compat: a richer row shape
         return {"title": row.get("title", ""), "doc_type": row.get("doc_type", ""),
-                "path": row.get("path", "")}
+                "path": row.get("path", ""), "status": row.get("status", "")}
     return None
 
 

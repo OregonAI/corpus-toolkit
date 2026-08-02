@@ -12,7 +12,13 @@ repo-relative path (which a sibling's `web_base` turns into a URL).
 Shape:
 
     {"corpus": "<id>", "contract_version": 1, "n_documents": 3,
-     "documents": {"<doc_id>": ["<title>", "<doc_type>", "<repo path>"], ...}}
+     "documents": {"<doc_id>": ["<title>", "<doc_type>", "<repo path>", "<status>"], ...}}
+
+The 4th element (v1.19.0, corpus-toolkit#25) is the document's `status` — current /
+superseded / repealed / proposed / draft, or "" for UNKNOWN (a graph built before its
+corpus emitted status). "" must never be read as "current": before this field existed, a
+sibling resolving into federal-reference could serve superseded federal text as current
+law, with only a title-string convention in the way.
 
 Derived from `_meta/graph.json`'s nodes when that file exists (it already
 carries id/title/doc_type/path), otherwise by walking the configured content
@@ -50,7 +56,10 @@ def _from_graph(config) -> dict[str, list[str]] | None:
         doc_id = n.get("id")
         if not doc_id or not n.get("path"):
             continue
-        docs[doc_id] = [n.get("title", ""), n.get("doc_type", ""), str(n["path"])]
+        # status "" = unknown, never assumed current: graph nodes carry it only once the
+        # corpus's build_graph.py emits it (one-line change, made org-wide with v1.19.0).
+        docs[doc_id] = [n.get("title", ""), n.get("doc_type", ""), str(n["path"]),
+                        n.get("status", "")]
     return docs or None
 
 
@@ -66,7 +75,9 @@ def _from_content(config) -> dict[str, list[str]]:
         if not doc_id:
             continue
         rel = p.resolve().relative_to(config.root)
-        docs[doc_id] = [fm.get("title", ""), fm.get("doc_type", ""), str(rel)]
+        # `status` is required by the frontmatter schema, so this path fills it for free.
+        docs[doc_id] = [fm.get("title", ""), fm.get("doc_type", ""), str(rel),
+                        fm.get("status", "")]
     return docs
 
 

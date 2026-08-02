@@ -3,6 +3,7 @@ reads instead of hardcoding corpus-specific paths, directories, or enums."""
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 
 import yaml
@@ -118,6 +119,13 @@ class CorpusConfig:
     #
     # Empty by default, so a corpus that declares nothing gets byte-identical responses.
     mcp_authority_relations: dict[str, dict[str, list[str]]]
+    # Corpus-declared doc_types beyond the shared schema's enum: {name: verbatim_required}.
+    # Before this existed (corpus-toolkit#40), every new corpus vertical cost a toolkit
+    # release plus an org-wide pin bump — three of releases v1.9–v1.13 were exactly one
+    # doc_type each. Link-graph participation stays a separate, explicit opt-in: deriving
+    # edges from a new type automatically is how 851 bogus `implements` edges appeared
+    # when `schedule` was added to LINK_DOC_TYPES (PLAN.md Phase 9).
+    extra_doc_types: dict[str, bool]
     reverify_days: int
     coverage_fail_threshold: float
     coverage_warn_threshold: float
@@ -222,6 +230,54 @@ def iter_manifest_sources(config: "CorpusConfig"):
 _RELATION_KEYS = ("implements", "implemented_by", "references_external", "related",
                   "supersedes")
 _ALWAYS_WALKED = {"up": "implements", "down": "implemented_by"}
+
+# The three archetypes docs/mcp-interface-contract.md defines. Validated LOUDLY because the
+# string was documentation, not a contract: `archetpye: hybrd` silently yielded a document
+# corpus, and the value flows verbatim into every response envelope and the server's own
+# instructions text (corpus-toolkit#38).
+_ARCHETYPES = ("document", "api", "hybrid")
+
+
+def _validated_archetype(raw) -> str:
+    """Parse and CHECK `corpus.archetype`, loudly.
+
+    Same policy as _validated_index_headings: a bad value must fail at LOAD, not surface
+    as a server that starts clean while quietly missing its extension tools — which is how
+    a declared hybrid served six tools for a week (oregon-legislature#11).
+    """
+    value = raw if raw is not None else "document"
+    if not isinstance(value, str) or value not in _ARCHETYPES:
+        raise ValueError(f"corpus.archetype: {value!r} is not an archetype. "
+                         f"Legal values: {', '.join(_ARCHETYPES)}")
+    return value
+
+
+def _validated_extra_doc_types(raw) -> dict[str, bool]:
+    """Parse and CHECK the top-level `schema:` section, loudly.
+
+        schema:
+          doc_types:
+            - name: transmittal
+              verbatim: false
+
+    `verbatim` is REQUIRED per type: whether a paraphrase of this material is a changed
+    document is the load-bearing property (see validate/provenance.py's VERBATIM_REQUIRED
+    rationale), and defaulting it either way would decide that silently."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or set(raw) - {"doc_types"}:
+        raise ValueError("schema: must be a mapping with the single key doc_types")
+    out = {}
+    for i, entry in enumerate(raw.get("doc_types") or []):
+        if not isinstance(entry, dict) or "name" not in entry or "verbatim" not in entry:
+            raise ValueError(f"schema.doc_types[{i}]: each entry needs name and verbatim")
+        name, verbatim = entry["name"], entry["verbatim"]
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError(f"schema.doc_types[{i}].name: {name!r} must be lower_snake")
+        if not isinstance(verbatim, bool):
+            raise ValueError(f"schema.doc_types[{i}].verbatim: {verbatim!r} must be a bool")
+        out[name] = verbatim
+    return out
 
 
 def _validated_authority_relations(raw) -> dict[str, dict[str, list[str]]]:
@@ -344,7 +400,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         id=corpus.get("id", ""),
         name=corpus.get("name", corpus.get("id", "")),
         jurisdiction=corpus.get("jurisdiction", ""),
-        archetype=corpus.get("archetype", "document"),
+        archetype=_validated_archetype(corpus.get("archetype")),
         authoritative_source=(corpus.get("authoritative_source") or "").strip() or None,
         schema_version=int(corpus.get("schema_version", 1)),
         contract_version=int(corpus.get("contract_version", 1)),
@@ -367,6 +423,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         mcp_server_name=mcp.get("server_name", corpus.get("id", "corpus")),
         mcp_transports=mcp.get("transports", ["stdio", "http"]),
         mcp_extra_document_fields=list(mcp.get("extra_document_fields", []) or []),
+        extra_doc_types=_validated_extra_doc_types(raw.get("schema")),
         mcp_authority_relations=_validated_authority_relations(
             mcp.get("authority_relations")),
         reverify_days=int(status.get("reverify_days", 90)),

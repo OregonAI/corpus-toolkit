@@ -331,6 +331,66 @@ def check_mcp_tools(dest: Path) -> None:
     say(f"  OK: {len(results)} tool(s) called, every answer checked")
 
 
+# ------------------------------------------------- hybrid leg (corpus-toolkit#38)
+
+SMOKE_TOOLS = """\
+def register(mcp, framework):
+    @mcp.tool()
+    def list_datasets() -> dict:
+        \"\"\"Smoke fixture: the minimal hybrid extension surface.\"\"\"
+        return {"datasets": [], "note": "contract-smoke fixture"}
+"""
+
+
+def hybridize(dest: Path) -> None:
+    """Turn the scratch corpus hybrid: archetype + a minimal tools_module."""
+    cy = dest / "_meta" / "corpus.yml"
+    text = cy.read_text(encoding="utf-8")
+    text = text.replace("archetype: \"document\"", "archetype: \"hybrid\"", 1)
+    text = text.replace('archetype: document', 'archetype: hybrid', 1)
+    if "hybrid" not in text:
+        raise GateFailure("could not flip the template's archetype to hybrid")
+    text = text.replace("plugins:", "plugins:\n  tools_module: \"src.smoke_tools:register\"", 1)
+    cy.write_text(text, encoding="utf-8")
+    (dest / "src" / "smoke_tools.py").write_text(SMOKE_TOOLS, encoding="utf-8")
+
+
+def check_hybrid_enforcement(dest: Path) -> None:
+    """The v1.19.0 promise, both directions: a hybrid WITHOUT a tools_module must refuse
+    to start (a declared archetype is a promise about the tool surface —
+    oregon-legislature#11 served six tools under a hybrid banner for a week), and a
+    hybrid WITH one must serve the extension tools alongside the core set."""
+    import subprocess
+    # Negative: strip the tools_module, expect a refusal naming the contract.
+    cy = dest / "_meta" / "corpus.yml"
+    with_tools = cy.read_text(encoding="utf-8")
+    cy.write_text(with_tools.replace(
+        '  tools_module: "src.smoke_tools:register"\n', ""), encoding="utf-8")
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "from corpus_toolkit import config as c; from corpus_toolkit.mcp.server import "
+         "build_server; build_server(c.load('_meta/corpus.yml'))"],
+        cwd=dest, capture_output=True, text=True)
+    if r.returncode == 0:
+        raise GateFailure("a hybrid corpus with NO tools_module built a server cleanly — "
+                          "the #38 enforcement is not firing")
+    if "tools_module" not in (r.stderr + r.stdout):
+        raise GateFailure(f"hybrid-without-tools failed for the wrong reason: {r.stderr[-400:]}")
+    cy.write_text(with_tools, encoding="utf-8")
+    # Positive: with the fixture, the extension tool must be on the surface.
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "from corpus_toolkit import config as c; from corpus_toolkit.mcp import _sdk; "
+         "from corpus_toolkit.mcp.server import build_server; "
+         "m = build_server(c.load('_meta/corpus.yml')); "
+         "names = _sdk.tool_names(m); "
+         "assert 'list_datasets' in names, names; print(sorted(names))"],
+        cwd=dest, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise GateFailure(f"hybrid corpus failed to serve its extension tools:\n{r.stderr[-600:]}")
+    say(f"  hybrid surface: {r.stdout.strip()}")
+
+
 # ---------------------------------------------------------------- main
 
 def main() -> int:
@@ -355,6 +415,11 @@ def main() -> int:
         ("make it a git repo", lambda: git_init(dest)),
         ("toolkit CLI gates", lambda: run_cli_gates(dest)),
         ("mandatory MCP contract tools", lambda: check_mcp_tools(dest)),
+        # The hybrid leg reuses the SAME scratch corpus: flip the archetype, add the
+        # minimal tools fixture, and assert #38's enforcement in both directions. An
+        # inner step rather than a matrix axis, so the gate stays one job per SDK major.
+        ("hybrid: archetype flip + tools fixture", lambda: hybridize(dest)),
+        ("hybrid: enforcement refuses/serves correctly", lambda: check_hybrid_enforcement(dest)),
     ]
     try:
         for i, (label, fn) in enumerate(steps, 1):

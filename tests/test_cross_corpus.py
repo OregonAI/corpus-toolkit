@@ -463,9 +463,11 @@ class TestGenerateIndex(CrossCorpusTestCase):
         written = json.loads((repo / out_rel).read_text())
         self.assertEqual(written["corpus"], "records-retention")
         self.assertEqual(written["n_documents"], 1)
+        # 4th element (v1.19.0): status. "" here because this fixture's graph nodes
+        # predate status emission — and "" must read as UNKNOWN, never as current.
         self.assertEqual(written["documents"]["schedule-166-300"],
                          ["Retention Schedule 166-300", "retention-schedule",
-                          "schedules/schedule-166-300.md"])
+                          "schedules/schedule-166-300.md", ""])
         self.assertNotIn("generated", written)      # no wall-clock stamp
         self.assertEqual(self.run_cli("--config", str(cfg), "--output", out_rel, "--check"), 0)
 

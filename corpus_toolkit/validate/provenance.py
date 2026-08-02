@@ -140,7 +140,12 @@ def check_file(path):
     checked = 1
 
     mode = fm.get("content_mode")
-    state_authored = fm.get("doc_type") in VERBATIM_REQUIRED
+    # Base set ∪ corpus-declared (schema.doc_types with verbatim: true) — the corpus
+    # extension mechanism of corpus-toolkit#40. The hardcoded set stays as the shared
+    # floor; a corpus can add types, never remove one.
+    verbatim_types = VERBATIM_REQUIRED | {
+        n for n, v in (getattr(config, "extra_doc_types", {}) or {}).items() if v}
+    state_authored = fm.get("doc_type") in verbatim_types
     excused = bool(fm.get("content_exception") or fm.get("migration_pending"))
 
     if state_authored and mode != "verbatim":
