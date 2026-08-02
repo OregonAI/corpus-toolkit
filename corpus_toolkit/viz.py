@@ -198,7 +198,12 @@ def chart_page(*, title: str, eyebrow: str, lede_html: str, body_html: str,
            .replace("<!--BODY-->", body_html)
            .replace("<!--SCRIPT-->", f"<script>{script}</script>" if script else ""))
     import re
-    leftover = re.findall(r"__[A-Z_]+__", out)
+    # Slots always contain a letter; bare runs of underscores are legitimate content —
+    # Oregon's budget-bill templates literally read "appropriated to ______", and the
+    # first production story about them tripped this guard (a good catch of the wrong
+    # thing). Dunder-styled prose like __INIT__ would still trip it; slots are the
+    # convention, so that stays the safe side to fail on.
+    leftover = re.findall(r"__[A-Z][A-Z0-9_]*__", out)
     if leftover:
         raise ValueError(f"chart_page: unsubstituted slot(s) {sorted(set(leftover))} — "
                          f"refusing to render a page with placeholder chrome")
