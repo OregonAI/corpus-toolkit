@@ -69,6 +69,7 @@ class CorpusConfig:
     source_manifest_path: Path
     snapshot_dir: Path
     snapshot_slice_module: str | None
+    extraction_module: str | None
     citation_module: str | None
     semantic_search_module: str | None
     # Attr path to a RetrievalBackend factory, e.g. "src.odata_backend:ODataBackend".
@@ -220,9 +221,15 @@ class MissingSourceManifest(RuntimeError):
 
 def iter_manifest_sources(config: "CorpusConfig"):
     """Yield every source dict ({id, url, sha256, ...}) across all manifest
-    groups, in group order."""
+    groups, in group order. Each dict is annotated with `_group` (the group
+    name, or "manifest" for the single-file form) so callers can filter —
+    the per-cadence cron's knob in sources/changes.py."""
     for g in load_source_manifest_groups(config):
-        yield from (g.get("sources", []) or [])
+        gname = g.get("group") or "manifest"
+        for s in (g.get("sources", []) or []):
+            if isinstance(s, dict):
+                s = {**s, "_group": gname}
+            yield s
 
 
 # The five keys `relationships` may contain — document.frontmatter.v1.schema.json pins this
@@ -411,6 +418,7 @@ def load(config_path: str | Path) -> CorpusConfig:
             root, raw.get("source_manifest_path", "_meta/source-manifest.yml")),
         snapshot_dir=_resolve(root, raw.get("snapshot_dir", "_meta/snapshots")),
         snapshot_slice_module=plugins.get("snapshot_slice_module"),
+        extraction_module=plugins.get("extraction_module"),
         citation_module=plugins.get("citation_module"),
         semantic_search_module=plugins.get("semantic_search_module"),
         retrieval_module=plugins.get("retrieval_module"),

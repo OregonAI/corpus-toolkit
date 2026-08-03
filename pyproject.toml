@@ -47,6 +47,8 @@ semantic = ["numpy"]
 
 
 [project.scripts]
+corpus-verify-extraction = "corpus_toolkit.validate.extraction:main"
+corpus-verify = "corpus_toolkit.verify:main"
 corpus-validate-frontmatter = "corpus_toolkit.validate.frontmatter:main"
 corpus-verify-provenance = "corpus_toolkit.validate.provenance:main"
 corpus-detect-changes = "corpus_toolkit.sources.changes:main"
