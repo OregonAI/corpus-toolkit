@@ -748,3 +748,49 @@ def test_search_hits_carry_chunk_identity_from_rank_chunks(corpus):
     hit = next(h for h in hits if h["id"] == "ors-1.010")
     assert hit["chunk"]["ordinal"] == 3
     assert "chunk:3" in hit["chunk"]["fetch"]
+
+
+# ---------- M4: source_data_file provenance + corpus-verify stamping ----------
+
+def test_hash_only_with_source_data_file_verifies_the_artifact(corpus, tmp_path):
+    import hashlib
+    data = corpus / "data"
+    data.mkdir()
+    (data / "d.parquet").write_bytes(b"PARQUET-ISH BYTES")
+    good = hashlib.sha256(b"PARQUET-ISH BYTES").hexdigest()
+    doc = DOC.format(id="ds-1", title="Dataset doc", doc_type="statute",
+                     citation="DS 1", sha=good, tag="ors",
+                     glance="A dataset summary.", body="ignored")
+    doc = doc.replace("content_mode: verbatim", "content_mode: summary\n"
+                      "snapshot_policy: hash-only\n"
+                      "source_data_file: data/d.parquet")
+    # strip the Full text section: dataset docs are summaries
+    doc = doc.split("## Full text")[0]
+    (corpus / "statutes" / "ds-1.md").write_text(doc)
+    subprocess.run(["git", "add", "-A"], cwd=corpus, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "ds"], cwd=corpus, check=True)
+    from corpus_toolkit.validate import provenance as prov
+    prov._CONFIG = load_config(str(corpus / "_meta" / "corpus.yml"))
+    prov._SLICE_FN = lambda d, s, t: t
+    rel, findings, checked, _, _ = prov.check_file(corpus / "statutes" / "ds-1.md")
+    assert checked == 1 and findings == []
+    # and the gate FIRES on corruption
+    (data / "d.parquet").write_bytes(b"DIFFERENT BYTES")
+    rel, findings, checked, _, _ = prov.check_file(corpus / "statutes" / "ds-1.md")
+    assert any("mismatch" in f[1] for f in findings)
+
+
+def test_corpus_verify_stamps_only_with_attestation(corpus):
+    import subprocess as sp
+    r = sp.run(["python3", "-m", "corpus_toolkit.verify", "--config",
+                str(corpus / "_meta" / "corpus.yml"), "--doc", "ors-1.010"],
+               capture_output=True, text=True)
+    assert r.returncode != 0 and "--attest" in (r.stderr + r.stdout)
+    r = sp.run(["python3", "-m", "corpus_toolkit.verify", "--config",
+                str(corpus / "_meta" / "corpus.yml"), "--doc", "ors-1.010",
+                "--by", "@tester", "--attest", "read against source"],
+               capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    text = (corpus / "statutes" / "ors-1.010.md").read_text()
+    assert 'verified_by: "@tester"' in text

@@ -113,6 +113,28 @@ def check_file(path):
         # sha256 and full-text checks run against it as usual; with no .txt the
         # recorded raw-byte hash of the uncommitted source cannot be re-verified
         # here — those docs should carry content_exception.
+        #
+        # EXCEPT when the doc names the COMMITTED DATA ARTIFACT its hash pins
+        # (`source_data_file`, repo-relative): then the hash is re-verifiable as
+        # raw bytes of that file. This is the hybrid-corpus case (M4): oregon-budget
+        # carries 1,762 dataset docs whose source_sha256 is the sha256 of one of
+        # seven committed Parquet mirrors — real integrity the gate could not see,
+        # so it sat green while checking nothing.
+        data_rel = fm.get("source_data_file")
+        if data_rel:
+            data_path = config.root / data_rel
+            if not data_path.is_file():
+                findings.append(("error",
+                                 f"source_data_file {data_rel!r} does not exist"))
+                return rel, findings, checked, fulltexts, quotes
+            import hashlib
+            digest = hashlib.sha256(data_path.read_bytes()).hexdigest()
+            if digest != fm.get("source_sha256"):
+                findings.append(("error",
+                                 f"source_sha256 mismatch: frontmatter "
+                                 f"{fm.get('source_sha256')} != {data_rel} {digest}"))
+            checked = 1
+            return rel, findings, checked, fulltexts, quotes
         if txt.is_file():
             import hashlib
             digest = hashlib.sha256(

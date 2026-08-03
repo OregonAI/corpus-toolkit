@@ -102,13 +102,27 @@ def main():
     ap.add_argument("--open-issues", action="store_true",
                     help="open a GitHub issue per changed source (requires `gh` + GH_TOKEN)")
     ap.add_argument("--github-output", help="path to $GITHUB_OUTPUT")
+    ap.add_argument("--group", action="append",
+                    help="directory-mode only: check just these source group(s) "
+                         "(repeatable) — the per-cadence cron's knob")
+    ap.add_argument("--strict", action="store_true",
+                    help="exit 1 on ANY fetch failure (the pre-M4 behavior). Default "
+                         "tolerates isolated failures: over ~2,000 sources a weekly "
+                         "run has a near-certain transient, and one dead fetch "
+                         "failing the whole run is how ERF's drift detection ended "
+                         "up retired with 813 sources frozen. Systemic failure "
+                         "(>20%% of fetches) still exits 1 either way.")
     args = ap.parse_args()
 
     config = config_mod.load(args.config)
     _warn_recheck_is_not_honoured(config)
 
     changed, failed = [], []
+    n_total = 0
     for s in iter_manifest_sources(config):
+        if args.group and s.get("_group") not in args.group:
+            continue
+        n_total += 1
         sid, url, old = s["id"], s["url"], s.get("sha256", "")
         fmt = _format_for(url, s.get("format"))
         try:
@@ -130,8 +144,16 @@ def main():
         for sid, url, old, new in changed:
             _open_issue(sid, url, old, new)
 
-    print(f"\n{len(changed)} changed, {len(failed)} fetch failure(s).")
-    sys.exit(1 if failed else 0)
+    print(f"\n{len(changed)} changed, {len(failed)} fetch failure(s) "
+          f"of {n_total} checked.")
+    if failed:
+        print("failed sources (a fact about our access, not about upstream): "
+              + ", ".join(failed[:20]) + ("…" if len(failed) > 20 else ""))
+    systemic = n_total and len(failed) / n_total > 0.20
+    if systemic:
+        print(f"SYSTEMIC: {len(failed)}/{n_total} fetches failed — this is an "
+              f"outage or a block, not noise.", file=sys.stderr)
+    sys.exit(1 if (failed and args.strict) or systemic else 0)
 
 
 if __name__ == "__main__":

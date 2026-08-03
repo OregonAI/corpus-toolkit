@@ -22,7 +22,7 @@ requiredness rules expressed per archetype. Machine form:
 | `source_url` | ✅ | all | pinned URL or API base for entity docs |
 | `source_format` | ✅ | all | pdf, html, xml, json, odata, soda |
 | `retrieved` | ✅ | doc/hybrid docs | ISO date fetched |
-| `source_sha256` | ✅ | doc/hybrid docs | hash of fetched source |
+| `source_sha256` | ✅ | doc/hybrid docs | hash of OUR RENDERING of the source (the committed extraction, via hash_snapshot) — never the upstream bytes. It proves the committed text has not drifted since ingest; it CANNOT prove extraction captured everything (that is corpus-verify-extraction's job) |
 | `effective_date`, `last_reviewed`, `source_version` | – | doc/hybrid docs | transcribed exactly as source prints them |
 | `status` | ✅ | all | current, superseded, repealed, proposed, draft |
 | `content_mode` | ✅ | doc/hybrid docs | `verbatim` for jurisdiction-authored; `summary` only for third-party/external_reference |
