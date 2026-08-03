@@ -59,9 +59,14 @@ def _semantic_index():
         d = artifact_dir()
         meta = json.loads((d / "meta.json").read_text())
         vecs = np.load(d / "vectors.i8.npy")
-        doc_ids = [json.loads(line)["doc_id"]
-                   for line in (d / "chunks.jsonl").read_text(encoding="utf-8").splitlines()
-                   if line]
+        # Full row metadata, not just doc_id: heading/ordinal/preview were computed at
+        # build time and then discarded by the serve path for a year — rank_chunks()
+        # exists to stop throwing them away (the five biggest federal documents are 92%
+        # of that corpus's chunks and used to collapse to five bare doc ids).
+        rows = [json.loads(line)
+                for line in (d / "chunks.jsonl").read_text(encoding="utf-8").splitlines()
+                if line]
+        doc_ids = [r["doc_id"] for r in rows]
         if vecs.shape[0] != len(doc_ids):
             raise ValueError("vectors/chunks length mismatch")
 
@@ -104,7 +109,7 @@ def _semantic_index():
         #
         # CORPUS_SEMANTIC_LOW_MEMORY=1 keeps int8 resident and pays per query instead.
         vecs = prepare_vectors(np, vecs)
-        _SEM = (np, vecs, doc_ids, embedder, meta)
+        _SEM = (np, vecs, doc_ids, embedder, meta, rows)
     except Exception as e:
         # STILL SWALLOWED -- the caller must degrade to keyword rather than 500 -- but no
         # longer SILENT. Every distinct cause reports `available() -> False` and the response
@@ -138,6 +143,30 @@ def available() -> bool:
     return _semantic_index() is not None
 
 
+def rank_chunks(query: str, want: int) -> list[dict]:
+    """Best chunk per document, WITH the chunk's identity — [{doc_id, ordinal, heading,
+    preview, score}] in similarity order. rank() keeps its bare-ids contract; this is
+    the richer sibling the MCP search layer attaches to hits so an agent landing on a
+    900 KB statute learns WHERE in it the match lives."""
+    idx = _semantic_index()
+    if not idx:
+        return []
+    np, vecs, doc_ids, embedder, _meta, rows = idx
+    q = embedder.encode([query])[0].astype(np.float32)
+    scores = (vecs @ q) if vecs.dtype == np.float32 else (vecs.astype(np.float32) @ q)
+    best: dict[str, dict] = {}
+    for i in np.argsort(-scores):
+        d = doc_ids[i]
+        if d not in best:
+            r = rows[int(i)]
+            best[d] = {"doc_id": d, "ordinal": r.get("ordinal"),
+                       "heading": r.get("heading"), "preview": r.get("preview"),
+                       "score": float(scores[i])}
+            if len(best) >= want:
+                break
+    return sorted(best.values(), key=lambda h: -h["score"])
+
+
 def rank(query: str, want: int) -> list:
     """Doc ids by best-chunk cosine similarity (empty when the index is unavailable).
 
@@ -147,7 +176,7 @@ def rank(query: str, want: int) -> list:
     idx = _semantic_index()
     if not idx:
         return []
-    np, vecs, doc_ids, embedder, _meta = idx
+    np, vecs, doc_ids, embedder, _meta, _rows = idx
     q = embedder.encode([query])[0].astype(np.float32)
     # Already float32 unless low-memory mode kept int8, where the astype is the deliberate
     # cost. Both paths are cosine: rows are L2-normalized and the int8 form is scaled by

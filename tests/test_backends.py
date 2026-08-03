@@ -672,3 +672,79 @@ def test_declaring_a_field_no_document_carries_is_harmless(tmp_path):
     d = fw.get_document("ors-1.010")
     assert d.get("audited_period_start") == "2018-07-01"
     assert "no_such_field" not in d
+
+
+# ---------- subsections & chunks: big instruments become navigable ----------
+#
+# The five federal monsters (up to 1.1 MB) used to be a binary — 400-byte glance or
+# the whole body — because `sections` saw only `## ` headings and every monster has
+# exactly two. These tests pin the three affordances that fixed it: ### listing on
+# the big-doc gate, prefix-matched ### retrieval, and deterministic chunk paging.
+
+def _sectioned_doc(corpus: Path, big: bool) -> str:
+    body = "\n\n".join(
+        f"### SEC. {n}. {name}\n\n" + (f"Text of section {n}. " * (2000 if big else 3))
+        for n, name in ((101, "PURPOSES"), (188, "NONDISCRIMINATION"),
+                        (189, "ADMINISTRATIVE PROVISIONS")))
+    (corpus / "statutes" / "pl-0-0.md").write_text(DOC.format(
+        id="pl-0-0", title="Test Act", doc_type="statute", citation="Test Act",
+        sha="c" * 64, tag="ors", glance="A sectioned act.", body=body))
+    subprocess.run(["git", "add", "-A"], cwd=corpus, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "act"], cwd=corpus, check=True)
+    return "pl-0-0"
+
+
+def test_big_doc_auto_lists_subsections(corpus):
+    doc_id = _sectioned_doc(corpus, big=True)
+    d = fw(corpus).get_document(doc_id)                      # part="auto"
+    assert "body" not in d and "at_a_glance" in d
+    assert "SEC. 188. NONDISCRIMINATION" in d["subsections"]
+    assert "subsections" in d["note"] or "subsection" in d["note"]
+
+
+def test_get_subsection_by_prefix(corpus):
+    doc_id = _sectioned_doc(corpus, big=False)
+    d = fw(corpus).get_document(doc_id, part="SEC. 188.")
+    assert d["section"] == "SEC. 188. NONDISCRIMINATION"
+    assert "Text of section 188." in d["body"]
+    assert "Text of section 101." not in d["body"]           # span ends at next ###
+
+
+def test_ambiguous_subsection_prefix_is_an_error_not_a_guess(corpus):
+    doc_id = _sectioned_doc(corpus, big=False)
+    d = fw(corpus).get_document(doc_id, part="SEC. 1")       # matches 101, 188, 189? no —
+    # prefix "SEC. 1" matches all three (101, 188, 189 all start "SEC. 1")
+    assert "error" in d
+    assert d.get("subsections_matching")
+
+
+def test_chunk_part_pages_deterministically(corpus):
+    doc_id = _sectioned_doc(corpus, big=True)
+    d0 = fw(corpus).get_document(doc_id, part="chunk:0")
+    assert d0["section"] == "chunk:0" and d0["body"]
+    d_missing = fw(corpus).get_document(doc_id, part="chunk:999")
+    assert "error" in d_missing and "ordinals are 0-based" in d_missing["error"]
+
+
+def test_search_hits_carry_chunk_identity_from_rank_chunks(corpus):
+    class FakeSemantic:
+        @staticmethod
+        def available():
+            return True
+
+        @staticmethod
+        def rank_chunks(query, want):
+            return [{"doc_id": "ors-1.010", "ordinal": 3, "heading": "Full text",
+                     "preview": "…appropriate water without a permit…", "score": 0.9}]
+
+        @staticmethod
+        def rank(query, want):
+            return ["ors-1.010"]
+
+    b = FileBackend(load_config(str(corpus / "_meta" / "corpus.yml")),
+                    semantic=FakeSemantic())
+    hits = b.search(query="water permit", mode="hybrid")
+    hit = next(h for h in hits if h["id"] == "ors-1.010")
+    assert hit["chunk"]["ordinal"] == 3
+    assert "chunk:3" in hit["chunk"]["fetch"]

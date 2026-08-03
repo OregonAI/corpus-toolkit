@@ -36,6 +36,22 @@ the response carries `at_a_glance`, a `sections` list of the document's
 to page the content in. An unknown id returns `error` plus `did_you_mean`
 suggestions rather than an empty document.
 
+Three further `part=` forms make large instruments navigable (v1.21.0):
+
+- **`subsections`** — when a body carries `### ` headings, the big-doc auto
+  response also lists them, and `part=` accepts one **prefix-matched,
+  case-insensitively** (`part="SEC. 188."` finds `### SEC. 188.
+  NONDISCRIMINATION.`; the span runs to the next heading of the same or higher
+  level). An ambiguous prefix is an ERROR listing the matches — never a guess.
+- **`part="chunk:N"`** — the Nth embeddable chunk of the document, recomputed by
+  the same deterministic chunker the semantic index was built with (no stored
+  offsets, nothing to drift). Ordinals are 0-based and per-document.
+- **search hits carry `chunk`** — when the semantic module provides
+  `rank_chunks`, each hit includes the best-matching chunk's `ordinal`,
+  `heading`, a 200-char `preview`, and the exact `part="chunk:N"` fetch string.
+  A 900 KB statute stops collapsing to a bare id: the hit says WHERE the match
+  lives and how to page it in.
+
 ### `resolve_citation(citation)`
 Map a citation string ("ORS 276A.300", "OAR 166-300-0015", "HB 2049",
 "Schedule 166-300") to in-corpus id(s), or a **remote resolution**

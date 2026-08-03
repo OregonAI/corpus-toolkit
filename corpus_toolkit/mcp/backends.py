@@ -229,6 +229,48 @@ class FileBackend:
         m = re.search(rf"^## {re.escape(heading)}\s*$(.*?)(?=^## |\Z)", body, re.M | re.S)
         return m.group(1).strip() if m else None
 
+    @staticmethod
+    def _subheadings(body: str) -> list[str]:
+        """`### ` headings — the sub-document units big instruments carry (2 CFR 200's
+        199 sections; the anchored federal statutes). Serving them is what makes a
+        900 KB document navigable instead of a glance-or-everything binary."""
+        return re.findall(r"^### (.+)$", body, re.M)
+
+    def _extract_subsection(self, body: str, part: str) -> tuple[str | None, str | None]:
+        """(section_text, matched_heading) for a `###` heading; prefix-matched
+        case-insensitively so part='SEC. 188.' finds '### SEC. 188. NONDISCRIMINATION.'.
+        Ambiguity is an answer, not a guess: multiple prefix matches return None and
+        the caller lists them. Span runs to the next heading of the same or higher
+        level — the slicing-plugin rule."""
+        subs = self._subheadings(body)
+        exact = [h for h in subs if h.lower() == part.lower()]
+        pref = exact or [h for h in subs if h.lower().startswith(part.lower())]
+        if len(pref) != 1:
+            return None, None
+        h = pref[0]
+        m = re.search(rf"^### {re.escape(h)}\s*$(.*?)(?=^### |^## |\Z)",
+                      body, re.M | re.S)
+        return (m.group(1).strip() if m else None), h
+
+    def _chunk_part(self, path, fm_id: str, part: str):
+        """part='chunk:N' — the Nth embeddable chunk of this document, recomputed by
+        the SAME deterministic chunker the semantic index was built with (no offsets
+        stored anywhere, so nothing can drift; meta.json's params are the build's).
+        This is the retrieval half of search's chunk hits: search names the ordinal,
+        this fetches it."""
+        m = re.match(r"chunk:(\d+)$", part)
+        if not m:
+            return None
+        want = int(m.group(1))
+        from corpus_toolkit.semantic.build import iter_chunks
+        bh = (self.config.raw.get("plugins") or {}).get("semantic_body_headings")
+        for doc_id, heading, ordinal, _title, text in iter_chunks([path], bh):
+            if ordinal == want:
+                return {"section": f"chunk:{want}", "chunk_heading": heading,
+                        "body": text}
+        return {"error": f"no chunk {want} for {fm_id!r} — ordinals are 0-based and "
+                         f"per-document; search hits carry the right one"}
+
     def index_status(self, state: str | None = None) -> tuple[bool, str]:
         """Would ensure_index() reuse the cache as-is? -> (current, reason).
 
@@ -443,11 +485,20 @@ class FileBackend:
         use_sem = mode in ("hybrid", "semantic") and self._semantic_available()
         pool = max(n * 4, 40) if use_sem else n
         rows, kw_order = self._fts_rows(con, query, doc_type, issuing_body, pool)
+        sem_chunks: dict = {}
 
         if not use_sem:
             final = kw_order[:n]
         else:
-            sem_order = list(self._semantic.rank(query, pool) or [])
+            # Prefer the chunk-aware ranking when the module provides it: the hit then
+            # carries WHERE in the document the match lives (heading/ordinal/preview),
+            # and the ordinal plugs straight into get_document(part="chunk:N"). Falls
+            # back to bare ids for custom semantic modules that predate rank_chunks.
+            rank_chunks = getattr(self._semantic, "rank_chunks", None)
+            sem_chunks = {h["doc_id"]: h for h in (rank_chunks(query, pool) or [])} \
+                if callable(rank_chunks) else {}
+            sem_order = (list(sem_chunks) if sem_chunks
+                         else list(self._semantic.rank(query, pool) or []))
             if doc_type or issuing_body:
                 keep = []
                 for d in sem_order:
@@ -463,16 +514,28 @@ class FileBackend:
         for i in final:
             r = rows.get(i)
             if r:
-                out.append({"id": r[KW_ID], "title": r[KW_TITLE], "citation": r[KW_CITATION],
-                            "doc_type": r[KW_DOCTYPE], "issuing_body": r[KW_ISSUER],
-                            "path": r[KW_PATH],
-                            "snippet": self._excerpt(r[KW_PATH], r[KW_DOCTYPE], terms)[:400]})
+                hit = {"id": r[KW_ID], "title": r[KW_TITLE], "citation": r[KW_CITATION],
+                       "doc_type": r[KW_DOCTYPE], "issuing_body": r[KW_ISSUER],
+                       "path": r[KW_PATH],
+                       "snippet": self._excerpt(r[KW_PATH], r[KW_DOCTYPE], terms)[:400]}
+                if use_sem and i in sem_chunks:
+                    c = sem_chunks[i]
+                    hit["chunk"] = {"ordinal": c["ordinal"], "heading": c["heading"],
+                                    "preview": (c["preview"] or "")[:200],
+                                    "fetch": f"get_document(part='chunk:{c['ordinal']}')"}
+                out.append(hit)
             else:
                 mr = self._doc_meta_row(con, i)
                 if mr:
-                    out.append({"id": mr[0], "title": mr[1], "citation": mr[2],
-                                "doc_type": mr[3], "issuing_body": mr[4], "path": mr[5],
-                                "snippet": "(semantic match — no keyword overlap)"})
+                    hit = {"id": mr[0], "title": mr[1], "citation": mr[2],
+                           "doc_type": mr[3], "issuing_body": mr[4], "path": mr[5],
+                           "snippet": "(semantic match — no keyword overlap)"}
+                    if i in sem_chunks:
+                        c = sem_chunks[i]
+                        hit["chunk"] = {"ordinal": c["ordinal"], "heading": c["heading"],
+                                        "preview": (c["preview"] or "")[:200],
+                                        "fetch": f"get_document(part='chunk:{c['ordinal']}')"}
+                    out.append(hit)
         return out
 
     def exists(self, doc_id: str) -> dict | None:
@@ -515,19 +578,34 @@ class FileBackend:
             if key in fm:
                 meta[key] = fm[key]
         headings = re.findall(r"^## (.+)$", body, re.M)
+        subs = self._subheadings(body)
         if part == "auto" and r[11] > BIG_DOC_BYTES:
             glance = self._extract_section(body, "At a glance")
-            return {**meta, "note": (f"document body is {r[11] // 1024} KB — pass "
-                                     "part='full text' (or another heading below) to page in "
-                                     "the content you need"),
+            hint = (f" — or one of its {len(subs)} subsections" if subs else "")
+            resp = {**meta, "note": (f"document body is {r[11] // 1024} KB — pass "
+                                     f"part='full text' (or another heading below{hint}) "
+                                     "to page in the content you need"),
                     "at_a_glance": glance, "sections": headings}
+            if subs:
+                resp["subsections"] = subs
+            return resp
         if part in ("auto", "full"):
             return {**meta, "body": body}
+        chunk = self._chunk_part(path, r[0], part)
+        if chunk is not None:
+            return {**meta, **chunk}
         sec = self._extract_section(body, part) or next(
             (self._extract_section(body, h) for h in headings if h.lower() == part.lower()), None)
-        if sec is None:
-            return {**meta, "error": f"no section {part!r}", "sections": headings}
-        return {**meta, "section": part, "body": sec}
+        if sec is not None:
+            return {**meta, "section": part, "body": sec}
+        sub, matched = self._extract_subsection(body, part)
+        if sub is not None:
+            return {**meta, "section": matched, "body": sub}
+        err = {**meta, "error": f"no section {part!r}", "sections": headings}
+        if subs:
+            near = [h for h in subs if part.lower() in h.lower()][:8]
+            err["subsections_matching"] = near or f"{len(subs)} subsections; none contain {part!r}"
+        return err
 
     def overview(self) -> dict:
         con = self.ensure_index()
