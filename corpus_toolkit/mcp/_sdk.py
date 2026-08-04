@@ -68,7 +68,7 @@ from mcp.server.transport_security import TransportSecuritySettings  # noqa: E40
 __all__ = ["SDK_MAJOR", "Server", "TransportSecuritySettings", "sdk_version",
            "http_kwargs", "build_http_app", "run_http", "run_http_app", "with_cors",
            "server_log_level", "session_allowed_hosts",
-           "tool_names", "call_tool",
+           "tool_names", "call_tool", "structured_result",
            # The client half of the same seam — see "THE CLIENT SIDE" below.
            "CLIENT_SYMBOL", "open_client_streams", "tool_input_schema",
            "result_is_error"]
@@ -224,6 +224,43 @@ async def call_tool(server, name: str, arguments: dict):
         ctx = Context(mcp_server=server, subscriptions=server._subscriptions)
         return await tm.call_tool(name, arguments, ctx, convert_result=False)
     return await tm.call_tool(name, arguments)
+
+
+def structured_result(tool, payload: dict) -> dict:
+    """Serialize a payload through a registered tool's OWN output schema and return the
+    structured content a client would receive.
+
+    THE COMPLEMENT TO `call_tool`, and the reason it exists is corpus-toolkit#61. That
+    function deliberately passes `convert_result=False` so the release gate sees the
+    toolkit's answer rather than the SDK's marshalling — correct for asserting on
+    behaviour, and it meant NOTHING in the suite exercised the conversion step. A declared
+    output schema that silently dropped every document body shipped green through it.
+
+    So: when the marshalling IS the behaviour under test, use this. Anywhere else, use
+    `call_tool`.
+
+    `Tool.fn_metadata` is a declared model field on both majors; what `convert_result`
+    hands back is not. 1.x returns `(content_blocks, structured)`; 2.x returns a
+    `CallToolResult` carrying `structured_content` — the same wrapper divergence that
+    motivated `call_tool`'s note above, one layer down."""
+    meta = getattr(tool, "fn_metadata", None)
+    if meta is None or not hasattr(meta, "convert_result"):
+        # Loud, not None. A caller testing serialization that silently receives nothing
+        # would pass while checking nothing, which is the exact failure mode this whole
+        # seam was added to close.
+        raise RuntimeError(
+            f"cannot reach the serialization path for tool {getattr(tool, 'name', tool)!r} "
+            f"on mcp {sdk_version()}: no usable `fn_metadata.convert_result`. Find where "
+            f"this SDK major converts tool results and teach this function about it.")
+    converted = meta.convert_result(payload)
+    if isinstance(converted, tuple):          # 1.x: (content_blocks, structured)
+        return converted[1]
+    structured = getattr(converted, "structured_content", None)
+    if structured is None:                    # 2.x: CallToolResult
+        raise RuntimeError(
+            f"{type(converted).__name__} carried no structured_content on mcp "
+            f"{sdk_version()}; the result shape changed again.")
+    return structured
 
 
 # --------------------------------------------------------------------------- THE CLIENT SIDE

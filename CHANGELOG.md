@@ -17,7 +17,33 @@ it can break you.
 
 ## Unreleased
 
-Nothing yet.
+### Fixed — **v1.24.0 is broken; move off it**
+
+**If you are pinned to v1.24.0, every object-shaped tool on your corpus is failing right
+now.** Take this fix as soon as it tags and rebuild the image; there is no config
+workaround, and rolling back the pin to v1.23.x also clears it.
+
+v1.24.0 declared a `TypedDict` output schema on the six object-shaped tools
+(`get_document`, `resolve_citation`, `graph_neighbors`, `corpus_overview`,
+`authority_chain`, `issuing_body_profile`). That made the SDK serialize every response
+through a pydantic model, which broke two things at once (corpus-toolkit#61):
+
+- **`authoritative_source: null` was rejected.** It is a documented value for a corpus
+  that declares no source, so `corpus_overview`, `resolve_citation` and unknown-id
+  `get_document` returned a hard `ValidationError` instead of a response.
+- **Document bodies were dropped.** Keys the schema did not declare were discarded on the
+  way out, so `get_document` returned its three envelope fields and no content —
+  **silently**, with the call still reporting success. This is the dangerous half: an
+  agent gets a well-formed answer containing nothing.
+
+`search_corpus` was never affected (it returns a list and was deliberately left alone),
+which is also the proof that no corpus content was lost — the failure was entirely in
+response serialization.
+
+Object tools now return `dict[str, Any]`: still a real output schema, but one that permits
+`null` and strips nothing. Field-level validation of response convention 1 is reopened as
+corpus-toolkit#15, and `docs/mcp-interface-contract.md` now records why the obvious
+implementation is the one that must not be used.
 
 ## v1.24.0 — 2026-08-04
 
