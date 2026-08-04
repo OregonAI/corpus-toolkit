@@ -219,7 +219,11 @@ the hook and registering nothing is likewise an error rather than a no-op.
    question. A corpus that declares none gets `authoritative_source: null`
    plus a `config_warning` on `corpus_overview`, and a warning from
    `corpus-validate-frontmatter` — an absent key would read as "the server
-   did not look", which is not what happened.
+   did not look", which is not what happened. **That `null` is load-bearing**:
+   it is a documented value, not a missing one, and anything that validates
+   this field must accept it (`config.py` types it `str | None`). Treating it
+   as a required string is what broke every corpus at once in v1.24.0 — see
+   the note at the end of this convention.
 
    **`search_corpus` is exempt, deliberately, and stays a bare JSON list.**
    This convention was written as if it applied to every tool; it does not,
@@ -245,12 +249,29 @@ the hook and registering nothing is likewise an error rather than a no-op.
    across corpora must track which response came from which server. It
    already must, because it chose which server to call.
 
-   **What this convention does NOT yet buy anywhere**: none of the
-   dict-returning tools declares an output schema either, so `corpus`,
-   `archetype` and `authoritative_source` are present in the response text
-   and invisible to schema-driven validation on every tool. That is the real
-   gap and it is tracked as corpus-toolkit#15 — additive, non-breaking, and
-   unrelated to response shape.
+   **What this convention does NOT yet buy anywhere**: the dict-returning
+   tools declare `dict[str, Any]`, whose schema is `{"additionalProperties":
+   true}` — a real output schema that says nothing about these three fields.
+   So `corpus`, `archetype` and `authoritative_source` are present in the
+   response and still invisible to *field-level* schema-driven validation.
+   That gap is tracked as corpus-toolkit#15.
+
+   **It is not as simple as declaring a TypedDict, and that is not a guess.**
+   v1.24.0 did exactly that and broke every object-shaped tool on all four
+   live corpora (corpus-toolkit#61). A TypedDict return makes the SDK build a
+   pydantic model and push every response through it, so the declaration stops
+   describing the response and starts *being* it:
+
+   | | consequence |
+   |---|---|
+   | `authoritative_source: str` | rejects the `null` this section mandates — `total=False` makes a key optional, not nullable |
+   | undeclared keys | dropped at serialization; `get_document` returned its envelope and no document body, silently, still reporting success |
+
+   `Optional[str]` fixes the first and not the second. So whatever closes #15
+   must declare the fields to validation **without** owning serialization —
+   the response floor is a contract, not a container. A schema assertion
+   cannot detect either failure; only a round-trip through the SDK's
+   `convert_result` can, which `tests/test_output_schemas.py` now pins.
 2. Document content responses include the provenance block (source_url,
    retrieved, source_sha256, last_verified).
 3. Live-data responses include executed_query + executed_at.

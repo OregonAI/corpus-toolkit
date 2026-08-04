@@ -22,7 +22,7 @@ import argparse
 
 import sys
 
-from typing import TypedDict
+from typing import Any
 
 from corpus_toolkit.mcp import _sdk
 
@@ -30,29 +30,35 @@ from corpus_toolkit import config as config_mod
 from corpus_toolkit.mcp.framework import CorpusFramework
 
 
-class ObjectResponse(TypedDict, total=False):
-    """Response convention 1: every object-shaped response carries these three.
-
-    DECLARED SO THEY ARE VISIBLE TO SCHEMA-DRIVEN VALIDATION, which is the whole point
-    (corpus-toolkit#15). They were already present in the JSON text, but every tool was
-    annotated `-> dict`, and a bare `dict` is unconstrained — so the SDK emitted no
-    `output_schema` at all and nothing could check the convention without parsing prose.
-
-    `total=False` and no extra fields, deliberately. Measured against the SDK before
-    writing this: a TypedDict return produces a schema whose `additionalProperties` is
-    ABSENT, which in JSON Schema permits extras — verified by calling a tool that returns
-    these three plus arbitrary tool-specific keys and confirming it succeeds. So this
-    declares the shared floor without constraining any tool's own payload, and an error
-    response that carries none of the three still validates.
-
-    Tightening this later — listing per-tool fields, or setting additionalProperties:
-    false — would be a breaking change to every corpus's responses. The floor is the
-    contract; the rest is each tool's business.
-    """
-
-    corpus: str
-    archetype: str
-    authoritative_source: str
+# WHY OBJECT-SHAPED TOOLS RETURN `dict[str, Any]` AND NOT A TypedDict.
+#
+# Response convention 1 (`corpus`, `archetype`, `authoritative_source` on every
+# object-shaped response) is NOT declared as a TypedDict here, and the reason is a live
+# incident rather than a preference: v1.24.0 declared one and took all four corpora down
+# (corpus-toolkit#15, #61). Do not re-apply that change without reading this.
+#
+# A TypedDict return makes the SDK build a pydantic model and push every response through
+# it. That does two things a shared response floor must never do:
+#
+#   1. `authoritative_source: str` REJECTS None — and None is the documented value for a
+#      corpus that declares no source (docs/mcp-interface-contract.md convention 1;
+#      framework.py emits it). `total=False` makes a key optional, not nullable, so
+#      corpus_overview, resolve_citation and unknown-id get_document all became hard
+#      ValidationErrors on every corpus at once.
+#   2. Keys the model does not declare are DROPPED on the way out. get_document returned
+#      its three envelope fields and no document body — the payload deleted at
+#      serialization time, silently, with the call still reporting success.
+#
+# The v1.24.0 reasoning measured `additionalProperties` on the emitted schema (absent, so
+# extras validate) and concluded extras were safe. That was the wrong layer: extras clear
+# validation and are then discarded by the model that does the serializing. A schema check
+# cannot see this — only a round-trip through `convert_result` can, which is what
+# tests/test_output_schemas.py now pins.
+#
+# `dict[str, Any]` emits `{"additionalProperties": true}` — a real output schema, weaker
+# than a field list but the strongest thing that does not own the payload. Declaring the
+# convention's fields to schema-driven validation without handing serialization to the
+# declaration is still open as corpus-toolkit#15.
 
 
 def build_server(config):
@@ -105,14 +111,14 @@ def build_server(config):
         return fw.search_corpus(query, doc_type or None, issuing_body or None, limit, mode)
 
     @mcp.tool()
-    def get_document(doc_id: str, part: str = "auto") -> ObjectResponse:
+    def get_document(doc_id: str, part: str = "auto") -> dict[str, Any]:
         """Fetch one document by id, with provenance metadata and the
         non-authoritative disclaimer. Oversized documents return an at-a-glance
         summary plus a section list — pass part='<heading>' to page in content."""
         return fw.get_document(doc_id, part)
 
     @mcp.tool()
-    def resolve_citation(citation: str) -> ObjectResponse:
+    def resolve_citation(citation: str) -> dict[str, Any]:
         """Map a citation string to in-corpus document id(s) via the corpus's
         registered citation schemes, or an explicit `unresolved` result with the
         schemes attempted. Never guesses. Citations belonging to a sibling
@@ -123,19 +129,19 @@ def build_server(config):
         return fw.resolve_citation(citation)
 
     @mcp.tool()
-    def graph_neighbors(doc_id: str) -> ObjectResponse:
+    def graph_neighbors(doc_id: str) -> dict[str, Any]:
         """All relationship edges of a document, grouped by type, one hop only."""
         return fw.graph_neighbors(doc_id)
 
     @mcp.tool()
-    def corpus_overview() -> ObjectResponse:
+    def corpus_overview() -> dict[str, Any]:
         """What this corpus contains and does not: doc counts by type, archetype,
         contract version, and the non-authoritative disclaimer. Call this first."""
         return fw.corpus_overview()
 
     if config.archetype in ("document", "hybrid"):
         @mcp.tool()
-        def authority_chain(doc_id: str, direction: str = "both", depth: int = 3) -> ObjectResponse:
+        def authority_chain(doc_id: str, direction: str = "both", depth: int = 3) -> dict[str, Any]:
             """Walk the authority graph: 'up' toward what authorizes this document,
             'down' toward what implements it, 'both' does both."""
             return fw.authority_chain(doc_id, direction, depth)
@@ -147,7 +153,7 @@ def build_server(config):
         # nothing is honest; registering a landmine is not.
         if config.issuing_body_registry and hasattr(fw.backend, "ensure_index"):
             @mcp.tool()
-            def issuing_body_profile(slug_or_query: str) -> ObjectResponse:
+            def issuing_body_profile(slug_or_query: str) -> dict[str, Any]:
                 """Context about an issuing body: registry identity, curated notes,
                 and what this corpus holds for it. Accepts a slug or name fragment."""
                 return fw.issuing_body_profile(slug_or_query)
