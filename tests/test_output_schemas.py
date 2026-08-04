@@ -96,9 +96,15 @@ def test_extras_are_not_forbidden(corpus_server):
 
 
 def test_a_real_call_still_returns_its_full_payload(corpus_server):
-    mgr = getattr(corpus_server, "_tool_manager", None) or corpus_server
+    # THROUGH `_sdk.call_tool`, not the tool manager directly. `ToolManager.call_tool`
+    # takes an optional `context` on mcp 1.x and a REQUIRED one on 2.x — an earlier
+    # version of this test called the manager itself, passed on 1.x, and raised
+    # TypeError on 2.x. Spanning that is exactly what the seam exists for; a test that
+    # bypasses it re-earns the break it was written to prevent.
+    from corpus_toolkit.mcp import _sdk
+
     result = asyncio.new_event_loop().run_until_complete(
-        mgr.call_tool("corpus_overview", {}))
+        _sdk.call_tool(corpus_server, "corpus_overview", {}))
     d = result if isinstance(result, dict) else result[0]
     for field in CONVENTION_1:
         assert field in d, f"corpus_overview response lost {field}"
