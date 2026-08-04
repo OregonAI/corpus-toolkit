@@ -173,6 +173,14 @@ def main():
                     help="Host header to additionally allow (e.g. mcp.example.com) — "
                          "required behind a reverse proxy/tunnel that forwards a "
                          "different Host header than --host.")
+    ap.add_argument("--allowed-origin", action="append", default=[],
+                    metavar="ORIGIN",
+                    help="browser Origin to accept, repeatable (e.g. https://claude.ai). "
+                         "Without at least one, the server emits no CORS headers at all "
+                         "and a browser-based MCP client cannot talk to it: the preflight "
+                         "405s because OPTIONS is not a route, and even an allowed origin "
+                         "gets no Access-Control-Allow-Origin header back. Must be exact "
+                         "origins — '*' is refused, see the note where it is handled.")
     ap.add_argument("--path", default="/mcp",
                     help="URL path to mount the streamable-HTTP endpoint on (default "
                          "/mcp). Set this when several corpora share one hostname behind "
@@ -187,12 +195,36 @@ def main():
 
     if args.http:
         security = None
-        if args.public_hostname:
+        if args.public_hostname or args.allowed_origin:
+            # THE ORIGIN ALLOW-LIST AND CORS ARE TWO SEPARATE GATES, and a browser client
+            # has to clear both. The SDK's transport security rejects an unlisted Origin
+            # with 403 before any handler runs; CORS middleware then decides whether the
+            # browser is allowed to READ the response. Passing --allowed-origin without
+            # adding it here would 403 the preflight and never reach the middleware.
+            # '*' IS REFUSED, not quietly downgraded. The SDK exact-matches Origin against
+            # this list (the only wildcard it understands is a trailing ':*' on the PORT),
+            # so a literal '*' entry would match nothing and 403 every browser — a flag
+            # that reads as "allow all" while denying all. The only real "any origin"
+            # switch is enable_dns_rebinding_protection=False, and that same flag also
+            # disables the HOST check, which is what stops a tunnelled deployment from
+            # 421-ing. Trading that away silently for a convenience flag is not a call to
+            # make on the operator's behalf.
+            if "*" in args.allowed_origin:
+                sys.exit(
+                    "ERROR: --allowed-origin '*' is not supported. The MCP SDK matches "
+                    "Origin exactly, so '*' would reject every browser rather than accept "
+                    "them; the only blanket switch also turns off the Host check that "
+                    "keeps this server usable behind a proxy. List the origins you mean, "
+                    "e.g. --allowed-origin https://claude.ai.")
+            origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+            if args.public_hostname:
+                origins.append(f"https://{args.public_hostname}")
+            origins += args.allowed_origin
+            hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+            if args.public_hostname:
+                hosts.append(args.public_hostname)
             security = _sdk.TransportSecuritySettings(
-                allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*",
-                               args.public_hostname],
-                allowed_origins=["http://127.0.0.1:*", "http://localhost:*",
-                                 "http://[::1]:*", f"https://{args.public_hostname}"],
+                allowed_hosts=hosts, allowed_origins=origins,
             )
         # ONE dict, used for the verification build AND for run(). This is not tidiness.
         # On mcp 2.x, run() constructs its own app from its own arguments, so verifying a
@@ -229,10 +261,20 @@ def main():
             sys.exit(f"ERROR: --public-hostname {args.public_hostname!r} did not reach the "
                      f"session manager (allowed_hosts={_hosts!r}). Refusing to start: every "
                      f"request through a proxy would 421 Invalid Host header.")
+        # SERVE THE APP THAT WAS JUST VERIFIED, rather than letting the SDK build another.
+        # On 2.x `run(transport="streamable-http")` constructs its own Starlette app, so
+        # the mount assertion above was a check on a DIFFERENT object than the one served
+        # — which is the entire reason http_kwargs is passed around as one dict. Serving
+        # `app` directly removes that divergence instead of guarding against it, and it is
+        # the only way to wrap middleware at all: the SDK exposes no hook (#37).
+        served = app
+        if args.allowed_origin:
+            served = _sdk.with_cors(app, args.allowed_origin)
         print(f"[corpus-mcp] {config.id}: serving streamable-http at {args.path} "
-              f"(allowed hosts: {', '.join(_hosts) or 'defaults'})",
+              f"(allowed hosts: {', '.join(_hosts) or 'defaults'}; "
+              f"cors: {', '.join(args.allowed_origin) or 'off'})",
               file=sys.stderr, flush=True)
-        _sdk.run_http(mcp, http)
+        _sdk.run_http_app(mcp, served, http)
     else:
         mcp.run()
 
