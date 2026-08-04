@@ -23,6 +23,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 
 from corpus_toolkit import config as config_mod
@@ -65,6 +66,61 @@ def _open_issue(source_id, url, old, new):
                     "--title", title, "--body", body])
 
 
+def _report_robots(config, groups) -> int:
+    """Report every source host's robots.txt position. Exits 0 — see --check-robots.
+
+    Grouped BY HOST rather than by source, because the position is a property of the host
+    and a corpus can have hundreds of sources behind a dozen of them; a per-source listing
+    would bury the finding under repetition.
+    """
+    from corpus_toolkit.sources import robots as robots_mod
+
+    hosts: dict[str, list[str]] = {}
+    for s in iter_manifest_sources(config):
+        if groups and s.get("_group") not in groups:
+            continue
+        hosts.setdefault(urllib.parse.urlsplit(s["url"]).netloc, []).append(s["id"])
+
+    refused, states_position, unknown = [], [], []
+    for host in sorted(hosts):
+        url = f"https://{host}/"
+        rec = robots_mod.ai_position(url, USER_AGENT)
+        verdict = robots_mod.allowed(url, USER_AGENT)
+        n = len(hosts[host])
+        if verdict is False:
+            refused.append(host)
+            mark = "REFUSES US"
+        elif verdict is None:
+            unknown.append(host)
+            mark = "no robots.txt"
+        else:
+            mark = "permitted"
+        print(f"{mark:14} {host}  ({n} source{'s' if n != 1 else ''})")
+        if rec.states_ai_position:
+            states_position.append(host)
+            if rec.blocked_ai_agents:
+                print(f"               states a position on AI crawling: blocks "
+                      f"{', '.join(rec.blocked_ai_agents)}")
+            if rec.content_signal:
+                print(f"               Content-Signal: {rec.content_signal}")
+        if rec.crawl_delay:
+            print(f"               Crawl-delay: {rec.crawl_delay:g}s")
+
+    print(f"\n{len(hosts)} host(s): {len(refused)} refuse our agent, "
+          f"{len(states_position)} state a position on AI crawling, "
+          f"{len(unknown)} serve no reachable robots.txt.")
+    if states_position:
+        # The distinction that the raw allowed/denied count hides: a host can permit our
+        # UA while plainly refusing this CATEGORY of use. Whether that refusal binds a
+        # civic-corpus mirror is a judgement for the operator, not this tool.
+        print("A host that permits our user agent while blocking named AI crawlers has "
+              "still stated something about this kind of use. Record the decision on the "
+              "source or group so it is reviewable and not re-derived every run.")
+    if unknown:
+        print("No reachable robots.txt is missing information, not permission.")
+    return 0
+
+
 def _warn_recheck_is_not_honoured(config) -> int:
     """Say out loud that `recheck:` configures nothing. Returns the number of declarations.
 
@@ -105,6 +161,11 @@ def main():
     ap.add_argument("--group", action="append",
                     help="directory-mode only: check just these source group(s) "
                          "(repeatable) — the per-cadence cron's knob")
+    ap.add_argument("--check-robots", action="store_true",
+                    help="report each source host's robots.txt position and exit without "
+                         "fetching anything. REPORTS, never blocks: enforcement is a "
+                         "per-corpus policy decision and must not arrive as a surprise "
+                         "behaviour change in a toolkit bump (corpus-toolkit#29).")
     ap.add_argument("--strict", action="store_true",
                     help="exit 1 on ANY fetch failure (the pre-M4 behavior). Default "
                          "tolerates isolated failures: over ~2,000 sources a weekly "
@@ -116,6 +177,9 @@ def main():
 
     config = config_mod.load(args.config)
     _warn_recheck_is_not_honoured(config)
+
+    if args.check_robots:
+        return _report_robots(config, args.group)
 
     changed, failed = [], []
     n_total = 0
