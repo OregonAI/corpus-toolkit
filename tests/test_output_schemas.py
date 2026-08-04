@@ -98,21 +98,19 @@ def _tools(built_server):
 
 def _serialize(tool, payload):
     """Push a payload through the tool's OWN declared output schema, the way the SDK does
-    when answering a client.
+    when answering a client — the step `_sdk.call_tool(..., convert_result=False)` skips,
+    and skipping it is why the regression shipped green.
 
-    This is the step `_sdk.call_tool(..., convert_result=False)` skips, and skipping it is
-    why the regression shipped green. Reached through `Tool.fn_metadata` rather than a
-    private SDK helper because it is a declared model field on both majors.
+    Through `_sdk.structured_result` rather than the SDK directly, because the result of
+    that conversion is one of the things the 1.x/2.x break moved: 1.x returns a tuple, 2.x
+    a `CallToolResult`. An earlier version of this file unpacked the tuple inline, passed
+    on 1.x, and asserted against the wrapper OBJECT on 2.x — where `field in out` is a
+    membership test on a pydantic model and quietly answers False. Version-dependent
+    shapes belong behind the seam; that is what it is for.
     """
-    meta = getattr(tool, "fn_metadata", None)
-    # Fail loudly rather than skip. A test that quietly stops exercising the serialization
-    # step is precisely the failure being pinned here.
-    assert meta is not None and hasattr(meta, "convert_result"), (
-        f"cannot reach the serialization path for {tool.name} — this test is not testing "
-        f"anything; find where the SDK converts results and update _serialize")
-    converted = meta.convert_result(payload)
-    # 1.x returns (content_blocks, structured); a bare structured value is accepted too.
-    return converted[1] if isinstance(converted, tuple) else converted
+    from corpus_toolkit.mcp import _sdk
+
+    return _sdk.structured_result(tool, payload)
 
 
 def _call(server, name, arguments):
