@@ -362,3 +362,73 @@ was never to describe one SDK's caching.
    this is why. Either bump the pin, or add `mcp<2` to the corpus's own
    `requirements.txt` as an immediate mitigation — an old tag's unbounded dependency
    cannot be fixed retroactively from here.
+
+## v1.9.0 → v1.23.0 — the ten releases this file skipped
+
+Back-filled 2026-08-04 (corpus-toolkit#41). This file stopped at v1.8.0 while the platform
+shipped fifteen more tags, so a corpus deciding whether to move a pin had only `git log`.
+Per-release detail now lives in `CHANGELOG.md`; what follows is the part that matters when
+you actually move a pin — **what can break you, and what you must do**.
+
+### Nothing here requires a config change except v1.19.0
+
+Bumps from v1.9.0 through v1.23.0 are drop-in for a corpus that is already valid, with one
+exception and two conditionals below.
+
+### v1.19.0 — the one that can fail your CI
+
+**`toolkit-ref` became required** on the reusable workflows, and **archetype is enforced**.
+A corpus calling a reusable workflow without `toolkit-ref:` fails at the call, and one whose
+`corpus.archetype` is missing or not one of `document`/`api`/`hybrid` fails validation.
+
+This is also the release that made `schema.doc_types` a corpus-local declaration
+(corpus-toolkit#40), so a new instrument family no longer costs a toolkit release plus an
+org-wide pin bump. Declaring a type with `verbatim: true` unions it into the set
+`corpus-verify-provenance` requires full text for — which means **a corpus that declares a
+type and then ships summaries will start failing provenance**. That is the intended
+behaviour and the reason the mechanism exists; it is listed here because it is the one way a
+`doc_types` block turns a passing corpus red.
+
+### v1.21.0 — required if your documents carry `### ` anchors
+
+Serving the inside of big documents — `### ` subsections, chunk paging, chunk-aware search
+hits — arrived here. Below v1.21.0, `get_document(part="ARTICLE 21…")` cannot reach a
+subsection at all, so **anchors in a corpus pinned below this version are inert**: they sit
+in the text, `_subheadings()` does not exist to list them, and nothing errors.
+
+If your corpus anchors large documents (federal-reference, oregon-collective-bargaining),
+this is the floor.
+
+### v1.22.0 — new tools, no forced adoption
+
+`corpus-verify-extraction`, `source_data_file` provenance, fetch-failure tolerance in
+`corpus-detect-changes`, and `corpus-verify` — the only tool that writes
+`last_verified`/`verified_by`, which until then nothing on the platform could set. Adopt
+per corpus; nothing is mandatory.
+
+Note the tolerance change alters an **exit code**: before v1.22.0 any fetch failure failed
+the drift run; after, isolated failures are tolerated and only >20% is systemic (or pass
+`--strict` for the old behaviour). A scheduled job that was reliably red for a reason you
+had stopped reading may now go green — check what it was failing on before assuming it was
+noise.
+
+### v1.23.0 — required for any repo that is an MCP *client*
+
+`_sdk` gained the client half of the mcp 1.x/2.x seam. If you write code that CONNECTS to a
+corpus (a gateway, a chat app), import `open_client_streams`, `tool_input_schema` and
+`result_is_error` from `corpus_toolkit.mcp._sdk` rather than the SDK directly — six
+client-side APIs differ between majors, two of them renamed silently, so code that works
+today breaks on the day someone bumps `mcp`.
+
+Corpus repos that only SERVE are unaffected.
+
+### Adopting any of these in a corpus repo
+
+1. Bump **both** pins (`uses:` and `toolkit-ref:`) — and the third, if the repo installs the
+   toolkit in a job of its own. They are separate knobs and drift silently
+   (corpus-toolkit#9).
+2. If the bump crosses v1.19.0, confirm `corpus.archetype` is set and every reusable
+   workflow call passes `toolkit-ref:`.
+3. Re-run the full CI, not just the changed job. The gates that catch a bad bump —
+   provenance, frontmatter, generated artifacts — are not the ones a pin change looks like
+   it touches.

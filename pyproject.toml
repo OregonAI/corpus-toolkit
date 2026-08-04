@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corpus-toolkit"
-version = "1.18.0"
+version = "1.23.0"
 description = "Shared validation, provenance, and MCP framework for the civic corpus platform"
 requires-python = ">=3.10"
 dependencies = [
@@ -56,6 +56,12 @@ corpus-generate-status = "corpus_toolkit.status:main"
 corpus-generate-index = "corpus_toolkit.index:main"
 corpus-detect-unsourced = "corpus_toolkit.grounding:main"
 corpus-mcp-serve = "corpus_toolkit.mcp.server:main"
+# The semantic arm was the only CLI without an entry point — invoked as
+# `python3 -m corpus_toolkit.semantic.build` while all its peers got a `corpus-*`
+# command. That also kept it outside the `entrypoints` CI job, which verifies every
+# console script resolves, so ~730 LOC across two releases had no import check at all
+# (corpus-toolkit#41).
+corpus-build-semantic-index = "corpus_toolkit.semantic.build:main"
 
 [tool.setuptools.packages.find]
 include = ["corpus_toolkit*"]
