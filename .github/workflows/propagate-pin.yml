@@ -1,0 +1,127 @@
+# Open a pin-bump PR in every corpus when a toolkit tag is cut.
+#
+# Measured across the org on 2026-07-28: 14 of 70 merged PRs (20%) existed only to carry a
+# platform change into a corpus, concentrated in the newest repos — 4 of 7 in
+# oregon-records-retention, 5 of 8 in oregon-legislature (corpus-toolkit#9). Measured again
+# 2026-08-04: 126 pin sites across 10 repos, and six different toolkit versions live at
+# once.
+#
+# OPENS PRs, NEVER PUSHES. A pin bump is exactly the change that should be reviewed by the
+# corpus that owns it: it can turn a green corpus red for reasons the toolkit cannot see
+# (v1.19.0 made toolkit-ref required and enforced archetype). The value here is removing
+# the TYPING and the drift, not the judgement.
+#
+# SETUP REQUIRED, and it will do nothing without it. `secrets.GITHUB_TOKEN` cannot write to
+# another repository, so this needs a PAT (or GitHub App token) with `contents: write` and
+# `pull_requests: write` on the corpus repos, stored as CORPUS_PIN_TOKEN. Absent that, the
+# job reports what it would have done and exits 0 rather than failing a release.
+name: propagate-pin
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: toolkit tag to propagate (defaults to the newest)
+        type: string
+        required: false
+      dry-run:
+        description: report only, open no PRs
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  propagate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      # One job per corpus so a single repo's failure does not hide the other nine.
+      # Listed explicitly rather than discovered: a repo joins this list when its
+      # maintainer wants automated bumps, which is a decision, not a property of existing.
+      matrix:
+        repo:
+          - oregon-audits
+          - oregon-budget
+          - oregon-collective-bargaining
+          - oregon-counties
+          - oregon-kpm
+          - oregon-legislature
+          - oregon-policy-repo
+          - oregon-records-retention
+          - federal-reference
+          - corpus-template
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: toolkit
+
+      - name: Resolve the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          [ -z "$TAG" ] && TAG="${GITHUB_REF_NAME}"
+          case "$TAG" in v*) ;; *) echo "::error::not a version tag: $TAG"; exit 1;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check the token before doing anything else
+        id: auth
+        env:
+          TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::CORPUS_PIN_TOKEN is not set — GITHUB_TOKEN cannot write to"
+            echo "::warning::another repository, so no PR can be opened. Reporting only."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.auth.outputs.ok == 'true'
+        with:
+          repository: OregonAI/${{ matrix.repo }}
+          token: ${{ secrets.CORPUS_PIN_TOKEN }}
+          path: corpus
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Move the pins
+        if: steps.auth.outputs.ok == 'true'
+        id: bump
+        run: |
+          set -euo pipefail
+          python3 toolkit/.github/scripts/bump_pins.py \
+            --repo corpus --to "${{ steps.tag.outputs.tag }}" | tee /tmp/bump.txt
+          cd corpus
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the PR
+        if: steps.auth.outputs.ok == 'true' && steps.bump.outputs.changed == 'true' && inputs.dry-run != true
+        working-directory: corpus
+        env:
+          GH_TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          BRANCH="toolkit-pin-${TAG}"
+          git config user.name "corpus-bot"
+          git config user.email "actions@github.com"
+          git checkout -b "$BRANCH"
+          git commit -am "chore: move corpus-toolkit pins to ${TAG}"
+          git push -u origin "$BRANCH" --force
+          # A PR may already exist from a re-run; that is not a failure.
+          gh pr create --title "chore: move corpus-toolkit pins to ${TAG}" \
+            --body "$(printf 'Automated by corpus-toolkit propagate-pin.\n\n%s\n\n**Review before merging.** A pin bump can turn this repo red for reasons the toolkit cannot see — v1.19.0 made `toolkit-ref` required and enforced `archetype`. See corpus-toolkit CHANGELOG.md and MIGRATION.md for what changed.\n' "$(cat /tmp/bump.txt)")" \
+            || echo "PR already exists for $BRANCH"
