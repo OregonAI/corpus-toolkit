@@ -17,11 +17,16 @@ it can break you.
 
 ## Unreleased
 
-### Fixed — **v1.24.0 is broken; move off it**
+Nothing yet.
+
+## v1.24.1 — 2026-08-04
+
+### Fixed — **v1.24.0 is broken; take this one**
 
 **If you are pinned to v1.24.0, every object-shaped tool on your corpus is failing right
-now.** Take this fix as soon as it tags and rebuild the image; there is no config
-workaround, and rolling back the pin to v1.23.x also clears it.
+now.** Bump to v1.24.1 and rebuild the image; there is no config workaround, and rolling
+back the pin to v1.23.x also clears it. A pin-bump PR should have been opened against your
+corpus automatically — merging it is not enough on its own, the image must rebuild.
 
 v1.24.0 declared a `TypedDict` output schema on the six object-shaped tools
 (`get_document`, `resolve_citation`, `graph_neighbors`, `corpus_overview`,
