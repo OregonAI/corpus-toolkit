@@ -17,14 +17,57 @@ it can break you.
 
 ## Unreleased
 
-- **`--check-robots`** on `corpus-detect-changes`: report each source host's robots.txt
+Nothing yet.
+
+## v1.24.0 — 2026-08-04
+
+**Rebuild corpus images to pick this up.** The serve path changed: `server.py` now serves
+the app it verified rather than letting the SDK build a second one. Behaviour is unchanged
+for a server started without `--allowed-origin` — same uvicorn options, and
+`forwarded_allow_ips` still defaults from the `FORWARDED_ALLOW_IPS` environment variable —
+but it is the code path every corpus runs, so it wants a deliberate rollout rather than
+riding along on the next unrelated rebuild.
+
+Nothing here is breaking. No config change is required by any corpus.
+
+### Added
+
+- **CORS** via `--allowed-origin` (repeatable), so a browser MCP client can complete the
+  handshake at all. Exposes `mcp-session-id`, without which the preflight passes,
+  `initialize` returns 200, and the client dies on `Missing session ID` (#37).
+- **`corpus-detect-changes --check-robots`** — report each source host's robots.txt
   position, including hosts that permit our agent while blocking named AI crawlers.
-  Reports only; nothing blocks a fetch (#29).
-- **CORS** on the streamable-HTTP endpoint via `--allowed-origin`, so browser MCP clients
-  can complete the handshake. Also serves the app `server.py` verified rather than letting
-  the SDK build a second one (#37).
-- **Fixes** — `BIG_DOC_BYTES` defined twice with different values (#52); drift issue
-  creation discarding every `gh` failure (#53); `check-links` gaining `exclude-urls` (#51).
+  Reports only; nothing blocks a fetch (#29). Found on its first run:
+  `www.yamhillcounty.gov` carries `Content-Signal: ai-train=no` and already supplies five
+  documents to oregon-collective-bargaining.
+- **Output schemas** on the six object-shaped tools, so response convention 1's three
+  fields are visible to schema-driven validation instead of only present in the JSON text
+  (#15). Extras are still permitted — a schema that constrained each tool's payload would
+  break every corpus.
+- **`bump_pins.py`** — move every toolkit pin in a corpus, and `--check` to detect pins
+  that disagree. Measured across 10 repos: 126 pin sites, six toolkit versions live at
+  once, and one repo running two versions inside one `ci.yml` (#9). A `propagate-pin`
+  workflow opens the bump PRs, and needs a `CORPUS_PIN_TOKEN` secret to do anything.
+- **`corpus-build-semantic-index`** — the semantic arm was the only CLI without a console
+  entry point, which also kept it outside the `entrypoints` CI job (#41).
+- **`check-links` gains `exclude-urls`** for hosts quoted inside mirrored third-party text,
+  where the link belongs to the source document and cannot be corrected (#51).
+
+### Fixed
+
+- `BIG_DOC_BYTES` was defined twice, 1,200 bytes apart, and `framework.py` shadowed its own
+  import of it (#52).
+- Drift issue creation discarded every `gh` failure. 618 creations failed silently because
+  the `source-change` label did not exist — a hard dependency of `--label` that nothing
+  created (#53). Now creates the label, reports failures, and caps a run at 25.
+- **`pyproject` version was five releases stale** (1.18.0 against tag v1.23.0), so an
+  install reported a version it was not. Now gated: a tag whose version disagrees is
+  deleted (#41).
+
+### Documentation
+
+CHANGELOG.md now exists; MIGRATION.md covers v1.9.0–v1.23.0; `docs/semantic.md` documents
+~730 LOC that had none; `AGENTS.md` states plainly that nothing enforces robots.txt.
 
 ## v1.23.0 — 2026-08-03
 
