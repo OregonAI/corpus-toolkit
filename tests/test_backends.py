@@ -11,6 +11,7 @@ Tests that inspected `fts.body` were asserting on an implementation detail; they
 assert on what a caller can observe — whether a term is findable.
 """
 import json
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -794,3 +795,23 @@ def test_corpus_verify_stamps_only_with_attestation(corpus):
     assert r.returncode == 0, r.stderr
     text = (corpus / "statutes" / "ors-1.010.md").read_text()
     assert 'verified_by: "@tester"' in text
+
+
+def test_big_doc_bytes_has_exactly_one_definition():
+    """corpus-toolkit#52 — the constant was defined twice, 1,200 bytes apart.
+
+    `framework.py` imported it from `backends` and then immediately reassigned it to
+    50_000, shadowing the import, while the only code that branches on it (backends'
+    `part == "auto"` check) used 50 * 1024. A document between the two was "big" to one
+    module and not the other, decided by which module a caller imported from, and nothing
+    errored. Corpora also re-derive this threshold to decide which documents need `### `
+    anchors, so the two values could disagree across repo boundaries too.
+    """
+    from corpus_toolkit.mcp import backends, framework
+    assert framework.BIG_DOC_BYTES is backends.BIG_DOC_BYTES
+    assert backends.BIG_DOC_BYTES == 50 * 1024
+
+    # The shadowing assignment must not come back. An import is fine; a rebind is the bug.
+    src = Path(framework.__file__).read_text()
+    assert not re.search(r"^BIG_DOC_BYTES\s*=", src, re.M), (
+        "framework.py must not redefine BIG_DOC_BYTES — import it from backends")

@@ -42,7 +42,17 @@ from corpus_toolkit.repo import (
     content_files, extract_fulltext, parse_frontmatter, repo_state,
 )
 
-BIG_DOC_BYTES = 50_000
+# BIG_DOC_BYTES is imported from .backends above and deliberately NOT redefined here.
+#
+# It used to be, as `50_000`, on the line this comment replaces — three lines below an
+# import of the same name from `backends`, where it is `50 * 1024` (51,200). The
+# assignment shadowed the import, so this module's name carried 50,000 while the only
+# code that actually branches on it (backends.py's `part == "auto"` big-doc check) used
+# 51,200. A document between those two values was "big" to one module and not the other,
+# and nothing errored — the divergence just decided a branch inconsistently depending on
+# which module a caller had imported from. 51,200 is kept because it is the value that
+# was always live; dropping the shadow changes no behaviour, it only stops the name
+# meaning two things. See corpus-toolkit#52.
 
 # ---------- citation-scheme registry (populated by a corpus's citation_module) ----------
 

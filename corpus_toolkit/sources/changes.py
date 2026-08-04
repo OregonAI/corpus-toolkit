@@ -46,23 +46,68 @@ def _format_for(url: str, declared: str | None) -> str:
     return ext if ext in ("pdf", "xls", "xlsx", "docx", "xml") else "html"
 
 
-def _open_issue(source_id, url, old, new):
+ISSUE_LABEL = "source-change"
+
+# Opening more issues than this in one run is not reporting, it is a stampede. A drift
+# run that wants hundreds of issues is almost always describing a broken BASELINE -- a
+# manifest whose `sha256` values were never recorded compares unequal to everything, so
+# every source reads as changed, forever. Capping and saying so surfaces that; opening
+# 618 issues buries it. See OregonAI/oregon-collective-bargaining#14 for the case that
+# motivated this.
+MAX_ISSUES_PER_RUN = 25
+
+
+def _ensure_label() -> bool:
+    """Create the label if absent. Returns False if we cannot.
+
+    `gh issue create --label X` FAILS when X does not exist, and the label is not part
+    of any repo template -- so a corpus that never hand-created it got silent no-op
+    reporting the first time drift fired, which is exactly what happened
+    (corpus-toolkit#53).
+    """
+    r = subprocess.run(["gh", "label", "create", ISSUE_LABEL, "--force",
+                        "--color", "D93F0B",
+                        "--description", "Upstream source content changed since last ingest"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"WARNING: could not ensure the {ISSUE_LABEL!r} label exists "
+              f"({r.stderr.strip()[:200]}). Issue creation will likely fail.",
+              file=sys.stderr)
+        return False
+    return True
+
+
+def _open_issue(source_id, url, old, new) -> bool:
+    """Open one drift issue. Returns True only if an issue now exists for this source.
+
+    RETURN VALUES ARE CHECKED HERE, unlike the version this replaces, which called
+    `subprocess.run` bare and discarded every failure. That is how 618 consecutive
+    creation failures produced a log reading `618 changed, 58 fetch failure(s)` and no
+    other sign -- the summary counts what DRIFTED, and an operator reasonably reads it
+    as what was REPORTED (corpus-toolkit#53).
+    """
     if not shutil.which("gh"):
         print(f"NOTE: 'gh' not on PATH — skipping issue creation for {source_id}", file=sys.stderr)
-        return
+        return False
     title = f"Source changed: {source_id}"
     existing = subprocess.run(
-        ["gh", "issue", "list", "--label", "source-change", "--state", "open",
+        ["gh", "issue", "list", "--label", ISSUE_LABEL, "--state", "open",
          "--search", f'in:title "{title}"', "--json", "number", "--jq", "length"],
         capture_output=True, text=True)
     if existing.returncode == 0 and existing.stdout.strip() not in ("", "0"):
         print(f"Issue already open for {source_id}, skipping")
-        return
+        return True
     body = (f"Automated detection.\n\n- **Document id**: {source_id}\n"
             f"- **Source URL**: {url}\n- **Previous sha256**: {old}\n"
             f"- **New sha256**: {new}\n")
-    subprocess.run(["gh", "issue", "create", "--label", "source-change",
-                    "--title", title, "--body", body])
+    r = subprocess.run(["gh", "issue", "create", "--label", ISSUE_LABEL,
+                        "--title", title, "--body", body],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"FAILED to open issue for {source_id}: {r.stderr.strip()[:300]}",
+              file=sys.stderr)
+        return False
+    return True
 
 
 def _warn_recheck_is_not_honoured(config) -> int:
@@ -140,12 +185,35 @@ def main():
     if args.github_output:
         with open(args.github_output, "a") as f:
             f.write(f"changed={'true' if changed else 'false'}\n")
-    if args.open_issues:
+    opened = attempted = 0
+    capped = False
+    if args.open_issues and changed:
+        _ensure_label()
         for sid, url, old, new in changed:
-            _open_issue(sid, url, old, new)
+            if attempted >= MAX_ISSUES_PER_RUN:
+                capped = True
+                break
+            attempted += 1
+            opened += bool(_open_issue(sid, url, old, new))
 
+    # THE SUMMARY REPORTS WHAT WAS REPORTED, not only what drifted. The previous version
+    # printed the changed count alone, which read as "these were filed" even when every
+    # single filing had failed.
     print(f"\n{len(changed)} changed, {len(failed)} fetch failure(s) "
           f"of {n_total} checked.")
+    if args.open_issues:
+        print(f"{opened} issue(s) opened or already open, "
+              f"{attempted - opened} failed, of {len(changed)} changed source(s).")
+        if capped:
+            print(f"STOPPED after {MAX_ISSUES_PER_RUN} — {len(changed) - attempted} "
+                  f"changed source(s) were not reported. A run this large usually means "
+                  f"the manifest baseline is empty rather than that upstream moved: a "
+                  f"source with `sha256: ''` can never compare equal, so it drifts every "
+                  f"run. Check the manifest before raising the cap.", file=sys.stderr)
+        if attempted and opened == 0:
+            print("EVERY issue creation failed — drift is being detected and NOT "
+                  "reported. This is the silent-reporting failure of corpus-toolkit#53.",
+                  file=sys.stderr)
     if failed:
         print("failed sources (a fact about our access, not about upstream): "
               + ", ".join(failed[:20]) + ("…" if len(failed) > 20 else ""))

@@ -54,6 +54,12 @@ from typing import Protocol, runtime_checkable
 
 from ..repo import content_files, extract_fulltext, parse_frontmatter, repo_state
 
+# THE one definition. `framework` re-exports it by importing this name; nothing else may
+# redefine it (corpus-toolkit#52 — it was defined twice, 1,200 bytes apart, for months).
+#
+# Corpora that need to agree with the server about what counts as "big" -- to decide which
+# documents get `### ` anchors, say -- should import THIS rather than re-declare a literal:
+#     from corpus_toolkit.mcp.backends import BIG_DOC_BYTES
 BIG_DOC_BYTES = 50 * 1024
 
 # Bumped whenever the shape of the cache db changes. Checked ALONGSIDE the content state

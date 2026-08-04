@@ -15,6 +15,16 @@ on:
         description: newline-separated paths to exclude from the lychee link scan (e.g. large snapshot/template dirs)
         type: string
         default: ""
+      exclude-urls:
+        description: >-
+          newline-separated URL regexes lychee should skip. For hosts quoted INSIDE
+          mirrored third-party text, where the link is part of the source document and
+          cannot be corrected without altering it — a dead URL inside a ratified contract
+          is a fact about that contract. Excluding by path was the only lever before this
+          (corpus-toolkit#51) and it drops the corpus's own curator prose along with the
+          mirrored text.
+        type: string
+        default: ""
       accept-codes:
         description: HTTP status codes/ranges lychee treats as OK (comma-separated, lychee's own syntax e.g. "200..=299,403,429")
         type: string
@@ -25,14 +35,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build lychee exclude-path flags
+      - name: Build lychee exclude flags
         id: excludes
         run: |
           flags=""
           while IFS= read -r p; do
             [ -n "$p" ] && flags="$flags --exclude-path $p"
           done <<< "${{ inputs.exclude-paths }}"
+          while IFS= read -r u; do
+            [ -n "$u" ] && flags="$flags --exclude $u"
+          done <<< "${{ inputs.exclude-urls }}"
           echo "flags=$flags" >> "$GITHUB_OUTPUT"
+          echo "lychee exclude flags: $flags"
       - name: External links
         uses: lycheeverse/lychee-action@v2
         with:
