@@ -13,6 +13,43 @@ contains tooling and specs only — never civic content.
 - Never weaken a guardrail (validator, diff check, review gate) to make a
   corpus ingest easier; fix the corpus instead.
 
+## Fetching: the toolkit does not enforce robots.txt
+
+Say this plainly because the opposite is the natural assumption. `corpus-detect-changes`
+re-fetches every source in the manifest on every scheduled run, and **nothing blocks a
+fetch on robots.txt**. There is a checker, and it reports:
+
+```bash
+corpus-detect-changes --config _meta/corpus.yml --check-robots   # reports, exits 0
+```
+
+Enforcement is a per-corpus policy decision. It is deliberately not a toolkit default,
+because arriving as a surprise behaviour change in a version bump is how a corpus silently
+stops ingesting — the same reasoning as `corpus-detect-unsourced` reporting rather than
+gating.
+
+Two questions the checker keeps apart, and you need both:
+
+* **Does robots.txt permit our user agent?** The literal compliance question, and the only
+  one with a mechanical answer.
+* **Does the host state a position on AI/agent crawling at all?** A host that
+  `Disallow: /`s ClaudeBot and GPTBot has said something about this category of use even
+  when our agent is not named and the first answer is "permitted".
+
+That second case is the common one and the easy one to miss. Measured over the 165 hosts in
+the oregon-counties survey: 8 block a named AI crawler, 5 name `ClaudeBot` with
+`Disallow: /`, and **every commercial code vendor is among them** — Municode, American
+Legal and General Code, several carrying `Content-Signal: search=yes, ai-train=no,
+use=reference`, an explicit EU DSM Art. 4 rights reservation. The counties whose law is most
+machine-readable are precisely the ones whose hosts refuse this use.
+
+`Content-Signal` is surfaced as text, never interpreted — turning it into a boolean would
+invent a policy the toolkit has no standing to set.
+
+**An unreachable robots.txt is `unknown`, not permission.** 42 of those 165 hosts served
+none. Before pointing a corpus at a new publisher, run the check and record the decision on
+the source or group so it is reviewable in a PR and not re-derived on every run.
+
 ## Found a bug you are not fixing right now? Open an issue. Period.
 
 This is not optional and has no size threshold.
