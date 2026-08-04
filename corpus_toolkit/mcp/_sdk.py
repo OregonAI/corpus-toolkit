@@ -66,7 +66,8 @@ except ModuleNotFoundError:                                    # pragma: no cove
 from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402,F401
 
 __all__ = ["SDK_MAJOR", "Server", "TransportSecuritySettings", "sdk_version",
-           "http_kwargs", "build_http_app", "run_http", "session_allowed_hosts",
+           "http_kwargs", "build_http_app", "run_http", "run_http_app", "with_cors",
+           "server_log_level", "session_allowed_hosts",
            "tool_names", "call_tool",
            # The client half of the same seam — see "THE CLIENT SIDE" below.
            "CLIENT_SYMBOL", "open_client_streams", "tool_input_schema",
@@ -115,12 +116,74 @@ def build_http_app(server, kwargs: dict):
 
 
 def run_http(server, kwargs: dict) -> None:
-    """Serve. On 1.x the settings were already applied by build_http_app and `run` reuses
-    the cached session manager; on 2.x the options travel as arguments."""
+    """Serve via the SDK's own runner. On 1.x the settings were already applied by
+    build_http_app and `run` reuses the cached session manager; on 2.x the options travel
+    as arguments.
+
+    PREFER `run_http_app` — see its docstring. This is kept for callers that do not need
+    to wrap the app, and because it is the only path that exercises the SDK's runner."""
     if SDK_MAJOR >= 2:
         server.run(transport="streamable-http", **kwargs)
     else:
         server.run(transport="streamable-http")
+
+
+def server_log_level(server) -> str:
+    """The SDK's configured log level, lowercased for uvicorn. Defaults to 'info'."""
+    try:
+        return str(server.settings.log_level).lower()
+    except Exception:                                          # noqa: BLE001
+        return "info"
+
+
+def run_http_app(server, app, kwargs: dict) -> None:
+    """Serve a PRE-BUILT app with uvicorn, instead of letting the SDK build its own.
+
+    WHY NOT `run_http`. On 2.x, `server.run(transport="streamable-http")` constructs a
+    fresh Starlette app internally, so the app `server.py` verified the mount on is not
+    the object that gets served — the one-dict discipline in `http_kwargs` exists purely
+    to keep those two builds agreeing. Serving the verified app REMOVES that divergence
+    rather than guarding against it, and it is the only way to wrap the app in middleware
+    at all (the SDK exposes no hook, which is why the corpora have no CORS — #37).
+
+    UVICORN OPTIONS ARE DELIBERATELY THE SDK'S. It configures only host, port and
+    log_level, leaving `proxy_headers` and `forwarded_allow_ips` at uvicorn's defaults —
+    and `forwarded_allow_ips` defaults from the FORWARDED_ALLOW_IPS environment variable,
+    which is exactly how platform-deploy fixes the https->http redirect downgrade behind
+    cloudflared (platform-deploy#18). Passing an explicit value here would OVERRIDE that
+    env var and silently re-break it for every deployment, so this passes none.
+    """
+    import uvicorn
+
+    config = uvicorn.Config(app, host=kwargs["host"], port=kwargs["port"],
+                            log_level=server_log_level(server))
+    uvicorn.Server(config).run()
+
+
+def with_cors(app, allowed_origins: list[str]):
+    """Wrap `app` so a browser MCP client can complete the handshake.
+
+    EXPOSING `mcp-session-id` IS THE WHOLE POINT and the easiest half to omit. Streamable
+    HTTP returns the session id in a RESPONSE HEADER, and a browser cannot read a response
+    header the server has not explicitly exposed. Without `expose_headers` the failure is
+    worse than no CORS at all: the preflight passes, `initialize` returns 200, and the
+    client then cannot find its session id and dies on `Bad Request: Missing session ID` —
+    an error that points nowhere near CORS.
+
+    Origins are opt-in. These corpora are public and unauthenticated so origin checking
+    buys little, but defaulting to `*` is not something to do silently on a caller's
+    behalf.
+    """
+    from starlette.middleware.cors import CORSMiddleware
+
+    return CORSMiddleware(
+        app,
+        allow_origins=allowed_origins,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["content-type", "mcp-session-id", "mcp-protocol-version",
+                       "accept", "authorization", "last-event-id"],
+        expose_headers=["mcp-session-id"],
+    )
 
 
 def session_allowed_hosts(server) -> list[str]:
