@@ -13,6 +13,23 @@ contains tooling and specs only — never civic content.
 - Never weaken a guardrail (validator, diff check, review gate) to make a
   corpus ingest easier; fix the corpus instead.
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `OregonAI/corpus-toolkit`, via the `gh` CLI. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` and `docs/adr/` at the repo root. See
+`docs/agents/domain.md`.
+
 ## Fetching: the toolkit does not enforce robots.txt
 
 Say this plainly because the opposite is the natural assumption. `corpus-detect-changes`
