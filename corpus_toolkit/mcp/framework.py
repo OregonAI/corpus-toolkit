@@ -193,13 +193,31 @@ class CorpusFramework:
         self._graph_cache = None
         self._schemes: list = (_collect_schemes(config) if config.citation_module
                                else [])
-        self._semantic = (load_module(config.semantic_search_module, config.root)
-                          if config.semantic_search_module else None)
+        self._semantic = self._load_semantic()
         # The retrieval seam. A corpus may supply its own via plugins.retrieval_module
         # (an API archetype does); everything else keeps the historical file backend.
         # Loaded exactly like citation_module, and validated against the protocol so a
         # broken adapter fails at startup rather than on the first query.
         self.backend = self._load_backend()
+
+    def _load_semantic(self):
+        """The semantic seam, HANDED THIS CORPUS (corpus-toolkit#74).
+
+        A module exposing `make(config)` gets it and we use the returned object; anything
+        else is duck-typed as the module itself, which is what a corpus-supplied semantic
+        module written before `make` existed looks like. Either way the backend only ever
+        calls `available()` / `rank()` / `rank_chunks()`.
+
+        The distinction matters because the module-level form CANNOT be per-corpus: it is
+        one installed module object shared by every framework in the process, so its loaded
+        index is whichever corpus asked first, and it resolves its artifact path from the
+        cwd rather than from the corpus root the builder wrote to.
+        """
+        if not self.config.semantic_search_module:
+            return None
+        mod = load_module(self.config.semantic_search_module, self.config.root)
+        factory = getattr(mod, "make", None)
+        return factory(self.config) if callable(factory) else mod
 
     def _load_backend(self):
         """Pick the retrieval backend. A corpus opts into a different one by setting
