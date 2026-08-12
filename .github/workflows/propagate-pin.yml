@@ -12,9 +12,22 @@
 # the TYPING and the drift, not the judgement.
 #
 # SETUP REQUIRED, and it will do nothing without it. `secrets.GITHUB_TOKEN` cannot write to
-# another repository, so this needs a PAT (or GitHub App token) with `contents: write` and
-# `pull_requests: write` on the corpus repos, stored as CORPUS_PIN_TOKEN. Absent that, the
-# job reports what it would have done and exits 0 rather than failing a release.
+# another repository, so this needs a PAT (or GitHub App token) stored as CORPUS_PIN_TOKEN,
+# with `contents: write`, `pull_requests: write` AND `workflows: write` on the target repos.
+# Run `scripts/provision-pin-token.sh`, which walks the whole thing.
+#
+# `workflows: write` is not optional and is the one that gets missed: bump_pins.py's
+# SCAN_GLOBS covers `.github/workflows/*.yml`, so every bump edits a workflow file, and
+# GitHub REJECTS a token that pushes one without it. The error names the file, never the
+# permission.
+#
+# A MISSING TOKEN IS NOW A FAILURE, not a warning. It used to "report what it would have
+# done and exit 0 rather than failing a release" — defensible in the abstract, and what
+# actually happened is that the secret was never provisioned at all, so v1.24.0, v1.24.1
+# and v1.25.0 each reported ten green legs and propagated NOTHING (corpus-toolkit#83). The
+# tracker meanwhile recorded corpus-toolkit#9 as closed, i.e. that hand-propagation was
+# solved. Nothing about the release is protected by this exiting 0: the release gate is a
+# separate workflow, and this going red does not unpublish a tag.
 name: propagate-pin
 
 on:
@@ -35,14 +48,72 @@ permissions:
   contents: read
 
 jobs:
+  # THE LIST BELOW IS A CLAIM ABOUT THE ORG, so check it against the org.
+  #
+  # Explicit listing stays — a repo joins because its maintainer wants automated bumps,
+  # which is a decision, not a property of existing (docs/adr/0004). What explicit listing
+  # cannot do on its own is tell a DELIBERATE omission from a STALE entry, and it had both
+  # kinds of error at once: `oregon-policy-repo` has not existed for some time, and
+  # `oregon-records-retention` was archived on 2026-08-01 when it folded into ERF. Both
+  # reported success on every release, because a leg that cannot check out still exits 0
+  # when the token gate short-circuits it.
+  #
+  # An unreachable target is therefore a hard failure here. "Could not check" must not be
+  # served as "nothing to do" — the same rule the servers enforce on every response.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every listed repo must exist and be writable
+        env:
+          GH_TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
+          # Kept in the same order as the matrix below. When the corpora manifest of
+          # docs/adr/0008 exists, BOTH this and the matrix generate from it and this
+          # duplication goes away; until then it is a tooling list (docs/adr/0004) and
+          # the preflight is what stops the two copies drifting silently.
+          REPOS: >-
+            oregon-audits oregon-budget oregon-collective-bargaining oregon-counties
+            oregon-kpm oregon-legislature federal-reference
+            executive-regulatory-frameworks corpus-template
+            corpus-gateway corpus-chat oregon-stories
+        run: |
+          set -uo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::CORPUS_PIN_TOKEN is not set. GITHUB_TOKEN cannot write to another"
+            echo "::error::repository, so this workflow would check nothing and report success —"
+            echo "::error::which is exactly what it did for three releases (corpus-toolkit#83)."
+            echo "::error::Provision it with scripts/provision-pin-token.sh."
+            exit 1
+          fi
+          bad=0
+          for r in $REPOS; do
+            json=$(gh api "repos/OregonAI/$r" --jq '{archived,push:.permissions.push}' 2>/dev/null) || {
+              echo "::error::$r — not reachable with CORPUS_PIN_TOKEN (missing repo, or not in the token's scope)"
+              bad=1; continue; }
+            case "$json" in
+              *'"archived":true'*) echo "::error::$r — ARCHIVED; it can never accept a PR. Remove it from the matrix."; bad=1 ;;
+              *'"push":false'*)    echo "::error::$r — reachable but the token has no write access."; bad=1 ;;
+              *) echo "  ok  $r" ;;
+            esac
+          done
+          exit $bad
+
   propagate:
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      # One job per corpus so a single repo's failure does not hide the other nine.
-      # Listed explicitly rather than discovered: a repo joins this list when its
-      # maintainer wants automated bumps, which is a decision, not a property of existing.
+      # One job per repo so a single failure does not hide the other eleven.
+      #
+      # ERF was missing while being the largest corpus on the platform; the consumer tier
+      # (docs/adr/0002) and oregon-stories were missing entirely and had drifted furthest —
+      # measured 2026-08-12: stories v1.20.0, gateway and chat v1.23.0, template v1.19.0,
+      # the corpora v1.24.1, current v1.25.0. Twelve repos, five versions, none current.
+      #
+      # bump_pins.py reaches all three of the new non-corpus entries: SCAN_GLOBS covers
+      # `requirements.txt`, and they pin the `git+https://github.com/OregonAI/corpus-toolkit@vX`
+      # form the third pattern matches.
       matrix:
         repo:
           - oregon-audits
@@ -51,10 +122,12 @@ jobs:
           - oregon-counties
           - oregon-kpm
           - oregon-legislature
-          - oregon-policy-repo
-          - oregon-records-retention
           - federal-reference
+          - executive-regulatory-frameworks
           - corpus-template
+          - corpus-gateway
+          - corpus-chat
+          - oregon-stories
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,21 +142,25 @@ jobs:
           case "$TAG" in v*) ;; *) echo "::error::not a version tag: $TAG"; exit 1;; esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # `preflight` already fails the whole workflow when the token is absent, so reaching
+      # here without one should be impossible. Kept anyway, and it now EXITS rather than
+      # setting an output the later steps test.
+      #
+      # That output was the mechanism of the bug. Every step below used to carry
+      # `if: steps.auth.outputs.ok == 'true'`, so an absent token skipped the entire job
+      # body and the leg still reported success — ten green checks across three releases
+      # while nothing propagated (corpus-toolkit#83). A guard whose failure mode is
+      # "silently do nothing, report success" is not a guard.
       - name: Check the token before doing anything else
-        id: auth
         env:
           TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
         run: |
           if [ -z "${TOKEN:-}" ]; then
-            echo "::warning::CORPUS_PIN_TOKEN is not set — GITHUB_TOKEN cannot write to"
-            echo "::warning::another repository, so no PR can be opened. Reporting only."
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "::error::CORPUS_PIN_TOKEN is not set. Run scripts/provision-pin-token.sh."
+            exit 1
           fi
 
       - uses: actions/checkout@v4
-        if: steps.auth.outputs.ok == 'true'
         with:
           repository: OregonAI/${{ matrix.repo }}
           token: ${{ secrets.CORPUS_PIN_TOKEN }}
@@ -94,7 +171,6 @@ jobs:
           python-version: "3.12"
 
       - name: Move the pins
-        if: steps.auth.outputs.ok == 'true'
         id: bump
         run: |
           set -euo pipefail
@@ -108,7 +184,7 @@ jobs:
           fi
 
       - name: Open the PR
-        if: steps.auth.outputs.ok == 'true' && steps.bump.outputs.changed == 'true' && inputs.dry-run != true
+        if: steps.bump.outputs.changed == 'true' && inputs.dry-run != true
         working-directory: corpus
         env:
           GH_TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
