@@ -79,7 +79,21 @@ _WORD = re.compile(r"[\w.\-]+")
 # reads (r[1] for the snippet, r[7] for bm25) had to be found and re-counted by hand every
 # time the SELECT changed -- and one of them, `snippet(fts, 5, ...)`, addressed a column by
 # index too, which the module docstring used to carry a standing warning about.
+#
+# _doc_meta_row() selects the SAME six columns in the same order, so KW_ID..KW_PATH address
+# it as well. It used to be read as mr[0], mr[1], mr[3] ... in the very branch below where
+# the fts row beside it was already named -- the hazard these constants exist to remove,
+# applied to one of the two readers.
 KW_ID, KW_TITLE, KW_CITATION, KW_DOCTYPE, KW_ISSUER, KW_PATH, KW_BM25 = range(7)
+
+# Column offsets into the tuple _doc_row() returns -- a DIFFERENT and wider projection than
+# the one above, in a different order, and the only one `get()` reads. Twelve positional
+# indices spread over sixty lines, with r[6] appearing twice under two different meanings
+# (source_url, and authoritative_source derived from it) and r[11] deciding the big-document
+# branch. Nothing that reads like `r[11] > BIG_DOC_BYTES` should have to be counted out on
+# fingers to be reviewed.
+(DOC_ID, DOC_PATH, DOC_DOCTYPE, DOC_CITATION, DOC_TITLE, DOC_STATUS, DOC_SOURCE_URL,
+ DOC_RETRIEVED, DOC_EFFECTIVE, DOC_CONTENT_MODE, DOC_EXCEPTION, DOC_SIZE) = range(12)
 
 
 def _stem_match(token: str, term: str) -> bool:
@@ -112,6 +126,21 @@ def _stem_match(token: str, term: str) -> bool:
         common += 1
     # Agree on everything but a suffix or two -- "governing"/"governs" share 6 of 7.
     return common >= 4 and common >= n - 2
+
+
+def extract_section(body: str, heading: str):
+    """The text under a `## <heading>`, up to the next `## `, or None.
+
+    A MODULE FUNCTION, not a method, because it reads nothing off an instance. It was a
+    FileBackend method, and `CorpusFramework._extract_section` called it as
+    `FileBackend._extract_section(self, body, heading)` — passing a CorpusFramework as
+    `self` to an unbound method of an unrelated class. That works only for exactly as long
+    as the body ignores `self`, so the first line added here that touches `self.config`
+    would break a caller in another module with no static or runtime signal beforehand.
+    `make_excerpt` beside it was already a module function for the same reason.
+    """
+    m = re.search(rf"^## {re.escape(heading)}\s*$(.*?)(?=^## |\Z)", body, re.M | re.S)
+    return m.group(1).strip() if m else None
 
 
 def make_excerpt(text: str, terms: list[str], *, width: int = 24,
@@ -231,9 +260,9 @@ class FileBackend:
     def _db_path(self) -> Path:
         return self._cache_dir / "fts.db"
 
-    def _extract_section(self, body: str, heading: str):
-        m = re.search(rf"^## {re.escape(heading)}\s*$(.*?)(?=^## |\Z)", body, re.M | re.S)
-        return m.group(1).strip() if m else None
+    # Kept as a name on the class because corpora and tests reach for it; the
+    # implementation is the module function, which is what everything should call.
+    _extract_section = staticmethod(extract_section)
 
     @staticmethod
     def _subheadings(body: str) -> list[str]:
@@ -433,7 +462,7 @@ class FileBackend:
             sql += " AND d.issuing_body = ?"; sql_args.append(issuing_body)
         sql += " ORDER BY bm25(fts) LIMIT ?"
         sql_args.append(max(1, min(int(limit), 40)))
-        rows = {r[0]: r for r in con.execute(sql, sql_args).fetchall()}
+        rows = {r[KW_ID]: r for r in con.execute(sql, sql_args).fetchall()}
         order = sorted(rows, key=lambda i: rows[i][KW_BM25])
         return rows, order
 
@@ -509,8 +538,8 @@ class FileBackend:
                 keep = []
                 for d in sem_order:
                     mr = self._doc_meta_row(con, d)
-                    if mr and (not doc_type or mr[3] == doc_type) and \
-                            (not issuing_body or mr[4] == issuing_body):
+                    if mr and (not doc_type or mr[KW_DOCTYPE] == doc_type) and \
+                            (not issuing_body or mr[KW_ISSUER] == issuing_body):
                         keep.append(d)
                 sem_order = keep
             final = sem_order[:n] if mode == "semantic" else self._rrf([kw_order, sem_order])[:n]
@@ -533,8 +562,9 @@ class FileBackend:
             else:
                 mr = self._doc_meta_row(con, i)
                 if mr:
-                    hit = {"id": mr[0], "title": mr[1], "citation": mr[2],
-                           "doc_type": mr[3], "issuing_body": mr[4], "path": mr[5],
+                    hit = {"id": mr[KW_ID], "title": mr[KW_TITLE],
+                           "citation": mr[KW_CITATION], "doc_type": mr[KW_DOCTYPE],
+                           "issuing_body": mr[KW_ISSUER], "path": mr[KW_PATH],
                            "snippet": "(semantic match — no keyword overlap)"}
                     if i in sem_chunks:
                         c = sem_chunks[i]
@@ -547,7 +577,8 @@ class FileBackend:
     def exists(self, doc_id: str) -> dict | None:
         con = self.ensure_index()
         r = self._doc_meta_row(con, doc_id)
-        return {"id": r[0], "title": r[1], "doc_type": r[3]} if r else None
+        return ({"id": r[KW_ID], "title": r[KW_TITLE], "doc_type": r[KW_DOCTYPE]}
+                if r else None)
 
     def get(self, doc_id: str, *, part: str = "auto") -> dict:
         """Metadata + body for one document.
@@ -559,15 +590,20 @@ class FileBackend:
         r = self._doc_row(doc_id)
         if not r:
             return {"error": f"no document with id {doc_id!r}"}
-        path = self.config.root / r[1]
+        path = self.config.root / r[DOC_PATH]
         fm, body = parse_frontmatter(path)
-        meta = {"id": r[0], "title": r[4], "citation": r[3], "doc_type": r[2],
-                "status": r[5], "source_url": r[6], "retrieved": r[7],
-                "effective_date": r[8] or None, "content_mode": r[9], "path": r[1],
+        meta = {"id": r[DOC_ID], "title": r[DOC_TITLE], "citation": r[DOC_CITATION],
+                "doc_type": r[DOC_DOCTYPE], "status": r[DOC_STATUS],
+                "source_url": r[DOC_SOURCE_URL], "retrieved": r[DOC_RETRIEVED],
+                "effective_date": r[DOC_EFFECTIVE] or None,
+                "content_mode": r[DOC_CONTENT_MODE], "path": r[DOC_PATH],
                 "relationships": {k: v for k, v in (fm.get("relationships") or {}).items() if v},
-                "authoritative_source": r[6]}
-        if r[10]:
-            meta["content_exception"] = r[10]
+                # The document's OWN source_url is the authoritative source for it —
+                # more precise than the corpus-level URL, which CorpusFramework only
+                # falls back to when this is empty.
+                "authoritative_source": r[DOC_SOURCE_URL]}
+        if r[DOC_EXCEPTION]:
+            meta["content_exception"] = r[DOC_EXCEPTION]
         # Corpus-specific frontmatter this corpus has declared it serves.
         #
         # Without this the fixed key set above is all an agent ever sees, and a field can
@@ -585,10 +621,10 @@ class FileBackend:
                 meta[key] = fm[key]
         headings = re.findall(r"^## (.+)$", body, re.M)
         subs = self._subheadings(body)
-        if part == "auto" and r[11] > BIG_DOC_BYTES:
+        if part == "auto" and r[DOC_SIZE] > BIG_DOC_BYTES:
             glance = self._extract_section(body, "At a glance")
             hint = (f" — or one of its {len(subs)} subsections" if subs else "")
-            resp = {**meta, "note": (f"document body is {r[11] // 1024} KB — pass "
+            resp = {**meta, "note": (f"document body is {r[DOC_SIZE] // 1024} KB — pass "
                                      f"part='full text' (or another heading below{hint}) "
                                      "to page in the content you need"),
                     "at_a_glance": glance, "sections": headings}
@@ -597,7 +633,7 @@ class FileBackend:
             return resp
         if part in ("auto", "full"):
             return {**meta, "body": body}
-        chunk = self._chunk_part(path, r[0], part)
+        chunk = self._chunk_part(path, r[DOC_ID], part)
         if chunk is not None:
             return {**meta, **chunk}
         sec = self._extract_section(body, part) or next(
