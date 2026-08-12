@@ -154,7 +154,17 @@ corpus without a graph answers the first row above.
   holds in this corpus. Takes a registry slug **or** free text, which falls
   back to a unique case-insensitive substring match on the registry name;
   an ambiguous or unmatched query returns `error` plus `candidates`.
-  Registered only when the corpus declares `plugins.issuing_body_registry`.
+
+  Registered when **both** hold: the corpus declares
+  `plugins.issuing_body_registry`, and its retrieval backend implements
+  `holdings_for(slug)` — the optional member of `RetrievalBackend` that answers
+  "what does this corpus hold for this issuing body". A backend that does not
+  implement it leaves the tool unregistered and says so on stderr at startup;
+  registering a tool that raises on every call is worse than not having it. The
+  built-in `FileBackend` implements it, so a document-archetype corpus needs to
+  do nothing. (Before v1.25 the gate tested for `ensure_index`, FileBackend's
+  private FTS connection, so no corpus-supplied backend could serve this tool at
+  any price — corpus-toolkit#75.)
 
   *Correction (2026-07): this extension was written here as
   `agency_profile(agency)`. No server has ever implemented that name.
