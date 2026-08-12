@@ -25,7 +25,7 @@ def load_attr(dotted_path: str, root: Path):
     return getattr(module, attr)
 
 
-def load_module(dotted_path: str, root: Path):
+def load_module(dotted_path: str, root: Path, *, force: bool = False):
     """Import a module purely for its side effects (e.g. citation-scheme
     registration) and return it.
 
@@ -34,7 +34,14 @@ def load_module(dotted_path: str, root: Path):
     plain importlib.import_module put the first one into sys.modules and handed that
     same module back to every later corpus — whose own schemes then never registered,
     silently, while resolve_citation reported the FIRST corpus's schemes as the ones it
-    had attempted. Path-based loading with a unique name removes the collision."""
+    had attempted. Path-based loading with a unique name removes the collision.
+
+    `force` RE-EXECUTES a module already in sys.modules. Needed because for this kind of
+    module the import IS the effect: a caller that wants the side effects and gets a
+    cached module object gets nothing, silently. That is corpus-toolkit#73 — a second
+    CorpusFramework over one corpus collected no citation schemes and then told callers
+    the corpus recognized no citation format. Only pass it when you are loading a module
+    FOR its registrations and do not already hold the result."""
     root_str = str(root)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
@@ -50,10 +57,11 @@ def load_module(dotted_path: str, root: Path):
     if file_path is None:
         # Not a file under this root (an installed package, say) — no collision risk
         # from the corpus convention, so the ordinary import is correct.
-        return importlib.import_module(dotted_path)
+        module = importlib.import_module(dotted_path)
+        return importlib.reload(module) if force else module
 
     alias = f"_corpus_{abs(hash(root_str)) & 0xffffffff:08x}_{dotted_path.replace('.', '_')}"
-    if alias in sys.modules:
+    if alias in sys.modules and not force:
         return sys.modules[alias]
     spec = importlib.util.spec_from_file_location(alias, file_path)
     module = importlib.util.module_from_spec(spec)
