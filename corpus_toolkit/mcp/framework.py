@@ -34,7 +34,9 @@ import yaml
 
 from corpus_toolkit.config import CorpusConfig
 from corpus_toolkit.plugins import load_module
-from corpus_toolkit.mcp.backends import BIG_DOC_BYTES, FileBackend, RetrievalBackend
+from corpus_toolkit.mcp.backends import (
+    BIG_DOC_BYTES, REQUIRED_BACKEND_METHODS, FileBackend, RetrievalBackend,
+)
 from corpus_toolkit.remote import (
     document_url as sibling_document_url, load_sibling_index, lookup as sibling_lookup,
 )
@@ -212,7 +214,7 @@ class CorpusFramework:
         from ..plugins import load_attr
         factory = load_attr(mod, self.config.root)
         backend = factory(self.config, self._semantic)
-        missing = [m for m in ("search", "get", "exists", "overview", "health")
+        missing = [m for m in REQUIRED_BACKEND_METHODS
                    if not callable(getattr(backend, m, None))]
         if missing:
             raise TypeError(f"retrieval_module {mod!r} produced {type(backend).__name__}, "
@@ -235,16 +237,6 @@ class CorpusFramework:
         backend serves this corpus — a sibling lookup is a corpus concern, not a
         storage one."""
         return self.config.root / "_meta" / ".cache"
-
-    def ensure_index(self):
-        """Back-compat shim. The FTS index is a FileBackend implementation detail now;
-        callers outside the MCP tools (CLI, tests) still reach for it."""
-        idx = getattr(self.backend, "ensure_index", None)
-        if idx is None:
-            raise AttributeError(
-                f"{type(self.backend).__name__} has no FTS index — this corpus is not "
-                "file-backed, so ensure_index() is not meaningful for it")
-        return idx()
 
     def _extract_section(self, body: str, heading: str):
         return FileBackend._extract_section(self, body, heading)
@@ -739,15 +731,16 @@ class CorpusFramework:
                         "candidates": [{"slug": s, "name": entries[s].get("name")} for s in hits[:8]]}
             slug = hits[0]
 
-        con = self.ensure_index()
-        docs = con.execute(
-            "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body_slug = ? "
-            "GROUP BY content_mode", (slug,)).fetchall()
+        # Through the seam, not around it. This ran raw SQL against FileBackend's `docs`
+        # table via ensure_index(), which is why the tool could not exist for any other
+        # backend and why three separate guards were needed to keep that from surfacing as
+        # a crash (corpus-toolkit#75).
+        docs = self.backend.holdings_for(slug)
         return {
             **self._envelope(),
             "slug": slug,
             "registry": entries[slug],
             "curated": curated.get(slug, {}),
-            "in_repo": {mode: n for mode, n in docs} or "no documents ingested for this issuing body yet",
+            "in_repo": docs or "no documents ingested for this issuing body yet",
             "disclaimer": self.disclaimer,
         }
