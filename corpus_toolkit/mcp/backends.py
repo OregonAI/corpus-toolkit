@@ -240,6 +240,37 @@ class RetrievalBackend(Protocol):
         not — and 'could not check' must never be served as 'not there'."""
         ...
 
+    # ---------- optional ----------
+
+    def holdings_for(self, slug: str) -> dict:
+        """{content_mode: count} for one issuing-body slug — what this corpus holds for it.
+
+        OPTIONAL, and the only optional member of this protocol; see
+        REQUIRED_BACKEND_METHODS. A backend that cannot answer it simply omits it, and
+        `issuing_body_profile` is not registered for that corpus.
+
+        It exists so the question stops being asked BEHIND the seam. `issuing_body_profile`
+        used to reach through `ensure_index()` and run raw SQL against `docs`, which is
+        FileBackend's private storage — so the tool was unavailable to any other backend at
+        any price, and three separate pieces of code existed to compensate: a shim on
+        CorpusFramework, a `hasattr(backend, "ensure_index")` gate in server.py, and a
+        stderr warning for the tool that gate silently dropped (corpus-toolkit#75).
+        Registration is still gated, but now on a capability a backend can CHOOSE to have.
+        """
+        ...
+
+
+# What `CorpusFramework._load_backend` requires of a backend at STARTUP. Restated here
+# rather than read off the Protocol because Python exposes no portable way to enumerate a
+# Protocol's members across 3.10-3.13 (`__protocol_attrs__` is 3.12+, `_get_protocol_attrs`
+# is private). KEEP IT BESIDE THE PROTOCOL so the two are edited together — it used to be a
+# literal tuple inside framework.py, one module away from the definition it restates.
+#
+# `holdings_for` is deliberately NOT here: adding a required method would break every
+# corpus-supplied backend already in service on the next pin bump, for a tool most of them
+# do not serve. It is a capability, checked where it is used.
+REQUIRED_BACKEND_METHODS = ("search", "get", "exists", "overview", "health")
+
 
 class FileBackend:
     """Markdown files on disk + an FTS5 cache. Historical behaviour, unchanged."""
@@ -658,6 +689,20 @@ class FileBackend:
         head = subprocess.run(["git", "log", "-1", "--format=%h %cs"], cwd=self.config.root,
                               capture_output=True, text=True).stdout.strip()
         return {"documents_by_type": by_type, "content_mode": by_mode, "commit": head}
+
+    def holdings_for(self, slug: str) -> dict:
+        """{content_mode: count} for one issuing-body slug.
+
+        `issuing_body_slug` is PATH-derived (see config.scope_slug_for), not read from the
+        document's own free-text `issuing_body` field — which is why this query belongs to
+        the backend that owns the path-to-row mapping rather than to the tool that asks the
+        question. Known to under-report where a corpus is not issuing-body-scoped; that is
+        a separate defect in WHAT is counted (#71), not in who counts it.
+        """
+        con = self.ensure_index()
+        return dict(con.execute(
+            "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body_slug = ? "
+            "GROUP BY content_mode", (slug,)).fetchall())
 
     def health(self) -> dict:
         """A file corpus is reachable iff its index holds anything.

@@ -241,12 +241,26 @@ def test_incomplete_backend_fails_at_startup(corpus):
         _with_backend(corpus, "backend_mod:_BrokenBackend")
 
 
-def test_ensure_index_is_meaningless_without_files(corpus):
+def test_holdings_is_a_capability_a_backend_can_lack(corpus):
+    """`CorpusFramework.ensure_index` used to stand here, raising "not file-backed" so
+    that `issuing_body_profile`'s raw SQL had somewhere to fail politely. The tool now
+    asks the backend, so the shim is gone and the question a caller cares about is
+    whether the backend can answer at all — which server.py checks before registering
+    the tool (corpus-toolkit#75)."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent))
     f = _with_backend(corpus, "backend_mod:_StubBackend")
-    with pytest.raises(AttributeError, match="not file-backed"):
-        f.ensure_index()
+
+    assert not hasattr(f, "ensure_index")
+    assert not callable(getattr(f.backend, "holdings_for", None))
+
+
+def test_file_backend_counts_holdings_through_the_seam(corpus):
+    """The query issuing_body_profile used to run itself, now behind the interface."""
+    f = fw(corpus)
+
+    assert f.backend.holdings_for("nobody-has-this-slug") == {}
+    assert isinstance(f.backend.holdings_for(""), dict)
 
 
 # ---------- G1: per-doc_type heading selection ----------
