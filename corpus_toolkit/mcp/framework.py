@@ -36,6 +36,7 @@ from corpus_toolkit.config import CorpusConfig
 from corpus_toolkit.plugins import load_module
 from corpus_toolkit.mcp.backends import (
     BIG_DOC_BYTES, REQUIRED_BACKEND_METHODS, FileBackend, RetrievalBackend,
+    extract_section,
 )
 from corpus_toolkit.remote import (
     document_url as sibling_document_url, load_sibling_index, lookup as sibling_lookup,
@@ -257,7 +258,11 @@ class CorpusFramework:
         return self.config.root / "_meta" / ".cache"
 
     def _extract_section(self, body: str, heading: str):
-        return FileBackend._extract_section(self, body, heading)
+        """Kept as a method because corpora reach for it. It used to be implemented as
+        `FileBackend._extract_section(self, body, heading)` — an unbound method of an
+        unrelated class, handed a CorpusFramework as `self`, which worked only because the
+        body never touched it."""
+        return extract_section(body, heading)
 
     # ---------- graph ----------
 
