@@ -422,6 +422,30 @@ today breaks on the day someone bumps `mcp`.
 
 Corpus repos that only SERVE are unaffected.
 
+### v1.25.0 — safe for every corpus; rebuild if you run semantic search
+
+No config changes, no schema change, no MCP contract change. Bump both pins and re-run CI as
+usual.
+
+**The one thing to know**: a corpus with `plugins.semantic_search_module` set now resolves
+its embeddings artifact from `config.root` rather than from the process's working directory.
+In the containers WORKDIR *is* the repo root, so the resolved path is identical, and
+`CORPUS_SEMANTIC_DIR` still wins over both — a normal deployment sees no change. But this is
+the path every semantic query takes, so rebuild the image deliberately rather than letting it
+ride along on an unrelated build, and assert `available()` in your healthcheck afterwards.
+That assertion is worth adding whether or not you take this bump: the semantic arm degrades
+to keyword-only **silently** by design, so a wrong path has always looked like working search
+with worse results.
+
+Unchanged and still true: a corpus that builds its artifact somewhere other than
+`_meta/embeddings` (via `--out`) must set `CORPUS_SEMANTIC_DIR` at serve time. The builder's
+flag and the reader's environment variable are two ways to say one thing and are tracked
+separately.
+
+If your corpus supplies its own `plugins.retrieval_module`, it keeps working untouched —
+`holdings_for` is optional. Implement it if you want that backend to serve
+`issuing_body_profile`, which before this release it could not do at any price.
+
 ### Adopting any of these in a corpus repo
 
 1. Bump **both** pins (`uses:` and `toolkit-ref:`) — and the third, if the repo installs the

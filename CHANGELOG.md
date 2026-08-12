@@ -19,6 +19,86 @@ it can break you.
 
 Nothing yet.
 
+## v1.25.0 — 2026-08-11
+
+### One behaviour change on the serve path, then fixes
+
+**Read this if your corpus sets `plugins.semantic_search_module`.** The shared semantic
+module now resolves its embeddings artifact from `config.root`, not from the process's
+working directory. In the containers those are the same path (WORKDIR is the repo root),
+and `CORPUS_SEMANTIC_DIR` still overrides both, so a normal deployment is unaffected — but
+it is the code path every semantic query runs, so rebuild deliberately rather than letting
+it ride along on an unrelated image build. A corpus that builds its artifact with
+`--out` still needs `CORPUS_SEMANTIC_DIR` set at serve time; that was true before and has
+not changed.
+
+Nothing else changes for a corpus. No `_meta/corpus.yml` edits, no schema change, no MCP
+contract change. The four items below came out of an architecture review of the retrieval
+and plugin seams (corpus-toolkit#73, #74, #75).
+
+### Fixed
+
+- **Citation schemes silently vanished on a second `CorpusFramework` over one corpus**
+  (#73). `load_module` caches a corpus's citation module, so the second construction re-ran
+  none of its top-level `register_scheme` calls and collected nothing — then fell back to a
+  process-wide list the collector had deliberately bypassed, which was therefore empty.
+  `resolve_citation` answered *"no citation scheme recognized this format"* about a corpus
+  that recognizes it perfectly well, reported `schemes_attempted: []`, and skipped sibling
+  resolution entirely — so a sibling citation came back `unresolved` with no
+  `sibling_unavailable` marker. That is "could not check" served as "not there".
+
+  **No deployed server hit this**: `server.py` builds one framework per process. It was
+  reachable from a corpus's own `tools_module`, a CLI, or any multi-corpus process.
+
+- **The semantic seam had no per-corpus state** (#74). The plugin contract passed no
+  corpus, so the module read `Path.cwd()` for its artifact path and kept its loaded index in
+  a module global — one installed module object shared by every framework in the process.
+  A server started outside the repo root served keyword-only while reporting healthy, and
+  two corpora in one process shared whichever index loaded first. The builder never had this
+  problem (`semantic/build.py` has always written to `cfg.root/_meta/embeddings`), so the two
+  halves of one artifact disagreed about where it lives.
+
+- **`corpus_toolkit.semantic.search.selftest()` crashed** and had for some time. Its
+  synthetic fixture was a 5-tuple while the loader had grown to 6 when `rank_chunks` added
+  `rows`, so two of its four checks had not executed since — including the one guarding the
+  degrade path `backends.py` calls with no `try`/`except`. It was written to run without the
+  artifact specifically so CI could run it, and CI never called it. It does now, and `numpy`
+  joins the `test` extra so the check runs rather than skipping.
+
+### Added
+
+- **`RetrievalBackend.holdings_for(slug)`** (#75) — optional, and the only optional member
+  of the protocol. `issuing_body_profile` used to run raw SQL against `FileBackend`'s `docs`
+  table through `ensure_index()`, so the tool was unavailable to any other backend **at any
+  price**, and three separate guards existed to keep that from surfacing as a crash. A
+  corpus-supplied backend can now serve the tool by implementing one documented method; the
+  startup message says so when it does not. `FileBackend` implements it, so a
+  document-archetype corpus does nothing.
+
+- **`plugins.load_module(..., force=True)`** — re-executes a module already in
+  `sys.modules`, for the case where the import *is* the effect. Keyword-only and off by
+  default; only the citation-scheme collector passes it.
+
+- **`corpus_toolkit.semantic.search.make(config)`** — the per-corpus factory
+  `CorpusFramework` now prefers. A semantic module without it is duck-typed exactly as
+  before.
+
+### Internal
+
+- `extract_section` is a module function in `backends.py`. `CorpusFramework._extract_section`
+  called it as `FileBackend._extract_section(self, ...)` — an unbound method of an unrelated
+  class handed a `CorpusFramework` as `self`, which held only while the body ignored `self`.
+  Both classes keep the name.
+- `DOC_*` column constants for `_doc_row`, and the existing `KW_*` applied to the
+  `_doc_meta_row` readers that were still positional. `tests/test_row_offsets.py` executes
+  the real queries and asserts each constant lands on the column it names, so a reordered
+  `SELECT` fails there instead of serving a document with its citation in the `title` field.
+- `REQUIRED_BACKEND_METHODS` moved next to the protocol it restates.
+- First tests for `issuing_body_profile` — `issuing_body_registry` previously appeared
+  nowhere in `tests/`.
+
+Suite: 205 tests → 231.
+
 ## v1.24.1 — 2026-08-04
 
 ### Fixed — **v1.24.0 is broken; take this one**
