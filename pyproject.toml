@@ -29,7 +29,15 @@ dependencies = [
 # being admitted; a bound that claims more than has been tested is worse than no bound,
 # because it reads as a guarantee.
 mcp = ["mcp[cli]>=1.28,<3"]
-test = ["pytest"]
+# numpy is here so the semantic arm is actually TESTED, not skipped.
+#
+# `corpus_toolkit.semantic.search.selftest()` was written to run without the embeddings
+# artifact -- which is gitignored and absent from CI -- precisely so CI could run it. CI
+# then never called it, and it would have skipped on ImportError if it had: the tests job
+# installs `.[mcp,test]`, which does not bring numpy. So ~280 lines of the semantic arm,
+# including the convert-once optimisation whose whole selftest exists to prove it is
+# behaviour-preserving, had no automated check at all.
+test = ["pytest", "numpy"]
 # THE SEMANTIC ARM'S ONLY RUNTIME DEPENDENCY, and it is deliberately just numpy.
 #
 # corpus_toolkit/semantic/ imports numpy lazily, inside functions, so a corpus that never

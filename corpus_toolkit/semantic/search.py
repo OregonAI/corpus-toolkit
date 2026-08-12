@@ -9,17 +9,39 @@ Declare it in a corpus's `_meta/corpus.yml`:
 back to `importlib.import_module`, so an installed-package path resolves without a per-repo
 shim file. Seven corpora share this module rather than seven copies drifting apart.
 
-THE CONTRACT IS TWO FUNCTIONS, duck-typed by corpus_toolkit.mcp.backends at query time:
-`available() -> bool` and `rank(query, want) -> [doc_id]`. Note what the backend does with
-them -- `rank` is called with a POOL size (max(limit*4, 40)), not the caller's limit; it
-must not apply doc_type/issuing_body filters, which the backend applies afterwards; and its
-results are fused with BM25 by reciprocal rank, so only the ORDER matters, never the scores.
+THE CONTRACT. `CorpusFramework` calls `make(config)` when the loaded module exposes it and
+uses the returned object; otherwise it duck-types the MODULE itself, which is what a
+corpus-supplied semantic module written before `make` existed looks like. Either way the
+query surface is the same three methods, and only the first two are required:
+
+    available() -> bool
+    rank(query, want) -> [doc_id]
+    rank_chunks(query, want) -> [{doc_id, ordinal, heading, preview, score}]
+
+Note what `corpus_toolkit.mcp.backends` does with them: `rank` is called with a POOL size
+(max(limit*4, 40)), not the caller's limit; it must not apply doc_type/issuing_body filters,
+which the backend applies afterwards; and its results are fused with BM25 by reciprocal
+rank, so only the ORDER matters, never the scores.
+
+WHY `make(config)` (corpus-toolkit#74). The seam used to pass no corpus at all, so this
+module had nothing to resolve paths against and nowhere to keep per-corpus state, and
+reached for two side channels instead: `artifact_dir()` read `Path.cwd()`, and the loaded
+index lived in a MODULE GLOBAL. Two consequences, both silent:
+
+  * a server started outside the repo root found no artifact and served keyword-only;
+  * two corpora in one process shared whichever index loaded first, because
+    `load_module` hands them the same installed module object.
+
+The builder never had this problem — `semantic/build.py` writes to `cfg.root/_meta/
+embeddings` and takes an explicit `--out`. The two halves of one artifact simply disagreed
+about where it lives, and only the reader could be wrong without saying so.
 
 FAILURE IS SILENT BY DESIGN AND THAT IS THE SHARP EDGE. Every load error is swallowed here
 and `available()` returns False, at which point search_corpus serves keyword-only with no
 field in the response saying so. A missing mount looks exactly like working search with
-worse results. Corpora that enable this should assert `available()` in their healthcheck
-rather than trusting that a green container means semantic search is running.
+worse results. The cause is now printed to stderr on first load, but corpora that enable
+this should still assert `available()` in their healthcheck rather than trusting that a
+green container means semantic search is running.
 """
 from __future__ import annotations
 
@@ -30,25 +52,38 @@ from pathlib import Path
 
 from .embedders import make_embedder
 
-_SEM = "unset"      # "unset" -> not tried; None -> unavailable; tuple -> loaded
 
+def artifact_dir(config=None) -> Path:
+    """Where this corpus's vectors live.
 
-def artifact_dir() -> Path:
-    """Where the vectors live.
+    Precedence, and the order is deliberate:
 
-    Defaults to `<cwd>/_meta/embeddings`, which is correct in the containers (WORKDIR is
-    the repo root) and when running from a checkout. `CORPUS_SEMANTIC_DIR` overrides it --
-    needed because this module is shared, so it cannot resolve paths relative to its own
-    file the way a per-repo copy did.
+      1. `CORPUS_SEMANTIC_DIR` — an operator's explicit answer, e.g. a volume mounted
+         somewhere other than the repo. It wins over everything so that no existing
+         deployment changes behaviour.
+      2. `config.root/_meta/embeddings` — the same path `semantic/build.py` writes to.
+         This is the one that was missing: the reader used to guess where the writer had
+         already been told to go.
+      3. `<cwd>/_meta/embeddings` — the historical default, still correct in the
+         containers (WORKDIR is the repo root) and when running from a checkout. Reached
+         only by the module-level shims, which have no config to consult.
+
+    Note that a corpus building with `--out` (oregon-legislature keeps a different
+    artifact at the default path) still has to set `CORPUS_SEMANTIC_DIR` at serve time —
+    the builder's flag and the reader's env var are two ways to say one thing, tracked
+    separately.
     """
     env = os.environ.get("CORPUS_SEMANTIC_DIR")
-    return Path(env) if env else Path.cwd() / "_meta" / "embeddings"
+    if env:
+        return Path(env)
+    root = getattr(config, "root", None)
+    if root is not None:
+        return Path(root) / "_meta" / "embeddings"
+    return Path.cwd() / "_meta" / "embeddings"
 
 
-def _semantic_index():
-    global _SEM
-    if _SEM != "unset":
-        return _SEM
+def _load_index(directory: Path):
+    """Open one artifact directory, or None if it cannot serve. Never raises."""
     try:
         # The model backends hit huggingface.co to check the model revision on every load
         # unless told not to; the serve side only ever uses a model already cached or
@@ -56,7 +91,7 @@ def _semantic_index():
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         import numpy as np
-        d = artifact_dir()
+        d = Path(directory)
         meta = json.loads((d / "meta.json").read_text())
         vecs = np.load(d / "vectors.i8.npy")
         # Full row metadata, not just doc_id: heading/ordinal/preview were computed at
@@ -109,7 +144,7 @@ def _semantic_index():
         #
         # CORPUS_SEMANTIC_LOW_MEMORY=1 keeps int8 resident and pays per query instead.
         vecs = prepare_vectors(np, vecs)
-        _SEM = (np, vecs, doc_ids, embedder, meta, rows)
+        return (np, vecs, doc_ids, embedder, meta, rows)
     except Exception as e:
         # STILL SWALLOWED -- the caller must degrade to keyword rather than 500 -- but no
         # longer SILENT. Every distinct cause reports `available() -> False` and the response
@@ -118,11 +153,11 @@ def _semantic_index():
         # debugging time on this platform; the last was a corpus reporting healthy and serving
         # keyword-only because numpy was not installed.
         #
-        # One line on stderr costs nothing and turns "semantic is off and nobody knows why"
-        # into a container log you can read.
-        print(f"semantic search unavailable: {type(e).__name__}: {e}", file=sys.stderr)
-        _SEM = None
-    return _SEM
+        # The DIRECTORY is named because the commonest cause is looking in the wrong one,
+        # and the message that omitted it sent people to check the mount instead.
+        print(f"semantic search unavailable ({directory}): {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return None
 
 
 def prepare_vectors(np, vecs):
@@ -139,57 +174,108 @@ def prepare_vectors(np, vecs):
     return np.ascontiguousarray(vecs, dtype=np.float32)
 
 
+class SemanticIndex:
+    """One corpus's vectors, loaded lazily on first query.
+
+    Lazy because construction happens at server startup, where a corpus that has no
+    artifact must not pay a load attempt, and because the failure it would report is only
+    actionable once someone searches.
+    """
+
+    def __init__(self, directory):
+        self._dir = Path(directory)
+        self._index = "unset"        # "unset" -> not tried; None -> unavailable; tuple -> loaded
+
+    def _loaded(self):
+        if self._index == "unset":
+            self._index = _load_index(self._dir)
+        return self._index
+
+    def available(self) -> bool:
+        return self._loaded() is not None
+
+    def rank_chunks(self, query: str, want: int) -> list[dict]:
+        """Best chunk per document, WITH the chunk's identity — [{doc_id, ordinal, heading,
+        preview, score}] in similarity order. rank() keeps its bare-ids contract; this is
+        the richer sibling the MCP search layer attaches to hits so an agent landing on a
+        900 KB statute learns WHERE in it the match lives."""
+        idx = self._loaded()
+        if not idx:
+            return []
+        np, vecs, doc_ids, embedder, _meta, rows = idx
+        scores = self._scores(np, vecs, embedder, query)
+        best: dict[str, dict] = {}
+        for i in np.argsort(-scores):
+            d = doc_ids[i]
+            if d not in best:
+                r = rows[int(i)]
+                best[d] = {"doc_id": d, "ordinal": r.get("ordinal"),
+                           "heading": r.get("heading"), "preview": r.get("preview"),
+                           "score": float(scores[i])}
+                if len(best) >= want:
+                    break
+        return sorted(best.values(), key=lambda h: -h["score"])
+
+    def rank(self, query: str, want: int) -> list:
+        """Doc ids by best-chunk cosine similarity (empty when the index is unavailable).
+
+        Many chunks share a doc_id; the first hit in similarity order is that document's
+        best chunk, so iterating argsort and keeping first-seen gives best-chunk-per-
+        document.
+        """
+        idx = self._loaded()
+        if not idx:
+            return []
+        np, vecs, doc_ids, embedder, _meta, _rows = idx
+        scores = self._scores(np, vecs, embedder, query)
+        best: dict[str, float] = {}
+        for i in np.argsort(-scores):
+            d = doc_ids[i]
+            if d not in best:
+                best[d] = float(scores[i])
+                if len(best) >= want:
+                    break
+        return sorted(best, key=lambda d: -best[d])
+
+    @staticmethod
+    def _scores(np, vecs, embedder, query: str):
+        # Already float32 unless low-memory mode kept int8, where the astype is the
+        # deliberate cost. Both paths are cosine: rows are L2-normalized and the int8 form
+        # is scaled by 127, which cancels in the ranking.
+        q = embedder.encode([query])[0].astype(np.float32)
+        return (vecs @ q) if vecs.dtype == np.float32 else (vecs.astype(np.float32) @ q)
+
+
+def make(config) -> SemanticIndex:
+    """The seam `CorpusFramework` prefers: one index per CORPUS, path from its config."""
+    return SemanticIndex(artifact_dir(config))
+
+
+# --------------------------------------------------------- module-level compatibility
+
+# The pre-#74 surface. Kept so that nothing in any corpus's `_meta/corpus.yml` changes and
+# so a caller holding the module itself still works; it resolves its directory from the
+# environment or the cwd, because it has no config to ask.
+_DEFAULT: SemanticIndex | None = None
+
+
+def _default() -> SemanticIndex:
+    global _DEFAULT
+    if _DEFAULT is None:
+        _DEFAULT = SemanticIndex(artifact_dir())
+    return _DEFAULT
+
+
 def available() -> bool:
-    return _semantic_index() is not None
-
-
-def rank_chunks(query: str, want: int) -> list[dict]:
-    """Best chunk per document, WITH the chunk's identity — [{doc_id, ordinal, heading,
-    preview, score}] in similarity order. rank() keeps its bare-ids contract; this is
-    the richer sibling the MCP search layer attaches to hits so an agent landing on a
-    900 KB statute learns WHERE in it the match lives."""
-    idx = _semantic_index()
-    if not idx:
-        return []
-    np, vecs, doc_ids, embedder, _meta, rows = idx
-    q = embedder.encode([query])[0].astype(np.float32)
-    scores = (vecs @ q) if vecs.dtype == np.float32 else (vecs.astype(np.float32) @ q)
-    best: dict[str, dict] = {}
-    for i in np.argsort(-scores):
-        d = doc_ids[i]
-        if d not in best:
-            r = rows[int(i)]
-            best[d] = {"doc_id": d, "ordinal": r.get("ordinal"),
-                       "heading": r.get("heading"), "preview": r.get("preview"),
-                       "score": float(scores[i])}
-            if len(best) >= want:
-                break
-    return sorted(best.values(), key=lambda h: -h["score"])
+    return _default().available()
 
 
 def rank(query: str, want: int) -> list:
-    """Doc ids by best-chunk cosine similarity (empty when the index is unavailable).
+    return _default().rank(query, want)
 
-    Many chunks share a doc_id; the first hit in similarity order is that document's best
-    chunk, so iterating argsort and keeping first-seen gives best-chunk-per-document.
-    """
-    idx = _semantic_index()
-    if not idx:
-        return []
-    np, vecs, doc_ids, embedder, _meta, _rows = idx
-    q = embedder.encode([query])[0].astype(np.float32)
-    # Already float32 unless low-memory mode kept int8, where the astype is the deliberate
-    # cost. Both paths are cosine: rows are L2-normalized and the int8 form is scaled by
-    # 127, which cancels in the ranking.
-    scores = (vecs @ q) if vecs.dtype == np.float32 else (vecs.astype(np.float32) @ q)
-    best: dict[str, float] = {}
-    for i in np.argsort(-scores):
-        d = doc_ids[i]
-        if d not in best:
-            best[d] = float(scores[i])
-            if len(best) >= want:
-                break
-    return sorted(best, key=lambda d: -best[d])
+
+def rank_chunks(query: str, want: int) -> list[dict]:
+    return _default().rank_chunks(query, want)
 
 
 # --------------------------------------------------------------------------- selftest
@@ -226,33 +312,39 @@ def selftest() -> int:
 
     # 2. rank() must work whichever dtype the index holds, because low-memory mode keeps
     #    int8. A dtype check that only ever saw float32 would let the fallback rot.
-    global _SEM
-    saved = _SEM
-    try:
-        class _E:
-            def encode(self, xs):
-                r = rng.standard_normal((len(xs), D)).astype(np.float32)
-                return r / np.linalg.norm(r, axis=1, keepdims=True)
-        ids = [f"doc-{i // 4}" for i in range(N)]          # 4 chunks per document
-        for label, mat in (("float32 (default)", f32), ("int8 (low-memory)", vi8)):
-            _SEM = (np, mat, ids, _E(), {"dim": D})
-            got = rank("anything", 5)
-            if len(got) != 5:
-                fails.append(f"{label}: rank() returned {len(got)} docs, want 5")
-            if len(set(got)) != len(got):
-                fails.append(f"{label}: rank() returned a duplicate doc_id")
+    class _E:
+        def encode(self, xs):
+            r = rng.standard_normal((len(xs), D)).astype(np.float32)
+            return r / np.linalg.norm(r, axis=1, keepdims=True)
 
-        # 3. UNAVAILABLE MUST BE SURVIVABLE, not an exception. backends.py calls
-        #    self._semantic.rank(...) with no guard, so a raise here would take down
-        #    search_corpus for a corpus whose only fault is a missing mount -- turning a
-        #    silent degrade into an outage.
-        _SEM = None
-        if rank("anything", 5) != []:
-            fails.append("rank() with no index must return [], not results")
-        if available() is not False:
-            fails.append("available() must be False when the index failed to load")
-    finally:
-        _SEM = saved
+    def _fixture(mat):
+        """A SemanticIndex over pre-loaded synthetic vectors, bypassing the artifact."""
+        ix = SemanticIndex("/nonexistent")
+        ids = [f"doc-{i // 4}" for i in range(N)]          # 4 chunks per document
+        rows = [{"doc_id": d, "ordinal": i % 4, "heading": None, "preview": ""}
+                for i, d in enumerate(ids)]
+        ix._index = (np, mat, ids, _E(), {"dim": D}, rows)
+        return ix
+
+    for label, mat in (("float32 (default)", f32), ("int8 (low-memory)", vi8)):
+        got = _fixture(mat).rank("anything", 5)
+        if len(got) != 5:
+            fails.append(f"{label}: rank() returned {len(got)} docs, want 5")
+        if len(set(got)) != len(got):
+            fails.append(f"{label}: rank() returned a duplicate doc_id")
+
+    # 3. UNAVAILABLE MUST BE SURVIVABLE, not an exception. backends.py calls
+    #    self._semantic.rank(...) with no guard, so a raise here would take down
+    #    search_corpus for a corpus whose only fault is a missing mount -- turning a
+    #    silent degrade into an outage.
+    dead = SemanticIndex("/nonexistent")
+    dead._index = None
+    if dead.rank("anything", 5) != []:
+        fails.append("rank() with no index must return [], not results")
+    if dead.rank_chunks("anything", 5) != []:
+        fails.append("rank_chunks() with no index must return [], not results")
+    if dead.available() is not False:
+        fails.append("available() must be False when the index failed to load")
 
     # 4. THE LOADER MUST ACTUALLY CONVERT. The checks above assert the maths and the dtype
     #    fallback; none notices if prepare_vectors() stops converting, which IS the bug.
@@ -269,7 +361,27 @@ def selftest() -> int:
     finally:
         os.environ.pop("CORPUS_SEMANTIC_LOW_MEMORY", None)
 
-    total = 8 + 4 + 2 + 2
+    # 5. THE ARTIFACT DIRECTORY COMES FROM THE CORPUS, not the process's cwd
+    #    (corpus-toolkit#74). Without this the module resolves paths against wherever it
+    #    happens to be running, and a server started one directory up serves keyword-only
+    #    while reporting healthy.
+    class _Cfg:
+        root = Path("/srv/some-corpus")
+
+    os.environ.pop("CORPUS_SEMANTIC_DIR", None)
+    if artifact_dir(_Cfg()) != Path("/srv/some-corpus/_meta/embeddings"):
+        fails.append("artifact_dir(config) did not resolve against config.root")
+    if artifact_dir() != Path.cwd() / "_meta" / "embeddings":
+        fails.append("artifact_dir() without a config must keep the historical cwd default")
+    os.environ["CORPUS_SEMANTIC_DIR"] = "/mnt/vectors"
+    try:
+        if artifact_dir(_Cfg()) != Path("/mnt/vectors"):
+            fails.append("CORPUS_SEMANTIC_DIR must win over the config — an operator's "
+                         "explicit mount is the most specific answer")
+    finally:
+        os.environ.pop("CORPUS_SEMANTIC_DIR", None)
+
+    total = 8 + 4 + 3 + 2 + 3
     for f in fails:
         print(f"FAIL {f}")
     print(f"semantic search selftest: {total - len(fails)}/{total} passed")
