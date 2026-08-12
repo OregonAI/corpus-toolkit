@@ -34,7 +34,9 @@ import yaml
 
 from corpus_toolkit.config import CorpusConfig
 from corpus_toolkit.plugins import load_module
-from corpus_toolkit.mcp.backends import BIG_DOC_BYTES, FileBackend, RetrievalBackend
+from corpus_toolkit.mcp.backends import (
+    BIG_DOC_BYTES, REQUIRED_BACKEND_METHODS, FileBackend, RetrievalBackend,
+)
 from corpus_toolkit.remote import (
     document_url as sibling_document_url, load_sibling_index, lookup as sibling_lookup,
 )
@@ -68,6 +70,11 @@ _LEGAL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]+$")
 # never constructing two frameworks at once, which nothing enforced and the
 # cross-corpus feature actively invites.
 _COLLECTING: list | None = None
+
+# Collected schemes per (corpus root, citation module). THE IMPORT IS THE REGISTRATION,
+# and an import happens once per process — which is what this cache exists for; see
+# _collect_schemes.
+_SCHEME_CACHE: dict[tuple[str, str], list] = {}
 
 
 def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
@@ -116,7 +123,65 @@ def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
 
 
 def clear_schemes() -> None:
+    """Empty the module-level registry AND the per-corpus cache.
+
+    Both, because they are two halves of one answer: a test that registers directly and
+    then builds a framework over a corpus it has already built once would otherwise be
+    served the schemes the earlier test collected. The cache is keyed by corpus, not by
+    test, so nothing else would ever evict it."""
     _SCHEMES.clear()
+    _SCHEME_CACHE.clear()
+
+
+def _collect_schemes(config: CorpusConfig) -> list:
+    """This corpus's citation schemes, importing its `citation_module` to collect them.
+
+    A corpus registers its schemes with top-level `register_scheme` calls, so the IMPORT
+    IS THE REGISTRATION — and a module imports once per process. Two mechanisms keep that
+    from meaning "once per process is all you get":
+
+      * the cache: a second framework over the same corpus is handed the same list.
+        Keyed by (root, module) because that pair IS the corpus's scheme identity.
+      * `force=True`: on a cache MISS the module is re-executed rather than served from
+        sys.modules, so the registrations actually happen. Without it, evicting the cache
+        (`clear_schemes`) would put us straight back into the bug.
+
+    THE BUG (corpus-toolkit#73). A second CorpusFramework over one corpus collected
+    nothing — the module was cached, its top-level calls did not re-run — and fell back to
+    `_SCHEMES`, the process-wide list this collector had just deliberately bypassed and
+    which was therefore empty. It ended up with NO schemes, and `resolve_citation` replied
+    "no citation scheme recognized this format" about a corpus that recognizes it
+    perfectly well. That is a false statement about the server's own capability, the shape
+    response convention 5 exists to prevent; it also skipped sibling resolution entirely,
+    so a sibling citation came back `unresolved` with no `sibling_unavailable` marker —
+    "could not check" served as "not there".
+
+    Nothing deployed hit it, because server.py builds one framework per process. The
+    direction of travel is more corpora per process, not fewer.
+    """
+    key = (str(config.root), config.citation_module)
+    cached = _SCHEME_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+
+    global _COLLECTING
+    collected: list = []
+    _COLLECTING = collected
+    try:
+        load_module(config.citation_module, config.root, force=True)
+    finally:
+        _COLLECTING = None
+
+    if not collected and _SCHEMES:
+        # Re-execution registered nothing into this collector, but the process-wide list
+        # is not empty — a module that guards its own re-import, or a corpus that
+        # registered from somewhere other than the module named here. Adopt those rather
+        # than serve this corpus with none; an over-broad scheme list degrades to a miss,
+        # an empty one lies about the format being unrecognized.
+        collected = list(_SCHEMES)
+
+    _SCHEME_CACHE[key] = collected
+    return list(collected)
 
 
 class CorpusFramework:
@@ -126,20 +191,8 @@ class CorpusFramework:
             "NON-AUTHORITATIVE curated copy for AI-agent reference. Not the "
             "official text — always cite and verify against source_url.")
         self._graph_cache = None
-        self._schemes: list = []
-        if config.citation_module:
-            global _COLLECTING
-            _COLLECTING = self._schemes
-            try:
-                load_module(config.citation_module, config.root)
-            finally:
-                _COLLECTING = None
-            if not self._schemes:
-                # The module imported but registered nothing into this instance. Almost
-                # always a module already in sys.modules from an earlier load (its
-                # top-level register_scheme calls do not re-run), which would leave this
-                # corpus silently unable to resolve its own citations.
-                self._schemes = list(_SCHEMES)
+        self._schemes: list = (_collect_schemes(config) if config.citation_module
+                               else [])
         self._semantic = self._load_semantic()
         # The retrieval seam. A corpus may supply its own via plugins.retrieval_module
         # (an API archetype does); everything else keeps the historical file backend.
@@ -179,7 +232,7 @@ class CorpusFramework:
         from ..plugins import load_attr
         factory = load_attr(mod, self.config.root)
         backend = factory(self.config, self._semantic)
-        missing = [m for m in ("search", "get", "exists", "overview", "health")
+        missing = [m for m in REQUIRED_BACKEND_METHODS
                    if not callable(getattr(backend, m, None))]
         if missing:
             raise TypeError(f"retrieval_module {mod!r} produced {type(backend).__name__}, "
@@ -202,16 +255,6 @@ class CorpusFramework:
         backend serves this corpus — a sibling lookup is a corpus concern, not a
         storage one."""
         return self.config.root / "_meta" / ".cache"
-
-    def ensure_index(self):
-        """Back-compat shim. The FTS index is a FileBackend implementation detail now;
-        callers outside the MCP tools (CLI, tests) still reach for it."""
-        idx = getattr(self.backend, "ensure_index", None)
-        if idx is None:
-            raise AttributeError(
-                f"{type(self.backend).__name__} has no FTS index — this corpus is not "
-                "file-backed, so ensure_index() is not meaningful for it")
-        return idx()
 
     def _extract_section(self, body: str, heading: str):
         return FileBackend._extract_section(self, body, heading)
@@ -706,15 +749,16 @@ class CorpusFramework:
                         "candidates": [{"slug": s, "name": entries[s].get("name")} for s in hits[:8]]}
             slug = hits[0]
 
-        con = self.ensure_index()
-        docs = con.execute(
-            "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body_slug = ? "
-            "GROUP BY content_mode", (slug,)).fetchall()
+        # Through the seam, not around it. This ran raw SQL against FileBackend's `docs`
+        # table via ensure_index(), which is why the tool could not exist for any other
+        # backend and why three separate guards were needed to keep that from surfacing as
+        # a crash (corpus-toolkit#75).
+        docs = self.backend.holdings_for(slug)
         return {
             **self._envelope(),
             "slug": slug,
             "registry": entries[slug],
             "curated": curated.get(slug, {}),
-            "in_repo": {mode: n for mode, n in docs} or "no documents ingested for this issuing body yet",
+            "in_repo": docs or "no documents ingested for this issuing body yet",
             "disclaimer": self.disclaimer,
         }

@@ -146,12 +146,17 @@ def build_server(config):
             'down' toward what implements it, 'both' does both."""
             return fw.authority_chain(doc_id, direction, depth)
 
-        # ...AND the backend must be able to answer it. issuing_body_profile counts the
-        # corpus's holdings with raw SQL through ensure_index(), so a custom backend
-        # without an FTS index would register a tool that raises on every call — the one
-        # configuration the release gate did not cover (corpus-toolkit#38). Registering
-        # nothing is honest; registering a landmine is not.
-        if config.issuing_body_registry and hasattr(fw.backend, "ensure_index"):
+        # ...AND the backend must be able to answer it. Registering nothing is honest;
+        # registering a landmine is not — a backend that cannot count holdings would give
+        # a tool that raises on every call, the one configuration the release gate did not
+        # cover (corpus-toolkit#38).
+        #
+        # The capability is `holdings_for`, an optional member of RetrievalBackend. This
+        # used to test for `ensure_index` — FileBackend's private FTS connection — so the
+        # gate asked "are you the file backend?" rather than "can you answer this?", and no
+        # other backend could pass it at any price (corpus-toolkit#75).
+        if config.issuing_body_registry and callable(
+                getattr(fw.backend, "holdings_for", None)):
             @mcp.tool()
             def issuing_body_profile(slug_or_query: str) -> dict[str, Any]:
                 """Context about an issuing body: registry identity, curated notes,
@@ -159,8 +164,9 @@ def build_server(config):
                 return fw.issuing_body_profile(slug_or_query)
         elif config.issuing_body_registry:
             print(f"[corpus-mcp] {config.id}: issuing_body_profile NOT registered — the "
-                  f"backend ({fw.backend.name}) has no ensure_index(), and the tool "
-                  f"would raise on every call.", file=sys.stderr)
+                  f"backend ({fw.backend.name}) implements no holdings_for(slug), so the "
+                  f"tool would raise on every call. Implement it to serve this tool.",
+                  file=sys.stderr)
 
     # Corpus-specific tools, registered LAST so they see a fully-built server and cannot
     # be shadowed by a built-in added later. The seam exists because the built-in seven
