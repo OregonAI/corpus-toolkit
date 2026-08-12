@@ -162,7 +162,7 @@ corpus without a graph answers the first row above.
   implement it leaves the tool unregistered and says so on stderr at startup;
   registering a tool that raises on every call is worse than not having it. The
   built-in `FileBackend` implements it, so a document-archetype corpus needs to
-  do nothing. (Before v1.25 the gate tested for `ensure_index`, FileBackend's
+  do nothing. (Before v1.25.0 the gate tested for `ensure_index`, FileBackend's
   private FTS connection, so no corpus-supplied backend could serve this tool at
   any price — corpus-toolkit#75.)
 
