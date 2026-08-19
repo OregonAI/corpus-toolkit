@@ -107,7 +107,21 @@ it, and marked `sibling_unavailable: "<id>"` when the sibling could not be
 consulted. External targets are the normal case for a corpus whose value is
 citing a sibling, not an edge case: they must never error the tool.
 
-The graph is a separate artifact from the corpus, so three conditions stay
+**A relation name becomes a response key verbatim.** Each edge type found in
+the graph is returned under its own key, so `implements` arrives as
+`implements`. Five names are therefore RESERVED and a graph may not use them
+as relation types: `corpus`, `archetype` and `authoritative_source` (response
+convention 1's envelope) plus this tool's own `id` and `title`. A graph
+declaring one gets the fourth row below rather than a response with the
+colliding field overwritten (corpus-toolkit#105) — silently for `id`/`title`,
+and as a hard serialization error for the envelope fields.
+
+The relation types in use across the platform are `references_external`,
+`related`, `supersedes`, `implements` and `implemented_by`; none collides.
+The frontmatter schema's `relationships` block is closed over that set, so
+only a corpus's own graph builder can introduce a collision.
+
+The graph is a separate artifact from the corpus, so four conditions stay
 distinguishable and none of them is reported as another:
 
 | Condition | Response |
@@ -115,6 +129,14 @@ distinguishable and none of them is reported as another:
 | the corpus has no graph at all | `no_graph: true`, error names the graph |
 | the graph exists but predates this document | `not_in_graph: true`, error says rebuild |
 | there is genuinely no such document | `error: "no document with id '<id>'"` |
+| the graph declares a reserved relation name | `error` names the relation, `note` names the reserved set and the graph file |
+
+The fourth is reported by **this tool only**. `corpus_overview`,
+`resolve_citation` and `authority_chain` share the graph loader but cannot
+have a key displaced by a relation name — `authority_chain` returns every
+configured relation under a `up_`/`down_` prefix — so they keep answering. An
+error surfaced by a tool that could not have been affected would report a
+condition other than the one that occurred, which convention 5 forbids.
 
 `graph_neighbors` stays registered even when a corpus has no graph — it is
 a core tool, and "servers must not remove core tools" (see Versioning). A

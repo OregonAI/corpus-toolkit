@@ -210,6 +210,10 @@ class CorpusFramework:
             "NON-AUTHORITATIVE curated copy for AI-agent reference. Not the "
             "official text — always cite and verify against source_url.")
         self._graph_cache = None
+        # Relation names in this corpus's graph that collide with response keys
+        # `graph_neighbors` writes (corpus-toolkit#105). Populated when the graph is parsed
+        # and read only by that tool; empty for every corpus on the platform today.
+        self._reserved_clashes: list[str] = []
         self._schemes: list = (_collect_schemes(config) if config.citation_module
                                else [])
         self._semantic = self._load_semantic()
@@ -385,6 +389,22 @@ class CorpusFramework:
                 "archetype": self.config.archetype,
                 "authoritative_source": self.config.authoritative_source}
 
+    def _reserved_response_keys(self) -> frozenset:
+        """Response keys a graph relation name may not take (corpus-toolkit#105).
+
+        DERIVED FROM WHAT `graph_neighbors` WRITES, not duplicated as a literal. That tool
+        assembles the envelope plus its own `id` and `title` before looping over relation
+        names, and each relation becomes a response key verbatim — so exactly those keys
+        are unavailable. A hardcoded list would drift the moment the tool gained a field,
+        and the new field would silently become displaceable again.
+
+        The envelope half comes from `_envelope()` rather than from `ResponseEnvelope`:
+        this module is deliberately stdlib + PyYAML only, so that a corpus image can smoke
+        test it without the `mcp` extra installed, and importing the pydantic model here
+        would break that.
+        """
+        return frozenset(self._envelope()) | {"id", "title"}
+
     def graph(self):
         if self._graph_cache is None:
             if not self.config.graph_path.is_file():
@@ -395,6 +415,44 @@ class CorpusFramework:
                 edges = {}
                 for e in g["edges"]:
                     edges.setdefault(e["from"], {}).setdefault(e["type"], []).append(e["to"])
+                # A RELATION NAME BECOMES A RESPONSE KEY VERBATIM (corpus-toolkit#105).
+                #
+                # `graph_neighbors` writes one key per relation, after the envelope, so a
+                # relation named `corpus` overwrote that field with a list of neighbour
+                # records — a hard ValidationError since #103 types it `str`, meaning the
+                # tool stopped answering for that document. `id` and `title` were worse:
+                # overwritten with no error at all, so a caller received a list where it
+                # expected a document id.
+                #
+                # Same class as #102/#104, DIFFERENT REMEDY, and the difference is whose
+                # data it is. Those merged a BACKEND's mapping over a response and were
+                # fixed by re-asserting the framework's keys last: the backend had no
+                # business setting them, so ignoring it costs nothing. A graph relation is
+                # the corpus's OWN declared edge, and silently dropping it would be data
+                # loss rather than enforcement — the author would never learn their
+                # relationship had stopped being served. So this fails, and names what to
+                # rename.
+                #
+                # DETECTED HERE, REPORTED BY `graph_neighbors`, and the split is the
+                # point. This is the one place the graph is parsed, so the scan costs once
+                # per corpus — but raising from here took down every tool that shares the
+                # loader: `corpus_overview` (which the server's own instructions say to
+                # call first), `resolve_citation` and `authority_chain`, none of which can
+                # have a key displaced by a relation name. A caller of `corpus_overview`
+                # got a crash about a file it never asked about, which is both response
+                # convention 5's rule (an error names the condition that occurred) and the
+                # shape of corpus-toolkit#4, where a corpus data problem surfaced as an
+                # opaque tool error.
+                #
+                # So only the tool that would be WRONG declines to answer, and it declines
+                # the way the other graph conditions already do: an explicit error response
+                # carrying the envelope, not a raise. Note the graph still loads LAZILY, so
+                # this is first observed on a graph-tool call rather than at boot; warming
+                # it in `build_server` would cost ERF a ~26 MB parse at every start, which
+                # is its own question and deliberately not taken here.
+                self._reserved_clashes = sorted(
+                    {rel for rels in edges.values() for rel in rels}
+                    & self._reserved_response_keys())
                 self._graph_cache = (nodes, edges)
         return self._graph_cache
 
@@ -855,6 +913,22 @@ class CorpusFramework:
         node, err = self._graph_lookup(doc_id)
         if err is not None:
             return err
+        if self._reserved_clashes:
+            # A FOURTH GRAPH CONDITION, reported like the other three (corpus-toolkit#105).
+            # A relation name becomes a response key verbatim here, so a graph declaring one
+            # of the reserved names would overwrite this corpus's own answer -- silently for
+            # `id`/`title`, and as a hard serialization error for the envelope fields.
+            # Refusing is deliberate: the relation is the corpus's OWN declared edge, and
+            # dropping it quietly would be data loss the author never learns about.
+            return {**self._envelope(),
+                    "error": (f"this corpus's graph declares relation type(s) "
+                              f"{', '.join(repr(c) for c in self._reserved_clashes)}, "
+                              f"which collide with response keys this tool writes"),
+                    "note": (f"a relation name becomes a response key verbatim, so these "
+                             f"would overwrite the answer. Reserved: "
+                             f"{', '.join(sorted(self._reserved_response_keys()))}. Rename "
+                             f"the relation in {self.config.graph_path} and rebuild the "
+                             f"graph. Other tools are unaffected.")}
         out = {**self._envelope(), "id": doc_id, "title": node["title"]}
         for k, targets in edges.get(doc_id, {}).items():
             out[k] = self._neighbour_records(targets, nodes)
