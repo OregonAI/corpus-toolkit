@@ -343,6 +343,48 @@ _ALWAYS_WALKED = {"up": "implements", "down": "implemented_by"}
 # instructions text (corpus-toolkit#38).
 _ARCHETYPES = ("document", "api", "hybrid")
 
+# What PyYAML's safe_load — the parser this loader actually uses — resolves to booleans,
+# MEASURED rather than recalled from the YAML 1.1 spec. Bare `y`/`n` are NOT among them
+# (they come back as the strings "y"/"n"), and the match is case-insensitive, so `Off`,
+# `NO` and `True` are all booleans too.
+#
+# Every spelling for a given value is listed because the parsed value cannot tell us which
+# one the author typed. The advice must therefore be "quote whichever you wrote" — naming a
+# single spelling would tell someone who wrote `id: off` to write `"no"`, which silently
+# RENAMES their corpus: `corpus.id` is the envelope's `corpus` field, the MCP server name,
+# and how siblings cross-reference this corpus. The fix is quoting, never a new value.
+_YAML_BOOLEANS = {True: ("yes", "on", "true"), False: ("no", "off", "false")}
+
+
+def _validated_corpus_string(raw, field: str, *, default=None):
+    """Parse and CHECK one `corpus.*` string field, loudly.
+
+    Same policy as _validated_archetype: a bad value must fail at LOAD. These four fields
+    were the ones that had no check at all, and they failed in two different directions.
+
+    `authoritative_source` was `(raw or "").strip()`, so a non-string raised AttributeError
+    from inside a string method — naming neither the file nor the key, and pre-empting the
+    URL validator downstream whose whole purpose is to say something useful here.
+
+    `id`, `name` and `jurisdiction` were passed through untouched, so a non-string was
+    accepted silently. Since corpus-toolkit#103 that is the more serious half:
+    `ResponseEnvelope` types `corpus` as `str` and `config.id` fills that slot on all six
+    object-shaped tools, so `id: 90210` or an unquoted `id: no` turns every tool call into a
+    ValidationError at runtime — on a config this function had called good.
+    """
+    value = raw if raw is not None else default
+    if value is None or isinstance(value, str):
+        return value
+    hint = ""
+    for parsed, spellings in _YAML_BOOLEANS.items():
+        if value is parsed:
+            hint = (f" YAML reads {', '.join(spellings)} (any capitalisation) as boolean "
+                    f"{str(parsed).lower()} — QUOTE WHICHEVER YOU WROTE, keeping the same "
+                    f"word.")
+            break
+    raise ValueError(f"corpus.{field}: {value!r} is a {type(value).__name__}, "
+                     f"not a string.{hint}")
+
 
 def _validated_archetype(raw) -> str:
     """Parse and CHECK `corpus.archetype`, loudly.
@@ -524,7 +566,28 @@ def load(config_path: str | Path) -> CorpusConfig:
     root = config_path.parent.parent
     raw = yaml.safe_load(config_path.read_text()) or {}
 
+    # The SAME defect class as the field checks below, one level up (corpus-toolkit#89,
+    # found in review). An empty or mis-indented `corpus:` block made every
+    # `corpus.get(...)` below raise `AttributeError: 'NoneType' object has no attribute
+    # 'get'` — the exact shape this issue was filed about, and a far more common authoring
+    # mistake than a non-string `id`. Checking the fields while leaving the block they live
+    # in unchecked would have left the reported symptom reachable by an easier route.
+    #
+    # PRESENT-BUT-WRONG is an error; ABSENT keeps its existing `{}` default. Those are
+    # different states and only the first is evidence of a mistake. Note that `corpus:` with
+    # nothing under it is present-but-wrong, not absent: coercing it to `{}` would load a
+    # corpus with an empty id, which serves and answers under no name — a silent version of
+    # the failure this check exists to make loud.
+    if "corpus" in raw and not isinstance(raw["corpus"], dict):
+        raise ValueError(
+            f"corpus: must be a mapping of fields (id, name, jurisdiction, ...), got a "
+            f"{type(raw['corpus']).__name__}: {raw['corpus']!r}")
     corpus = raw.get("corpus", {})
+    # Validated ONCE and reused, rather than re-read from the raw dict at each use site.
+    # `mcp_server_name` used to fall back to `corpus.get("id", "corpus")` directly, so it
+    # could diverge from `config.id` — for `id: ~` the dataclass field declared `str` would
+    # have held None while `config.id` held "". One read, one check, one value.
+    corpus_id = _validated_corpus_string(corpus.get("id"), "id", default="")
     content_roots = [
         ContentRoot(
             path=cr["path"],
@@ -551,11 +614,15 @@ def load(config_path: str | Path) -> CorpusConfig:
     return CorpusConfig(
         root=root,
         config_path=config_path,
-        id=corpus.get("id", ""),
-        name=corpus.get("name", corpus.get("id", "")),
-        jurisdiction=corpus.get("jurisdiction", ""),
+        id=corpus_id,
+        name=_validated_corpus_string(corpus.get("name"), "name", default=corpus_id),
+        jurisdiction=_validated_corpus_string(
+            corpus.get("jurisdiction"), "jurisdiction", default=""),
         archetype=_validated_archetype(corpus.get("archetype")),
-        authoritative_source=(corpus.get("authoritative_source") or "").strip() or None,
+        authoritative_source=(
+            _validated_corpus_string(corpus.get("authoritative_source"),
+                                     "authoritative_source", default="") or "").strip()
+        or None,
         schema_version=int(corpus.get("schema_version", 1)),
         contract_version=int(corpus.get("contract_version", 1)),
         content_roots=content_roots,
@@ -577,7 +644,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),
         issuing_body_slug_field=(plugins.get("issuing_body_slug_field") or "").strip() or None,
         extra_schema_checks=plugins.get("extra_schema_checks", []) or [],
-        mcp_server_name=mcp.get("server_name", corpus.get("id", "corpus")),
+        mcp_server_name=mcp.get("server_name") or corpus_id or "corpus",
         mcp_transports=mcp.get("transports", ["stdio", "http"]),
         mcp_extra_document_fields=list(mcp.get("extra_document_fields", []) or []),
         extra_doc_types=_validated_extra_doc_types(raw.get("schema")),
