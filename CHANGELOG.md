@@ -17,6 +17,39 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — a `tools_module` tool colliding with a built-in refuses to start
+
+**Can break you only if your `tools_module` registers a tool named for a built-in** — and if
+it does, that tool has never run. No corpus does: the five live extension-tool registrations across the
+platform are of three names — `list_datasets` and `query_dataset` in `oregon-legislature`,
+and `join_lookup`, `list_datasets` and `query_dataset` in `oregon-budget`.
+
+Both SDK majors keep the tool registered FIRST, so a corpus tool named `corpus_overview` was
+discarded and the built-in answered in its place. Nothing said so — the startup summary
+infers what was added by set difference, and a shadowed name was already present before the
+hook ran, so it could never appear in the difference. The line read `+1 corpus tool(s):
+join_lookup` and an operator read that as success.
+
+A corpus author shipped a tool, it never ran, and the failure was indistinguishable from the
+tool working, because a built-in of the same name answered.
+
+The server now records what the module ATTEMPTS to register — wrapping `add_tool`, the
+choke point every registration passes through, so a corpus calling it directly cannot walk
+past the check — and refuses to start, naming the tools. Three shapes are refused: a name
+already registered, a name **reserved by the contract even when this corpus does not serve
+it** (`authority_chain` and `issuing_body_profile` are conditional, so keying on what is
+present let a corpus claim one today and turn fatal later), and a name the module registers
+twice. That is the policy the surrounding code already applied to a
+module that fails to load: a server that starts anyway "looks healthy, answers every built-in
+call correctly, and is silently missing the tools the corpus was built to provide".
+
+The degenerate case is fixed with it: when every registration collided, the difference was
+empty and the pre-existing guard raised "registered no tools" — blaming the corpus for the
+opposite mistake. The two errors are now distinct.
+
+Closes corpus-toolkit#111.
+
+
 ### Fixed — the release gate runs corpus-template's own build commands
 
 **Nothing required of a corpus.** This changes what the toolkit's own CI asserts, not what a

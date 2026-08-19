@@ -292,10 +292,29 @@ plugins:
   tools_module: "src.budget_tools:register"    # register(mcp, framework)
 ```
 
-The callable runs after every built-in tool, so it can add tools but never
-silently replace one. It receives the live `CorpusFramework`, so a corpus tool
-reaches retrieval, the graph, and citation resolution without reimplementing
-them.
+The callable runs after every built-in tool. It receives the live
+`CorpusFramework`, so a corpus tool reaches retrieval, the graph, and citation
+resolution without reimplementing them.
+
+**These names are RESERVED and a `tools_module` may not register one**, whether
+or not this corpus happens to serve it:
+
+    search_corpus   get_document        resolve_citation   graph_neighbors
+    corpus_overview authority_chain     issuing_body_profile
+
+`authority_chain` and `issuing_body_profile` are conditional — on archetype, and
+on the backend implementing `holdings_for` — and are reserved anyway. A corpus
+that claimed a conditional name would start clean, serve corpus semantics under
+a core tool's name, and turn fatal the day the condition changed with no edit to
+its tools module.
+
+**A collision refuses to start**, naming the tools. This page used to say the
+hook "can add tools but never silently replace one", which was reassurance about
+the harmless direction: no built-in is added after the hook, and the SDK keeps
+the tool registered FIRST, so a colliding corpus tool was the one discarded — the
+built-in answered in its place and nothing said so (corpus-toolkit#111). The same
+refusal covers a module registering one name twice, and a registration made
+through `add_tool` rather than the decorator.
 
 Before 1.6.0 the built-in tools were a closed set, and the only way to add
 behaviour was to enrich `get_document` — which cannot express any of the
