@@ -524,6 +524,105 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
+### Unreleased — a JSON source can declare which paths it watches (corpus-toolkit#72)
+
+**Nothing changes unless you opt in.** A `format: json` source with no `watch` hashes exactly
+as before, so no committed `sha256` moves. Verified across the platform: 1,116 sources in 8
+manifests, 3 of them `format: json`, none declaring `watch`.
+
+**The problem, if you watch a Socrata metadata document.** Your manifest points `url` at
+`/api/views/<id>.json` rather than at the rows — deliberately, because hashing 668,906 rows
+reports a change every run and tells you nothing. But that metadata carries counters that
+move on their own:
+
+```
+downloadCount   35632
+viewCount       13812
+rowsUpdatedAt   1765475245   (the data itself, unchanged for eight months)
+```
+
+So the hash changed every week while the data sat still. `oregon-budget` produced six
+distinct hashes across two consecutive runs in a week its `live-reconciliation` job passed.
+
+**Declare what you actually watch:**
+
+```yaml
+sources:
+  - id: agency-expenditures
+    url: "https://data.oregon.gov/api/views/y9g9-xsxs.json"
+    format: json
+    watch:
+      - rowsUpdatedAt
+      - columns[].name
+      - columns[].dataTypeName
+```
+
+The hash then covers only those paths, canonicalised — so upstream re-ordering its KEYS or
+re-indenting its JSON is not a change. Array element order is deliberately *not* normalised:
+`columns[].name` coming back in a different order is a schema change worth reporting.
+
+**An allowlist, not a blocklist, and that is the point.** A new Socrata counter is inert by
+construction. Listing what to *ignore* instead would make every new counter a fresh false
+positive until somebody noticed and extended the list — the same failure arriving slower.
+
+**A declared path the document does not contain is an ERROR**, reported on stderr as
+`WATCH PATH MISSING` with a run annotation — *not* a fetch failure. Two documents that both
+lack a watched path would otherwise hash equal and read as "unchanged", the corpus reporting
+stability exactly when upstream removed the field it was watching. If you see it, upstream
+changed shape, which is what you wanted to know.
+
+It **exits non-zero regardless of `--strict`**, unlike a fetch failure. Upstream being
+briefly unreachable is ordinary; a source that was fetched successfully and still could not
+be compared is not, and it stays uncompared on every subsequent run.
+
+A body that will not parse as json is reported separately again, as
+`WATCH BODY UNREADABLE` — an error page served with a 200 is a fact about the response, not
+about your `watch` list, and pointing you at the list would waste the trip.
+
+**Only one `[]` per path**, and the list is checked before the first request rather than
+mid-crawl. These authoring shapes are handled by name rather than silently doing something
+else — everything except the last row is refused, naming the source:
+
+| Written | Was | Now |
+|---|---|---|
+| `watch: rowsUpdatedAt` | iterated character by character → `watched path 'r' is not present` | refused, naming the source |
+| `watch:` (no value) | reverted to hashing the whole document, silently | refused |
+| `watch: []` | digests to a constant → `unchanged` forever | refused |
+| `columns[]name` | reported as a path upstream does not have | refused, suggesting `columns[].name` |
+| `columns[ ].name` | looked up as a literal key, reported missing | refused |
+| `columns[].` or `[].name` | a projection with no key | refused |
+| `watch: [a[].b[]]` | two documents could digest equal | refused |
+| `- " columns[] . name "` | looked up with the padding, reported missing | **trimmed, not refused** |
+
+The second row is the one to check for if you hand-edit a manifest: `watch:` with nothing
+under it is one bad indent away from a source that declares `watch` and does not use it.
+
+Only sources in the groups a run actually checks are validated, so a typo in one group does
+not abort another group's cron or `--check-robots`.
+
+**A `watch` source must be json, and that is checked before the crawl.** `format: json` (or
+`geojson`) is believed; with no `format:` key the url's extension decides, so
+`.../y9g9-xsxs.json` is fine and `.../feed.xml`, `.../doc.pdf`, `.../policy.html` and a url
+with no extension at all are refused, naming the source. Add `format: json` for a REST
+endpoint whose url does not end in `.json`. Without this the body would not parse and the
+run would report an unreadable *response* — blaming upstream for what the manifest says.
+
+**A BOM is fine.** Bodies are decoded `utf-8-sig`, so the byte order mark IIS/.NET-backed
+endpoints prepend does not make a source permanently uncomparable.
+
+
+
+**Grammar is deliberately small:** dot-separated keys, with `[]` projecting over an array.
+`rowsUpdatedAt`, `columns[].name`, `columns[].cachedContents`. No JSONPath.
+
+**Adopting it re-baselines that source.** Its hash changes the moment you add `watch`, so run
+
+```bash
+corpus-detect-changes --config _meta/corpus.yml --record-baseline=refresh
+```
+
+in the same PR and land it on its own, rather than folded into a pin bump.
+
 ### v1.27.0 — five relation names are reserved in `_meta/graph.json` (corpus-toolkit#105)
 
 **Check your graph's relation types before bumping the pin. Nothing else will tell you.**

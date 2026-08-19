@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import multiprocessing as mp
 import os
 import re
@@ -129,11 +130,244 @@ def normalize_volatile(data: bytes,
     return data
 
 
+class WatchedPathMissing(ValueError):
+    """A source declared a `watch` path the fetched document does not contain.
+
+    Its own category because the alternative is silence: two documents that both lack a
+    watched path hash equal and read as "unchanged", so the corpus would report stability
+    exactly when upstream removed the field it was watching. "Could not check" is never
+    "is not there" (CONTEXT.md).
+    """
+
+
+class WatchedDocumentUnreadable(WatchedPathMissing):
+    """The body a `watch` source returned could not be read as json at all.
+
+    A SUBCLASS, so nothing that already handles the parent changes behaviour, but its own
+    class because it is a DIFFERENT FINDING with a different remedy: a 200 carrying an error
+    page, or a block, sends the operator upstream; a missing path sends them to the `watch`
+    list. Reporting one as the other is what convention 5 forbids, and every aggregate in
+    the drift run did exactly that until this existed to distinguish them.
+    """
+
+
+def validate_watch(watch, where: str = ""):
+    """Check a `watch` list and return it with each path trimmed. Raises ValueError.
+
+    ONE GRAMMAR, ONE PARSER, in the module that owns the grammar. `config._validated_watch`
+    checks a manifest at load and this runs again at the hash, and while they were two
+    separate implementations they disagreed: the door rejected `a[].b[]` and the choke point
+    did not, so a direct caller got a bare ValueError out of `_select_watched`, which the
+    drift run's `except Exception` files under "a fact about our access, not about
+    upstream". Every check on the VALUE lives here; `config._validated_watch` adds the source
+    id and the one rule a hash cannot express -- at a manifest, `watch:` with no value under
+    it is an authoring accident, where a caller passing None means "hash the raw bytes".
+
+    `where` prefixes the message when the caller knows which source this came from.
+    """
+    at = f"{where}: " if where else ""
+    if isinstance(watch, str):
+        raise ValueError(
+            f"{at}`watch` is a string, not a list. Write [{watch!r}] — a bare string is "
+            f"iterated CHARACTER BY CHARACTER, so each character would become its own "
+            f"watched path and be reported missing from the document.")
+    if not isinstance(watch, (list, tuple)):
+        # Its own message: `watch: 5` and `watch: {a: 1}` were both told about character-by-
+        # character iteration, a rationale about a type they are not (convention 5).
+        raise ValueError(
+            f"{at}`watch` must be a list of paths, got {type(watch).__name__} ({watch!r}).")
+    if not watch:
+        # An empty list digests to sha256("{}") -- a CONSTANT for every document, so the
+        # source reports `unchanged` forever without looking at anything. Reachable from
+        # `watch=[p for p in paths if p]` or `watch=cfg.get("watch", [])`.
+        raise ValueError(
+            f"{at}`watch` is an empty list. Every document would digest to the same value, "
+            f"so the source would report `unchanged` forever without looking at anything. "
+            f"Pass watch=None to hash the raw bytes instead.")
+    out = []
+    for i, path in enumerate(watch):
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError(f"{at}watch[{i}] is {path!r}; each watched path must be a "
+                             f"non-empty string.")
+        # Trimmed, and the trimmed value is what gets USED. `- " rowsUpdatedAt "` survived
+        # because strip() was tested for emptiness and then thrown away, so the lookup ran
+        # on the padded string and reported the key missing from the document.
+        # Rebuilt SEGMENT BY SEGMENT, splitting each into its key and an optional `[]`
+        # suffix and trimming the key. Trimming segment EDGES was not enough: whitespace
+        # before `[]` stayed interior, so `columns [].name` kept a key of `'columns '` and
+        # was reported from the crawl as a path upstream does not have -- while
+        # `columns[] .name`, the same typo one space to the right, was normalised and
+        # worked. Two spellings of one mistake with opposite outcomes is the asymmetry this
+        # is for, and edge-trimming moved it rather than ending it.
+        segments = []
+        for seg in path.strip().split("."):
+            seg = seg.strip()
+            project = seg.endswith("[]")
+            key = (seg[:-2] if project else seg).strip()
+            if not key:
+                # `[]`, `a.[]`, `[].name`, `a. .b`: a segment with no key. Passed the door
+                # empty and was then reported as a path upstream does not have -- the
+                # miscategorisation this validator exists to prevent, and the one hole left
+                # in a check that already rejects `.name` and `columns[].`.
+                raise ValueError(
+                    f"{at}watch[{i}] {path!r}: the segment {seg!r} has no key — `[]` "
+                    f"projects over a named array, as in `columns[].name`. A watch list "
+                    f"cannot address a document that is itself an array.")
+            if "[" in key or "]" in key:
+                # `columns[ ].name` was taken as a literal key named `columns[ ]` and then
+                # reported missing; `columns[]name` is a dot short of a projection. A
+                # bracket in a real json key is vanishingly rare, a mistyped projection is
+                # not, so refuse rather than look one up.
+                raise ValueError(
+                    f"{at}watch[{i}] {path!r}: the segment {seg!r} is not a key or a "
+                    f"projection. Write `[]` exactly, immediately after the array's key, as "
+                    f"in `columns[].name`. Left as written this is looked up as a literal "
+                    f"key and reported as a path the document does not contain, which reads "
+                    f"as upstream changing shape rather than as the typo it is.")
+            segments.append(key + ("[]" if project else ""))
+        path = ".".join(segments)
+        if path.count("[]") > 1:
+            raise ValueError(
+                f"{at}watch[{i}] {path!r} projects with `[]` more than once. Nested "
+                f"projections flatten, so documents differing only in how values are "
+                f"distributed across the outer array would digest identically and their "
+                f"drift could never be reported. Declare one path per projected level.")
+        out.append(path)
+    return out
+
+
+def _select_watched(doc, path: str):
+    """Values at `path`, as a list. Raises WatchedPathMissing if the path reaches nothing.
+
+    A DELIBERATELY SMALL GRAMMAR: dot-separated keys, with `[]` projecting over an array --
+    `rowsUpdatedAt`, `columns[].name`, `columns[].cachedContents`. That covers what the
+    manifests actually watch. A full JSONPath dependency buys expressiveness nobody has
+    asked for and a parser nobody in this repo can review.
+
+    AT MOST ONE `[]` PER PATH. A second projection flattens, so `{"a":[{"b":[1,2]},{"b":[3]}]}`
+    and `{"a":[{"b":[1]},{"b":[2,3]}]}` digest EQUAL and drift between them can never be
+    reported. Refusing is the narrow fix; a nesting-preserving encoder is a general one
+    nobody has asked for.
+    """
+    if path.count("[]") > 1:
+        raise ValueError(
+            f"watched path {path!r} projects with `[]` more than once. Nested projections "
+            f"flatten, so documents that differ only in how values are distributed across "
+            f"the outer array would digest identically and their drift could never be "
+            f"reported. Declare one path per projected level instead.")
+    current = [doc]
+    for segment in path.split("."):
+        project = segment.endswith("[]")
+        key = segment[:-2] if project else segment
+        nxt = []
+        for node in current:
+            if not isinstance(node, dict) or key not in node:
+                raise WatchedPathMissing(
+                    f"watched path {path!r} is not present in this document (missing at "
+                    f"{key!r}). Either upstream changed shape -- which is worth knowing, "
+                    f"and is why this is an error rather than an empty value -- or the "
+                    f"path is wrong. A missing path hashed as empty would make two "
+                    f"documents that both lack it read as unchanged.")
+            value = node[key]
+            if project:
+                if not isinstance(value, list):
+                    raise WatchedPathMissing(
+                        f"watched path {path!r} projects over {key!r} with `[]`, but that "
+                        f"key holds {type(value).__name__}, not a list")
+                nxt.extend(value)
+            else:
+                nxt.append(value)
+        if project and not nxt:
+            # AN EMPTY ARRAY IS NOT A CHECKED PATH. Falling through with `[]` meant no leaf
+            # key was ever examined, so a typo'd leaf validated against any document whose
+            # array happened to be empty -- and worse, if upstream starts returning
+            # `"columns": []` the digest flips ONCE and is then stable forever while the
+            # watched schema is gone. Silent stability is the failure this class exists for.
+            raise WatchedPathMissing(
+                f"watched path {path!r} projects over {key!r}, but that array is empty in "
+                f"this document, so nothing under it was checked. Two documents with an "
+                f"empty {key!r} would digest equal no matter what the watched leaves say.")
+        current = nxt
+    return current
+
+
+def _watched_digest(raw: bytes, watch) -> str:
+    """sha256 over ONLY the declared paths, canonicalised.
+
+    Canonical because upstream re-serialising its JSON -- different key order, different
+    indentation -- is not a content change, and without this the mechanism would trade one
+    false positive for another.
+    """
+    # THE CHOKE POINT, not only the door -- and the SAME checks as the door, because two
+    # implementations of one grammar disagreed and the gap read as an upstream change.
+    # `config._validated_watch` runs before the crawl, but that is one caller; a watch list
+    # also reaches here from a corpus's own scripts and from anything that assembles a
+    # source dict another way. corpus-toolkit#111 is the same lesson.
+    watch = validate_watch(watch)
+    try:
+        # STRICT. `errors="replace"` mapped every invalid byte to U+FFFD before parsing, so
+        # two distinct non-UTF-8 spellings of a watched value digested the same. JSON is
+        # defined as UTF-8 (RFC 8259), so a body that is not is a real upstream condition
+        # worth reporting -- not something to silently smooth over on the way to a hash.
+        # `utf-8-sig`, not `utf-8`: a leading BOM is routine from IIS/.NET-backed
+        # government endpoints, which is the population this toolkit crawls, and json.loads
+        # on BYTES would have accepted it (CPython sniffs utf-8-sig). Rejecting it made a
+        # source that hashed fine before adoption permanently uncomparable and blamed the
+        # response. This keeps the strict property the comment below argues for -- real
+        # mojibake still fails -- and drops only the byte order mark.
+        doc = json.loads(raw.decode("utf-8-sig"))
+    except UnicodeDecodeError as e:
+        raise WatchedDocumentUnreadable(
+            f"a source declaring `watch` returned bytes that are not valid utf-8 ({e}). "
+            f"json is utf-8 by definition, so this is a fact about the response, not "
+            f"something to normalise away.")
+    except json.JSONDecodeError as e:
+        # NARROW ON PURPOSE. A bare `except Exception` here reported a NameError in this
+        # very function as "upstream did not return parseable json" -- a check describing a
+        # condition other than the one that occurred, which is the thing this codebase files
+        # bugs about. A programming error must surface as itself.
+        raise WatchedDocumentUnreadable(
+            f"a source declaring `watch` did not return parseable json ({e}). An error "
+            f"page served with a 200 looks exactly like this; it must not read as a hash.")
+    if not isinstance(doc, dict):
+        # UNREADABLE, not path-missing: the remedy is the source's `url`, not its `watch`
+        # list, and reporting it as a missing path sent the operator to compare a schema
+        # that was never involved.
+        #
+        # Two different findings, so two different remedies. An array is Socrata's
+        # `/resource/{id}.json` -- the sibling of the endpoint this feature is written for
+        # -- and the fix is to point `url` at the metadata document. A scalar is not that:
+        # a 200 carrying a bare error string has no rows to point away from, and offering
+        # the array advice would describe a condition that did not occur.
+        kind = {list: "array", type(None): "null"}.get(type(doc), type(doc).__name__)
+        remedy = ("point `url` at the dataset's metadata document instead of its rows"
+                  if isinstance(doc, list) else
+                  "check what this url actually serves — a 200 carrying a bare value is "
+                  "usually an error response, not a document")
+        raise WatchedDocumentUnreadable(
+            f"a source declaring `watch` returned a json {kind}, not an object. A watch "
+            f"path addresses keys, so this document cannot be watched — {remedy}.")
+    selected = {path: _select_watched(doc, path) for path in watch}
+    # No `default=`: everything here came out of `json.loads`, so a fallback encoder could
+    # only mask a defect -- and it masked it by COLLIDING, mapping distinct values onto one
+    # string. Anything unserializable must raise as itself.
+    canonical = json.dumps(selected, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def content_hash(raw: bytes, fmt: str,
-                 volatile_patterns: Sequence[re.Pattern[bytes]] = ()) -> str:
+                 volatile_patterns: Sequence[re.Pattern[bytes]] = (),
+                 watch: Sequence[str] | None = None) -> str:
     """Content hash of a freshly-fetched source: sha256 of the whitespace-normalized
     extracted text (pdftotext for PDFs, tag-stripping for HTML/XML). Falls back to
     the raw-byte hash when extraction yields <200 chars (e.g. image-only scans).
+
+    A json source with no `watch` still gets the raw-byte hash it always got, INCLUDING in a
+    corpus that declares `volatile_patterns` -- those are declared corpus-wide and passed for
+    every source, so refusing the combination here would break sources that opted into
+    nothing on account of a pattern written for an unrelated html group. A pattern that
+    matches nothing anywhere is already named in the drift report, per run, which is the
+    level that can actually tell the difference.
 
     `volatile_patterns` applies to the HTML/XML path only, which is where per-fetch and
     per-release tokens live; PDFs go through text extraction and are largely immune, and
@@ -146,6 +380,19 @@ def content_hash(raw: bytes, fmt: str,
     therefore NOT a valid seed for a manifest baseline: the two agree only for image-only
     scans, where both fall back to raw bytes (measured on oregon-kpm, corpus-toolkit#68).
     """
+    if watch is not None:
+        # `is not None`, NOT truthiness. `watch=[]`, `()`, `""` and `0` all fell through to
+        # the whole-document hash, so a caller writing `watch=cfg.get("watch", [])` got
+        # unwatched hashing while believing the source was watch-scoped -- the silent
+        # opposite of what it asked for. Every invalid value now reaches the guard below.
+        #
+        # A JSON source hashes ONLY what it declared it watches (corpus-toolkit#72), so a
+        # vendor counter that moves on its own is inert by construction rather than needing
+        # to be enumerated as it appears. Deliberately BEFORE the format branch: the digest
+        # is over selected values, so the under-200-character raw-byte fallback below must
+        # not apply -- inheriting it would make this work for large metadata documents and
+        # quietly not work for small ones.
+        return _watched_digest(raw, watch)
     if fmt == "pdf":
         proc = subprocess.run(["pdftotext", "-layout", "-", "-"], input=raw,
                               capture_output=True, check=False)

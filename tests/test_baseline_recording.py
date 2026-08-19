@@ -19,6 +19,7 @@ what the recorder may touch as hard as they pin that it writes at all:
   * everything else in the file survives — comments, key order, other keys, group names.
 """
 import io
+import json
 import shutil
 import sys
 import tempfile
@@ -183,7 +184,12 @@ class FetchFailureIsNotABaselineTest(_CorpusFixture):
         code, out, err = self.run_cli("--record-baseline")
         after = path.read_text()
         self.assertEqual(after, before, "nothing may be written for a source we could not fetch")
-        self.assertIn("1 skipped (fetch failed)", out)
+        # The tally cannot tell a failed fetch from an unreadable body from an absent
+        # `watch` path — all three are "no hash was computed", the same decision — so the
+        # line names NO reason. It named two, and the third then read as one of those
+        # (corpus-toolkit#72). The per-source line above carries the actual condition.
+        self.assertIn("1 skipped (not compared)", out)
+        self.assertIn("FETCH FAILED src-b", out)
         self.assertIn("1 already current", out)
 
 
@@ -351,6 +357,167 @@ class MalformedBaselineValueTest(_CorpusFixture):
         self.assertEqual(code, 0, err)
         self.assertIn(HASH_A, path.read_text())
         self.assertIn("1 baseline(s) recorded", out)
+
+
+class WatchDoesNotBreakBaselineRecordingTest(_CorpusFixture):
+    """corpus-toolkit#72's own adoption path, and the feature broke it.
+
+    `_plan_sha_edits` cleared the current entry on ANY line starting `- `, which was safe
+    only because no source key had ever held a block sequence. `watch:` is the first one.
+    Written above `sha256:` — the order a human reaches for, since `watch` describes the
+    source and `sha256` is machine-filled — the sha line was never associated with its id,
+    a second `sha256:` was inserted after `id:`, the re-parse check saw the old trailing
+    value win, and the whole file was refused.
+
+    NOTHING was written for that group file, including sources that verified fine. And
+    MIGRATION.md prescribes exactly this: "run `corpus-detect-changes
+    --record-baseline=refresh` in the same PR". The remedy for the feature broke on the
+    feature, and the diagnostic never says the word `watch`.
+    """
+
+    WATCH = ["rowsUpdatedAt", "columns[].name"]
+
+    def setUp(self):
+        super().setUp()
+        self.bodies["https://example.gov/a"] = json.dumps(
+            {"rowsUpdatedAt": 1765475245, "viewCount": 13812,
+             "columns": [{"name": "agency"}]}).encode()
+        self.watched_hash = content_hash(self.bodies["https://example.gov/a"], "json",
+                                         watch=self.WATCH)
+
+    def _manifest(self, watch_first: bool):
+        entry = ['  - id: "a"', '    url: "https://example.gov/a"', '    format: json']
+        watch = ["    watch:", "      - rowsUpdatedAt", "      - columns[].name"]
+        sha = ['    sha256: ""']
+        body = entry + (watch + sha if watch_first else sha + watch)
+        return "sources:\n" + "\n".join(body) + "\n"
+
+    def test_watch_written_above_sha256_still_records(self):
+        path = self.write_manifest(self._manifest(watch_first=True))
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        self.assertIn("1 baseline(s) recorded", out,
+                      f"a `watch:` block above `sha256:` broke the rewrite:\n{out}{err}")
+        self.assertIn(self.watched_hash, path.read_text())
+        self.assertEqual(path.read_text().count("sha256:"), 1,
+                         "a second sha256 key was inserted")
+
+    def test_watch_written_below_sha256_records_identically(self):
+        """The two orders must not differ. They did: one worked, one took the file down."""
+        path = self.write_manifest(self._manifest(watch_first=False))
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        self.assertIn("1 baseline(s) recorded", out)
+        self.assertIn(self.watched_hash, path.read_text())
+
+    def test_the_shape_oregon_records_retention_actually_ships(self):
+        """MEASURED, NOT IMAGINED. `watch` is not the first block sequence to appear under a
+        source key — `oregon-records-retention` has carried `references_out:` as one in 76
+        of its sources all along, and only key order saved it: `sha256:` is written above
+        `references_out:`, so it was already assigned before the reset fired.
+
+        Its entries also sit at column 0 (`- id:`, no leading indent), which the top-level
+        branch handles rather than the new indent comparison. Both facts are worth a test,
+        because a manifest that reorders those two keys — or adopts `watch` — walks straight
+        into the refusal, and this is real curated data, not a fixture."""
+        # this class's setUp serves JSON at /a; these two entries are html
+        self.bodies["https://example.gov/a"] = BODY_A
+        path = self.write_manifest(
+            "sources:\n"
+            "- id: schedule-agriculture\n"
+            "  url: https://example.gov/a\n"
+            "  format: html\n"
+            "  sha256: ''\n"
+            "  references_out:\n  - OAR 166 general schedules\n  - ORS 192\n"
+            "- id: schedule-aviation\n"
+            "  url: https://example.gov/b\n"
+            "  format: html\n"
+            "  sha256: ''\n"
+            "  references_out:\n  - OAR 166 general schedules\n")
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        text = path.read_text()
+        self.assertIn("2 baseline(s) recorded", out, f"{out}{err}")
+        a_block, b_block = text.split("- id: schedule-aviation")
+        self.assertIn(HASH_A, a_block)
+        self.assertIn(content_hash(BODY_B, "html"), b_block)
+        self.assertIn("- ORS 192", text, "the reference list was disturbed")
+
+    def test_sha256_below_a_block_sequence_records_too(self):
+        """The latent half of the same bug: with `sha256:` written BELOW `references_out:`
+        the sha line was orphaned and the file refused — no `watch` required. Nothing in the
+        manifest convention fixes the order of those two keys."""
+        # this class's setUp serves JSON at /a; these two entries are html
+        self.bodies["https://example.gov/a"] = BODY_A
+        path = self.write_manifest(
+            "sources:\n"
+            "- id: schedule-agriculture\n"
+            "  url: https://example.gov/a\n"
+            "  format: html\n"
+            "  references_out:\n  - OAR 166 general schedules\n"
+            "  sha256: ''\n")
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        self.assertIn("1 baseline(s) recorded", out, f"{out}{err}")
+        self.assertIn(HASH_A, path.read_text())
+        self.assertEqual(path.read_text().count("sha256:"), 1)
+
+    def test_a_nested_sha256_is_not_claimed_as_the_entry_own(self):
+        """A REGRESSION INTRODUCED BY THE FIX ABOVE, caught on review.
+
+        Relaxing the `- ` reset so a nested list no longer ends the entry also let the first
+        `sha256:`-matching line INSIDE that list be claimed as the entry's own. An entry
+        with an `attachments:` block carrying per-attachment digests then had its hash
+        written into the attachment, the re-parse check failed, and the whole group file was
+        refused — nothing written, including sources that verified. On `main` this seeded
+        correctly, so the fix traded one whole-file refusal for another.
+
+        The entry's own keys sit at exactly its key column. A `sha256:` deeper than that
+        belongs to something else."""
+        self.bodies["https://example.gov/a"] = BODY_A
+        path = self.write_manifest(
+            "sources:\n"
+            '  - id: "a"\n'
+            "    url: https://example.gov/a\n"
+            "    format: html\n"
+            "    attachments:\n"
+            "      - url: https://example.gov/appendix.pdf\n"
+            '        sha256: "aaaaaaaaaaaa"\n')
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        text = path.read_text()
+        self.assertIn("1 baseline(s) recorded", out, f"{out}{err}")
+        self.assertIn("aaaaaaaaaaaa", text, "the attachment's own digest was overwritten")
+        self.assertIn(HASH_A, text)
+        self.assertLess(text.index(HASH_A), text.index("attachments:"),
+                        "the hash was written below the entry's own keys")
+
+    def test_a_sibling_entry_still_ends_the_previous_one(self):
+        """The fix must not go the other way. A `- ` at the entry's own indent IS a new
+        source, and treating it as nested would write a's hash into b's line — the wrong-
+        entry write `_plan_sha_edits`'s docstring refuses by name."""
+        self.write_manifest(
+            'sources:\n'
+            '  - id: "a"\n    url: "https://example.gov/a"\n    format: json\n'
+            '    watch:\n      - rowsUpdatedAt\n    sha256: ""\n'
+            '  - id: "b"\n    url: "https://example.gov/b"\n    format: html\n'
+            '    sha256: ""\n')
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        text = (self.root / "_meta" / "source-manifest.yml").read_text()
+        a_hash = content_hash(self.bodies["https://example.gov/a"], "json",
+                              watch=["rowsUpdatedAt"])
+        a_block, b_block = text.split('- id: "b"')
+        self.assertIn(a_hash, a_block)
+        self.assertNotIn(a_hash, b_block, "a's hash landed in b's entry")
+        self.assertIn(content_hash(BODY_B, "html"), b_block,
+                      "b was not recorded — the sibling boundary was lost")
 
 
 if __name__ == "__main__":

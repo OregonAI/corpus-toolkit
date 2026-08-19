@@ -12,11 +12,14 @@ These tests pin the distinction: the return value must track whether an issue ex
 the summary must say what was REPORTED, not only what drifted.
 """
 import io
+import json
 import shutil
 import sys
 import tempfile
 import textwrap
 import unittest
+
+import pytest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -157,12 +160,21 @@ class _DriftRun(unittest.TestCase):
             """).rstrip())
         (self.root / "_meta" / "sources" / f"{name}.yml").write_text("\n".join(lines) + "\n")
 
+    def _fetch(self, url):
+        # RAISES rather than returning the exception. Returning it let a "failed" fetch
+        # reach `len(raw)` and be counted as a normalizable source before dying, so a test
+        # about blocked fetches was silently exercising a shape `fetch()` cannot produce.
+        body = self.bodies[url]
+        if isinstance(body, Exception):
+            raise body
+        return body
+
     def run_cli(self, *argv):
         args = ["corpus-detect-changes", "--config",
                 str(self.root / "_meta" / "corpus.yml"), *argv]
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(sys, "argv", args), \
-             mock.patch.object(changes, "fetch", lambda url: self.bodies[url]), \
+             mock.patch.object(changes, "fetch", self._fetch), \
              mock.patch.object(changes, "_ensure_label", return_value=True), \
              mock.patch.object(changes, "_open_issue", return_value=True) as open_issue, \
              redirect_stdout(out), redirect_stderr(err):
@@ -300,6 +312,496 @@ class InertRunOutputsTest(_DriftRun):
         gh = self.root / "gh-output"
         self.run_cli("--github-output", str(gh))
         self.assertIn("changed=true", gh.read_text())
+
+
+
+
+class WatchPathReportingTest(_DriftRun):
+    """A declared `watch` path that is not in the document (corpus-toolkit#72).
+
+    The first version routed this into `failed` and printed it to stdout, which made it:
+    counted as a "fetch failure" in the totals line, listed under "a fact about our access,
+    not about upstream" — the precise opposite of what it is — folded into the >20% SYSTEMIC
+    threshold, and invisible in CI (no annotation, exit 0). A watched field disappearing
+    upstream is one of the most actionable things this tool can find, and it was the
+    quietest.
+    """
+
+    def totals_line(self, out: str) -> str:
+        """The `N changed, …` line ALONE.
+
+        `assertIn("1 not compared", out)` was satisfied by the group breakdown's
+        `gone 0/1 [1 not compared]`, so three tests naming the totals line in their
+        docstrings passed with that clause deleted from it entirely."""
+        return next(l for l in out.splitlines() if l.startswith(tuple("0123456789"))
+                    and " changed, " in l)
+
+    def json_group(self, name: str, docs: dict, *, watch: list, baseline="current",
+                   declare_format=True):
+        """A group of json sources with a `watch` list. `docs` maps id -> dict body.
+
+        `declare_format=False` omits `format:`, which is what a real Socrata entry looks
+        like — and `_format_for` maps an unrecognised `.json` extension to `"html"`."""
+        lines = ["sources:"]
+        for sid, doc in docs.items():
+            url = f"https://example.gov/{name}/{sid}.json"
+            raw = json.dumps(doc).encode()
+            self.bodies[url] = raw
+            try:
+                sha = content_hash(raw, "json", watch=watch) if baseline == "current" else baseline
+            except Exception:
+                sha = "unknowable"
+            watch_yaml = "\n".join(f"      - {w}" for w in watch)
+            fmt = '\n                    format: json' if declare_format else ""
+            lines.append(textwrap.dedent(f"""\
+                  - id: "{sid}"
+                    url: "{url}"{fmt}
+                    sha256: "{sha}"
+                    watch:
+                """).rstrip() + "\n" + watch_yaml)
+        (self.root / "_meta" / "sources" / f"{name}.yml").write_text("\n".join(lines) + "\n")
+
+    def test_a_missing_watched_path_is_not_counted_as_a_fetch_failure(self):
+        """The bytes ARRIVED. Calling that a fetch failure names a condition other than the
+        one that occurred, and points the operator at the network instead of at upstream's
+        schema."""
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}, "b": {"rowsUpdatedAt": 2}},
+                        watch=["rowsUpdatedAt"])
+        self.json_group("gone", {"c": {"viewCount": 9}}, watch=["rowsUpdatedAt"])
+
+        code, out, err = self.run_cli()
+
+        self.assertIn("0 fetch failure(s)", out,
+                      "a watched-path miss was counted as a failed fetch")
+        self.assertNotIn("a fact about our access", out + err,
+                         "a document that arrived was listed under an access problem")
+        # And the totals line must not say `of 3 checked` when one of the three was not
+        # compared to anything — that is could-not-check reported as checked, on the one
+        # line an operator reads.
+        self.assertIn("1 not compared", self.totals_line(out),
+                      f"the totals line counted an uncompared source as checked:\n{out}")
+
+    def test_a_missing_watched_path_is_visible_where_ci_looks(self):
+        """It printed to stdout and exited 0, so a weekly run reported success while one
+        source had silently stopped being checked at all — corpus-toolkit#67's failure mode,
+        rebuilt inside its own successor."""
+        import os
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}}, watch=["rowsUpdatedAt"])
+        self.json_group("gone", {"c": {"viewCount": 9}}, watch=["rowsUpdatedAt"])
+
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            code, out, err = self.run_cli()
+
+        self.assertIn("WATCH PATH MISSING", err, "reported on stdout, where CI does not look")
+        self.assertIn("::warning", out + err, "no annotation, so nothing in the run summary")
+        self.assertNotEqual(code, 0,
+                            "a source that could not be checked at all exited 0")
+
+    def test_watch_failures_do_not_trip_the_systemic_access_alarm(self):
+        """>20% of fetches failing means the crawler cannot reach upstream. Watched-path
+        misses are the opposite finding — every fetch succeeded — and mixing them makes the
+        one alarm that says "stop, our access is broken" fire when access is fine."""
+        self.json_group("gone", {"c": {"viewCount": 9}, "d": {"viewCount": 8}},
+                        watch=["rowsUpdatedAt"])
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}}, watch=["rowsUpdatedAt"])
+
+        code, out, err = self.run_cli()
+
+        self.assertNotIn("SYSTEMIC", out + err,
+                         "2 of 3 watched-path misses read as an access outage")
+
+    def test_a_watch_that_is_a_bare_string_is_refused_before_anything_is_fetched(self):
+        """`watch: rowsUpdatedAt` (scalar) is iterated CHARACTER BY CHARACTER, so the run
+        reported `watched path 'r' is not present` — an authoring typo dressed up as
+        "upstream changed shape", the most misleading thing this feature could say.
+
+        Sibling of `_validated_volatile_patterns` and `_validated_index_headings`, and
+        refused at the same moment for the same reason: after a 3,447-source crawl is the
+        wrong time to learn a key was mistyped."""
+        (self.root / "_meta" / "sources" / "ds.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "a"
+                url: "https://example.gov/ds/a"
+                format: json
+                sha256: ""
+                watch: rowsUpdatedAt
+            """))
+        fetched = []
+
+        args = ["corpus-detect-changes", "--config", str(self.root / "_meta" / "corpus.yml")]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", args), \
+             mock.patch.object(changes, "fetch", lambda url: fetched.append(url) or b"{}"), \
+             redirect_stdout(out), redirect_stderr(err):
+            with self.assertRaises(Exception) as e:
+                changes.main()
+
+        self.assertIn("watch", str(e.exception).lower())
+        self.assertIn("a", str(e.exception), "the operator needs to know WHICH source")
+        self.assertEqual(fetched, [], "the crawl started before the manifest was checked")
+
+    def test_seeding_does_not_call_an_uncompared_source_a_failed_fetch_either(self):
+        """The same mislabelling one level down. `_record_baselines` knows only "not in
+        `fetched`", and printed that as `skipped (fetch failed)` — so an operator seeding
+        baselines was told the network was the problem for a document that arrived intact.
+
+        Skipping it is right: a hash it could not compute must never be written. Naming the
+        reason wrong is not."""
+        self.json_group("gone", {"c": {"viewCount": 9}}, watch=["rowsUpdatedAt"],
+                        baseline="")
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        self.assertNotIn("1 skipped (fetch failed)", out,
+                         "a document that arrived was reported as a failed fetch")
+        self.assertIn("not compared", out)
+
+    def test_a_watched_source_is_not_counted_in_the_volatile_pattern_denominator(self):
+        """A `watch` source never reaches the html/xml path, so no pattern touched it — but
+        its bytes were added to `normalizable_bytes` anyway, which is the DENOMINATOR of the
+        >10% breadth warning.
+
+        That warning is the only thing standing between a corpus and a pattern that deletes
+        content before hashing (corpus-toolkit#66). Padding the denominator with bytes no
+        pattern processed switches it off silently: the wider the JSON body, the safer a
+        dangerous pattern looks."""
+        self.group("html", 1, baseline="current")
+        # `format:` omitted, as a real Socrata entry has it — `_format_for` then calls it
+        # html, the accounting block fires, and `content_hash` still takes the watch branch.
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1, "pad": "x" * 12000}},
+                        watch=["rowsUpdatedAt"], declare_format=False)
+        (self.root / "_meta" / "corpus.yml").write_text(
+            CORPUS_YML + "volatile_patterns:\n  - 'Rule text for source [0-9]+[.] '\n")
+
+        code, out, err = self.run_cli()
+
+        # Measured: the pattern strips 480 of the 1,210 bytes it actually processed — 39.7%,
+        # far over VOLATILE_BREADTH_WARN. Padded with the JSON body's 12 KB it reported
+        # `3.83% of 12544` and downgraded itself to a NOTE.
+        self.assertIn("of 1 source(s)", out + err,
+                      "a watched json source was counted as an HTML/XML source")
+        self.assertIn("A pattern this wide deletes CONTENT", out + err,
+                      "the breadth warning was switched off by bytes no pattern processed")
+
+    def test_a_body_that_is_not_json_is_not_reported_as_a_missing_watch_path(self):
+        """A 200-with-an-error-page and a watched field disappearing are DIFFERENT findings
+        with different remedies, and every aggregate called both the second one.
+
+        The per-source line had it right; the totals line, the summary and the CI annotation
+        all said `a declared 'watch' path is absent from the fetched document` and sent the
+        operator to check their path list. Naming a condition other than the one that
+        occurred is what `_watched_digest`'s own comment says this codebase files bugs
+        about — here it is one layer up, at the site an operator actually reads."""
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}}, watch=["rowsUpdatedAt"])
+        self.bodies["https://example.gov/ds/a.json"] = b"<html>503 Service Unavailable</html>"
+
+        code, out, err = self.run_cli()
+
+        blame = out + err
+        self.assertNotIn("watched path missing", blame.lower(),
+                         "an error page served with a 200 was blamed on the watch list")
+        self.assertIn("not parseable", blame.lower())
+        self.assertNotEqual(code, 0)
+
+    def test_the_group_breakdown_marks_a_group_that_compared_nothing(self):
+        """`socrata 0/2` is byte-identical whether both sources were compared and found
+        stable or neither was compared at all. The group line is the one that makes a bulk
+        fault self-evident (corpus-toolkit#67), and it already carries `[N unseeded]` for
+        exactly this class of caveat — the adjacent unchecked site."""
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}}, watch=["rowsUpdatedAt"])
+        self.json_group("socrata", {"c": {"viewCount": 9}, "d": {"viewCount": 8}},
+                        watch=["rowsUpdatedAt"])
+
+        code, out, err = self.run_cli()
+
+        self.assertIn("socrata 0/2 [2 not compared]", out,
+                      f"a group where nothing was compared reads as stable:\n{out}")
+        self.assertIn("ds 0/1,", out + ",", "an unaffected group grew a spurious marker")
+
+    def test_a_watch_key_with_no_value_is_refused_rather_than_silently_ignored(self):
+        """`watch:` with nothing under it — a mis-indented list, or one deleted a line at a
+        time — parses to None, and the source reverted to hashing the whole document. The
+        run then emitted exactly the `viewCount` false positives #72 exists to remove, from
+        a manifest that VISIBLY DECLARES `watch`, with nothing said anywhere.
+
+        One character away, `watch: []` is a hard load error. The same authoring accident
+        must not get opposite treatment, and the silent branch is the wrong one to keep."""
+        (self.root / "_meta" / "sources" / "ds.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "a"
+                url: "https://example.gov/ds/a"
+                format: json
+                sha256: ""
+                watch:
+            """))
+        self.bodies["https://example.gov/ds/a"] = json.dumps({"rowsUpdatedAt": 1}).encode()
+        self.bodies["https://example.gov/ds/a.json"] = self.bodies["https://example.gov/ds/a"]
+
+        args = ["corpus-detect-changes", "--config", str(self.root / "_meta" / "corpus.yml")]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", args), \
+             mock.patch.object(changes, "fetch", lambda url: self.bodies[url]), \
+             redirect_stdout(out), redirect_stderr(err):
+            with self.assertRaises(Exception) as e:
+                changes.main()
+
+        self.assertIn("watch", str(e.exception).lower())
+
+
+    def test_the_group_breakdown_marks_a_group_whose_fetches_all_failed_too(self):
+        """THE ADJACENT SITE, and it predates `watch` entirely. A fetch failure skips the
+        comparison exactly as a watched-path miss does, and the group line has always
+        rendered `oar 0/2` for it — indistinguishable from a group that was fully compared
+        and found stable.
+
+        This is the shape corpus-toolkit#67 added the group line to expose: ERF's run had a
+        DEQ group at 52/52 from a broken fetch. Fixing the marker for the new condition and
+        not the old one would leave the line honest only about the case nobody has hit yet.
+        """
+        self.group("ok", 1, baseline="current")
+        self.group("blocked", 2, baseline="current")
+        for i in (0, 1):
+            self.bodies[f"https://example.gov/blocked/{i}"] = OSError("HTTP Error 403")
+
+        code, out, err = self.run_cli()
+
+        self.assertIn("blocked 0/2 [2 not compared]", out,
+                      f"a group where every fetch failed reads as stable:\n{out}")
+
+
+    def test_seeding_does_not_claim_a_reason_it_did_not_check(self):
+        """`_record_baselines` knows only "no hash was computed" — its own comment says so
+        and says the caller "must not claim one of the two reasons". The caller then listed
+        two, and `WatchedDocumentUnreadable` is neither, so an error page served with a 200
+        was reported as a failed fetch or a missing path while the run's own stderr said
+        "not parseable json" three lines up. The same mislabelling one revision later."""
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}}, watch=["rowsUpdatedAt"],
+                        baseline="")
+        self.bodies["https://example.gov/ds/a.json"] = b"<html>503</html>"
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        self.assertNotIn("fetch failed, or a declared `watch` path was absent", out,
+                         "the tally named two reasons and the actual one was a third")
+        self.assertIn("1 skipped (not compared)", out)
+
+    def test_a_volatile_pattern_measured_against_no_sources_still_reports(self):
+        """`content_hash` now permits `volatile_patterns` + json on the grounds that "a
+        pattern that matches nothing anywhere is already named in the drift report, per
+        run". Excluding watch sources from `n_normalizable` can take that denominator to
+        zero, and the report then `break`s out and prints NOTHING — so the justification the
+        removal of the refusal rests on stops holding exactly when a corpus has no
+        non-watch HTML sources left.
+
+        Zero sources measured is itself the finding: the pattern is configured, and there
+        was nothing for it to do."""
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}}, watch=["rowsUpdatedAt"],
+                        declare_format=False)
+        (self.root / "_meta" / "corpus.yml").write_text(
+            CORPUS_YML + "volatile_patterns:\n  - 'sid=[0-9]+'\n")
+
+        code, out, err = self.run_cli()
+
+        self.assertIn("sid=", out + err,
+                      "a configured pattern measured against zero sources said nothing")
+
+    def test_a_bad_watch_in_an_out_of_scope_group_does_not_abort_the_run(self):
+        """`--group` is "the per-cadence cron's knob". Validating every group up front made
+        one group's typo abort every OTHER group's cron with an uncaught traceback, having
+        printed nothing and fetched nothing.
+
+        Fail-before-the-first-request is worth keeping; failing on a group this run was
+        told not to look at is not."""
+        self.group("oar", 1, baseline="current")
+        (self.root / "_meta" / "sources" / "socrata.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "ds-1"
+                url: "https://example.gov/socrata/1.json"
+                sha256: ""
+                watch: rowsUpdatedAt
+            """))
+
+        code, out, err = self.run_cli("--group", "oar")
+
+        self.assertEqual(code, 0, f"an out-of-scope group's typo aborted the run:\n{err}")
+        self.assertIn("oar 0/1", out)
+
+
+    def test_not_compared_means_the_same_thing_on_every_line(self):
+        """Three adjacent lines carried three definitions: the totals line counted watch
+        misses only, the group breakdown counted fetch failures too, and the baseline tally
+        used a third set. An operator read `1 not compared` and then counted 2 on the next
+        line — and the only way to tell which was wrong was to read the source."""
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}, "b": {"viewCount": 9}},
+                        watch=["rowsUpdatedAt"])
+        self.group("html", 2, baseline="current")
+        self.bodies["https://example.gov/html/1"] = OSError("HTTP Error 403")
+
+        code, out, err = self.run_cli()
+
+        n_totals = int(self.totals_line(out).split(" not compared")[0].split(", ")[-1])
+        n_groups = sum(int(part.split("[")[1].split(" ")[0])
+                       for part in out.splitlines()
+                       if part.startswith("drift by group")
+                       for part in part.split("], ") if "not compared" in part)
+        self.assertEqual(n_totals, n_groups,
+                         f"the totals line and the group line disagree:\n{out}")
+        self.assertEqual(n_totals, 2, "1 failed fetch + 1 watch miss = 2 not compared")
+
+    def test_the_zero_source_note_does_not_blame_config_for_a_block(self):
+        """`if not n_normalizable` fires whenever no HTML/XML source was successfully
+        FETCHED — so a corpus whose HTML sources all 403'd was told its pattern is
+        "configured and untested", which points at the manifest when the finding is that
+        the crawler is being blocked. In scope and unreachable is not the same as never in
+        scope."""
+        self.group("html", 1, baseline="current")
+        self.bodies["https://example.gov/html/0"] = OSError("HTTP Error 403")
+        (self.root / "_meta" / "corpus.yml").write_text(
+            CORPUS_YML + "volatile_patterns:\n  - 'sid=[0-9]+'\n")
+
+        code, out, err = self.run_cli()
+
+        self.assertIn("sid=", out + err, "the pattern was not mentioned at all")
+        self.assertNotIn("configured and untested", out + err,
+                         "a blocked fetch was reported as a configuration problem")
+        self.assertIn("could not be fetched", (out + err).lower())
+
+
+    def test_watch_on_a_source_declared_html_is_refused_at_the_door(self):
+        """A `watch:` block pasted onto a `format: html` entry — routine in a mixed-format
+        manifest — sailed through validation, and `content_hash` takes the watch branch
+        BEFORE the format branch, so `json.loads` met HTML and the run reported
+        `WATCH BODY UNREADABLE ... a fact about the response — an error page served with a
+        200, or a block`. The exact opposite of what happened, forever, from a manifest that
+        says on its face what the format is.
+
+        The check is an ALLOWLIST — `json` or `geojson`, declared or from the url's
+        extension — for the same reason the feature itself is one: enumerating the formats
+        that are not json makes every format nobody thought of a silent acceptance."""
+        (self.root / "_meta" / "sources" / "rules.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "rule-a"
+                url: "https://example.gov/rules/a"
+                format: html
+                sha256: ""
+                watch:
+                  - rowsUpdatedAt
+            """))
+        self.bodies["https://example.gov/rules/a"] = _body(1)
+
+        args = ["corpus-detect-changes", "--config", str(self.root / "_meta" / "corpus.yml")]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", args), \
+             mock.patch.object(changes, "fetch", self._fetch), \
+             redirect_stdout(out), redirect_stderr(err):
+            with self.assertRaises(Exception) as e:
+                changes.main()
+
+        self.assertIn("rule-a", str(e.exception))
+        self.assertIn("html", str(e.exception))
+        self.assertNotIn("UNREADABLE", out.getvalue() + err.getvalue())
+
+    def test_a_duplicated_id_still_counts_as_not_compared_everywhere(self):
+        """The one combination where "ONE DEFINITION, used on every line that says it" was
+        false: `_record_baselines` skips a duplicated id BEFORE the not-compared counter, so
+        a source that was both duplicated and never compared was counted by the totals line
+        and the group line and not by the tally."""
+        (self.root / "_meta" / "sources" / "dup.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "d"
+                url: "https://example.gov/dup/1"
+                format: html
+                sha256: ""
+              - id: "d"
+                url: "https://example.gov/dup/2"
+                format: html
+                sha256: ""
+            """))
+        for i in (1, 2):
+            self.bodies[f"https://example.gov/dup/{i}"] = OSError("HTTP Error 403")
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        self.assertIn("2 not compared", self.totals_line(out))
+        self.assertIn("[2 not compared]", out)
+        self.assertIn("2 skipped (not compared)", out,
+                      f"the tally disagreed with the two lines above it:\n{out}")
+
+
+    def test_watch_on_an_extension_derived_non_json_format_is_refused_too(self):
+        """The refusal keyed on an EXPLICIT `format:`, but `_format_for` derives
+        `pdf/xls/xlsx/docx/xml` from the url extension just as declaratively — only the
+        UNRECOGNISED extension falls back to html, and that fallback is the one case the
+        rationale needs to protect (a Socrata `.json` url with no `format:`).
+
+        So `watch:` on a `.xml` or `.pdf` url with no `format:` sailed through and produced
+        exactly what the refusal exists to stop: `WATCH BODY UNREADABLE`, blaming the
+        response for a fact about the declaration, on every run, forever.
+
+        `.html` and `.csv` are here because the FIRST fix missed them: `_format_for` returns
+        its `html` fallback for every extension it does not recognise, so exempting that
+        fallback exempted real HTML pages along with the Socrata `.json` urls it was meant
+        to protect. `.xml` and `.pdf` were refused and `.html` was not, with no `format:`
+        declared in either case."""
+        for ext in ("xml", "pdf", "html", "csv", "aspx"):
+            with self.subTest(ext=ext):
+                (self.root / "_meta" / "sources" / f"{ext}.yml").write_text(textwrap.dedent(f"""\
+                    sources:
+                      - id: "{ext}src"
+                        url: "https://example.gov/{ext}/doc.{ext}"
+                        sha256: ""
+                        watch:
+                          - rowsUpdatedAt
+                    """))
+                args = ["corpus-detect-changes", "--config",
+                        str(self.root / "_meta" / "corpus.yml")]
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(sys, "argv", args), \
+                     mock.patch.object(changes, "fetch", self._fetch), \
+                     redirect_stdout(out), redirect_stderr(err):
+                    with self.assertRaises(Exception) as e:
+                        changes.main()
+                self.assertIn(f"{ext}src", str(e.exception))
+                (self.root / "_meta" / "sources" / f"{ext}.yml").unlink()
+
+    def test_a_json_format_spelled_differently_is_not_refused(self):
+        """`format: JSON` works identically today, and `geojson` is json too. The refusal
+        must name the formats a watch list genuinely cannot read, not everything that is not
+        the literal string `json`."""
+        self.json_group("ds", {"a": {"rowsUpdatedAt": 1}}, watch=["rowsUpdatedAt"])
+        text = (self.root / "_meta" / "sources" / "ds.yml").read_text()
+        (self.root / "_meta" / "sources" / "ds.yml").write_text(
+            text.replace("format: json", "format: JSON"))
+
+        code, out, err = self.run_cli()
+
+        self.assertEqual(code, 0, f"a json source was refused for its spelling:\n{err}")
+
+    def test_a_duplicate_id_where_one_entry_fetched_still_agrees(self):
+        """`fetched` is keyed `(group, id)`, so a SUCCESSFUL sibling populated the key and
+        the failing entry looked fetched to the tally. Copying an entry and editing the url
+        while forgetting the id is exactly how duplicates arise, so this is the common
+        shape, not an exotic one."""
+        (self.root / "_meta" / "sources" / "dup.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "d"
+                url: "https://example.gov/dup/1"
+                format: html
+                sha256: ""
+              - id: "d"
+                url: "https://example.gov/dup/2"
+                format: html
+                sha256: ""
+            """))
+        self.bodies["https://example.gov/dup/1"] = _body(7)
+        self.bodies["https://example.gov/dup/2"] = OSError("HTTP Error 403")
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        self.assertIn("1 not compared", self.totals_line(out))
+        self.assertIn("[1 not compared]", out)
+        self.assertIn("1 skipped (not compared)", out,
+                      f"the tally disagreed with the two lines above it:\n{out}")
 
 
 if __name__ == "__main__":
