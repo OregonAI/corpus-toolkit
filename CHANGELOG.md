@@ -17,7 +17,21 @@ it can break you.
 
 ## Unreleased
 
-Nothing yet.
+### Changed — an outbound User-Agent string
+
+The sibling-index fetcher identifies itself as `corpus-toolkit/<installed version>` instead
+of the literal `corpus-toolkit/1.1`, which had been frozen since v1.1 and wrong for
+twenty-four releases (corpus-toolkit#82).
+
+**This is externally visible.** It is the only thing a remote host learns about us on a
+sibling-index fetch. A publisher who has allow-listed, rate-limited or logged on the exact
+string `corpus-toolkit/1.1` stops matching. Nothing on this platform is known to do so, but
+it is the kind of thing an upstream does without telling you, and the contact URL and
+`sibling-index-fetch` purpose token are unchanged so anything matching on those still works.
+
+`sources/changes.py`'s `corpus-toolkit-change-detector` — the agent that fetches sources
+during change detection — is **unchanged**. It is the token matched against robots.txt
+directives, so a host's `Disallow` naming it keeps matching exactly as before.
 
 ## v1.25.0 — 2026-08-11
 

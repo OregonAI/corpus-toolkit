@@ -17,12 +17,58 @@ import re
 import time
 import urllib.error
 import urllib.request
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 DEFAULT_TTL_SECONDS = 86_400          # a sibling corpus changes on a commit cadence, not a live one
 FETCH_TIMEOUT_SECONDS = 10
-USER_AGENT = ("corpus-toolkit/1.1 (+https://github.com/OregonAI/corpus-toolkit) "
-              "sibling-index-fetch")
+
+
+def _toolkit_version() -> str:
+    """The running toolkit version, or "unknown".
+
+    DERIVED, NEVER RESTATED. This was the literal `corpus-toolkit/1.1`, frozen since v1.1 and
+    still claiming it twenty-four releases later (corpus-toolkit#82).
+
+    WHAT IT ACTUALLY READS is INSTALL-TIME metadata, not the running source, and the
+    difference matters in exactly one direction. For a released artifact they are the same
+    thing: `release-gate.yml`'s `version-matches-tag` job installs the tagged ref and fails
+    the tag if the two disagree, so every deployed container reports truthfully. In a
+    long-lived editable checkout they can drift — a `pyproject.toml` bump does not rewrite
+    `.dist-info` until the package is reinstalled, and this very repo was found serving
+    `corpus-toolkit/1.14.0` from a v1.25.0 tree for that reason. So: trustworthy where it is
+    served, best-effort where it is developed, and `tests/test_user_agent.py` compares it
+    against `pyproject.toml` so the drift is caught rather than shipped.
+
+    "unknown" rather than a plausible placeholder like "0.dev": this platform's standing rule
+    is that unknown is stated and never upgraded to a value — the same reason `lookup()` below
+    reports `status: ""` as unknown instead of assuming `current`. An operator reading their
+    access log cannot tell "0.dev" from a real release; they can read "unknown".
+
+    Never raises. The module's contract is that an unreachable sibling degrades resolution and
+    never breaks the server, and a header derivation that threw would break it at import time,
+    before any of that could apply.
+    """
+    try:
+        return version("corpus-toolkit")
+    except PackageNotFoundError:      # a source checkout, not an install
+        return "unknown"
+    except Exception:                 # noqa: BLE001 — a header is never worth an outage
+        return "unknown"
+
+
+# WHAT A REMOTE HOST LEARNS ABOUT US, and the only thing it learns on a sibling-index fetch:
+# product/version, somewhere to complain, and what the request is for. This platform asks
+# publishers to make deliberate decisions about its agent — `corpus-detect-changes
+# --check-robots` exists for that, and AGENTS.md devotes a section to recording the answer —
+# so identifying ourselves accurately is part of the posture, not decoration.
+#
+# NOT the string robots.txt is matched against. That is `sources/changes.py`'s
+# `corpus-toolkit-change-detector`, which is passed to `robots.allowed()` and
+# `robots.ai_position()` and is therefore load-bearing; it is deliberately left unversioned so
+# a directive naming it keeps matching. This one is identification only.
+USER_AGENT = (f"corpus-toolkit/{_toolkit_version()} "
+              f"(+https://github.com/OregonAI/corpus-toolkit) sibling-index-fetch")
 
 # Keys the loader adds to the returned payload. Underscore-prefixed so they can
 # never collide with the index's own fields.
