@@ -3,6 +3,7 @@ reads instead of hardcoding corpus-specific paths, directories, or enums."""
 from __future__ import annotations
 
 import dataclasses
+import functools
 import re
 from pathlib import Path
 
@@ -112,6 +113,10 @@ class CorpusConfig:
     issuing_body_registry: Path | None
     issuing_body_registry_key: str
     issuing_body_profiles: Path | None
+    # The frontmatter key carrying a document's REGISTRY SLUG, where a corpus has one.
+    # None = this corpus attributes documents by directory only, and the path-derived
+    # scope slug is the whole answer. See `registry_slug_for` for which wins and why.
+    issuing_body_slug_field: str | None
     extra_schema_checks: list[dict]
     mcp_server_name: str
     mcp_transports: list[str]
@@ -178,6 +183,72 @@ class CorpusConfig:
             if cr.scoped and rel_parts and rel_parts[0] == cr.path and len(rel_parts) > 1:
                 return rel_parts[1]
         return None
+
+    @functools.cached_property
+    def issuing_body_slugs(self) -> frozenset[str] | None:
+        """Every slug in the issuing-body registry, or None when there is no registry to
+        read — in which case "does this value name a body?" is a question with no answer
+        here, and callers must report it as unknown rather than as no.
+
+        Cached because the index build asks it once per document. Read through this rather
+        than re-parsing the registry: `issuing_body_profile` needs the whole entry and
+        parses it separately, and two parsers disagreeing about which slugs exist is the
+        kind of drift that shows up as a count instead of an error.
+        """
+        if not self.issuing_body_registry or not self.issuing_body_registry.is_file():
+            return None
+        data = yaml.safe_load(self.issuing_body_registry.read_text()) or {}
+        return frozenset(e["slug"] for e in data.get(self.issuing_body_registry_key, [])
+                         if isinstance(e, dict) and e.get("slug"))
+
+    def registry_slug_for(self, frontmatter: dict, rel_parts: tuple[str, ...]) -> str | None:
+        """The issuing-body slug this document is attributed to, or None if it carries no
+        attribution at all. The returned value is NOT guaranteed to name a registry entry;
+        `holdings_for` classifies it, so a value the registry does not contain is counted
+        and reported rather than dropped.
+
+        TWO MECHANISMS, AND THE VALIDATED ONE IS NEVER OVERRIDDEN BY AN UNVALIDATED ONE.
+
+        `scope_slug_for` reads the slug off the PATH and covers only what lives under a
+        `scoped: true` content root. That is correct where a corpus is organised by issuing
+        body and unreachable everywhere else — a rule belongs to its chapter, not to an
+        agency folder — so on `executive-regulatory-frameworks` it answers for 960 of
+        75,905 documents, 1.3% (measured 2026-08-18). Counts built on it alone under-report
+        by 97% for the corpus's largest agencies (corpus-toolkit#71). It is also CHECKED:
+        `validate/frontmatter.py` fails CI when a scoped path's slug is not in the registry.
+
+        `plugins.issuing_body_slug_field` names the frontmatter key carrying the registry
+        slug for EVERY document, whatever directory it sits in (`agency:` on ERF, present
+        on 100%). Nothing validates its values (corpus-toolkit#94), so it wins only where
+        the value it carries actually names a registry entry. Order:
+
+          1. the declared field, when its value is a registry slug — the corpus's explicit
+             assertion, and the only mechanism that reaches a chapter-organised root;
+          2. the path-derived slug, which CI has already checked;
+          3. the declared field's value even though the registry does not contain it — kept
+             so it lands in the "names no registry entry" bucket with a number beside it,
+             instead of disappearing;
+          4. None.
+
+        RULE 2 BEFORE RULE 3 IS THE WHOLE POINT. Letting an unchecked value override a
+        checked one means one typo in `agency:` silently REMOVES a document from a count
+        that was previously right — a count going down, reported by a response that still
+        calls itself complete. An earlier draft of this (corpus-toolkit#71) did exactly
+        that. Where no registry is loadable, rule 1 cannot be evaluated and the declared
+        field wins outright; the coverage buckets are then reported as unknown.
+
+        NOT the free-text `issuing_body` frontmatter field, which is a sub-unit name
+        ("DAS Enterprise Information Strategy and Policy Division") and not a registry
+        slug — the distinction `scope_slug_for`'s docstring exists to preserve. A corpus
+        declares which key carries slugs precisely so the toolkit never has to guess.
+        """
+        declared = ""
+        if self.issuing_body_slug_field:
+            declared = str(frontmatter.get(self.issuing_body_slug_field) or "").strip()
+        known = self.issuing_body_slugs
+        if declared and (known is None or declared in known):
+            return declared
+        return self.scope_slug_for(rel_parts) or declared or None
 
     def expected_root_for(self, doc_type: str) -> ContentRoot | None:
         """The one content root a given doc_type is allowed to live under (used to report
@@ -504,6 +575,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
         issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),
+        issuing_body_slug_field=(plugins.get("issuing_body_slug_field") or "").strip() or None,
         extra_schema_checks=plugins.get("extra_schema_checks", []) or [],
         mcp_server_name=mcp.get("server_name", corpus.get("id", "corpus")),
         mcp_transports=mcp.get("transports", ["stdio", "http"]),
