@@ -580,7 +580,20 @@ class CorpusFramework:
             # The not-found branch used to return the bare backend error, so the one
             # response an agent gets when it guesses an id wrong was the only one with no
             # corpus/archetype on it — it could not even tell which corpus said no.
-            return {**self._envelope(), **rec,
+            # ENVELOPE LAST, so the record cannot displace it (corpus-toolkit#102). This
+            # branch used to merge `**rec` over the envelope with no re-assertion, so a
+            # backend's error record carrying `corpus` renamed the corpus on the one
+            # response an agent gets when it guesses an id wrong — the response it is most
+            # likely to misread, and the failure #38 fixed, re-openable from the backend
+            # side. A non-string was worse still: a hard ValidationError at serialization
+            # since #103 declared these three `str`.
+            #
+            # Envelope-last rather than the success branch's re-assert-after because all
+            # THREE fields are fixed here. Unlike the success branch there is no document,
+            # so there is no `source_url` that could be a more precise
+            # `authoritative_source` than the corpus's own — the record has nothing better
+            # to offer and must not overwrite a declared `null`.
+            return {**rec, **self._envelope(),
                     "did_you_mean": [{"id": s["id"], "title": s["title"]} for s in sug]}
         # Envelope FIRST so the record wins: a document's own `authoritative_source`
         # (its source_url) is the more precise answer to "where is the official text",
@@ -768,10 +781,25 @@ class CorpusFramework:
 
     def corpus_overview(self) -> dict:
         out = {
-            **self._envelope(),
+            **self.backend.overview(),
+            # EVERYTHING THIS FRAMEWORK ASSERTS GOES AFTER THE BACKEND'S MAPPING
+            # (corpus-toolkit#104). `overview()` is documented as "counts, commit/source
+            # stamp" and nothing forbids these keys — a proxy backend naming its upstream
+            # under `corpus`, or stamping its terms of use under `disclaimer`, is a
+            # plausible mistake, and this is the tool a client calls FIRST to learn what it
+            # is talking to. The `config_warning` branch below already reads the CONFIG
+            # value rather than the merged one, so the old order was internally
+            # inconsistent as well as unsafe.
+            #
+            # `disclaimer` and `jurisdiction` are here for the same reason and not by
+            # afterthought: the first pass at this fix moved only `_envelope()` and left
+            # those two in front, which let a backend delete the NON-AUTHORITATIVE warning
+            # from the one tool response convention 4 names as carrying it — while
+            # `get_document`'s docstring claims "a new backend cannot forget the
+            # disclaimer". The rule is the whole assembled front, not three named keys.
             "jurisdiction": self.config.jurisdiction,
             "disclaimer": self.disclaimer,
-            **self.backend.overview(),
+            **self._envelope(),
             "graph_edges": sum(len(v) for d in self.graph()[1].values() for v in d.values()),
             "contract_version": self.config.contract_version,
         }

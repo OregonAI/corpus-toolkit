@@ -601,6 +601,33 @@ them is fine — the envelope supplies them.
 Grep your backend's `get()` for those three keys. Returning `authoritative_source` as a
 document's `source_url` string is the supported case and is what `FileBackend` does.
 
+> **Superseded by corpus-toolkit#102 and #104 — the advice above is now only about
+> `get_document`'s success branch.** The warning was written when a backend mapping could
+> displace the envelope, and it was also short of the mark in two ways: it named only
+> `get()`, while `corpus_overview` merged `overview()` over the envelope in exactly the same
+> way, and it told you to check for a *non-string* while a plausible **string** — a proxy
+> backend naming its upstream feed under `corpus` — was served silently and misreported
+> which corpus was answering.
+>
+> Both sites now re-assert the envelope after the backend's mapping, so on **those two
+> paths** — `get_document`'s not-found branch and `corpus_overview` — returning any of the
+> three keys is harmless: the toolkit ignores them rather than obeying or erroring on them.
+> `corpus_overview` also protects `disclaimer` and `jurisdiction` the same way.
+>
+> **Keep grepping `get()`, for its SUCCESS return.** That branch is deliberately unchanged:
+> a record's `authoritative_source` still wins, because a document's own `source_url` is the
+> more precise answer to "where is the official text" and that is what `FileBackend` relies
+> on. So the original warning still applies there in full — a **non-string**
+> `authoritative_source` on a successful record (a list, a number) is truthy, never falls
+> back to the config value, and is a hard `ValidationError` at serialization. Returning a
+> `source_url` **string** is the supported case; returning anything else is not.
+>
+> So the check to keep is narrower than the one above, not gone: `get()`'s success return
+> may carry `authoritative_source` and it must be a string or absent; it should not carry
+> `corpus` or `archetype` at all, and if it does they are now ignored rather than obeyed.
+> The precedence by which `authoritative_source` is resolved on that branch is the subject
+> of corpus-toolkit#90 and is not affected here.
+
 **Why required rather than optional.** `authoritative_source: null` means this corpus
 declares no front door; an absent key means nobody answered. Those are opposite answers and
 the platform does not let them collapse — a default would have injected the first for a tool

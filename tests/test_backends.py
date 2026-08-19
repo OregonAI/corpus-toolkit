@@ -209,6 +209,71 @@ class _BrokenBackend(_StubBackend):
     health = None
 
 
+class _EnvelopeClobberingBackend(_StubBackend):
+    """A backend that returns the three envelope keys from the two methods whose return
+    value CorpusFramework merges into a response (corpus-toolkit#102, #104).
+
+    Neither documented contract forbids this. `get()` is "Record metadata + body", and
+    `overview()` is "Backend-shaped facts ... counts, commit/source stamp" — and a source
+    stamp is exactly what a proxy backend would reach for a key like `corpus` to express.
+    So the toolkit has to enforce the envelope rather than trust every backend author to
+    remember it.
+    """
+    name = "clobbering"
+    CLOBBER = {"corpus": "upstream-odata-feed",
+               "archetype": "api",
+               "authoritative_source": "https://upstream.invalid/feed"}
+
+    def get(self, doc_id, *, part="auto"):
+        # No "id" key, so this takes get_document's NOT-FOUND branch.
+        return {"error": f"no document with id {doc_id!r}", **self.CLOBBER}
+
+    def overview(self):
+        # `disclaimer` and `jurisdiction` are clobbered HERE rather than in CLOBBER because
+        # only `corpus_overview` assembles them; the not-found branch has neither.
+        return {"documents_by_type": {"record": 1}, "commit": "",
+                "disclaimer": "UPSTREAM TERMS OF USE APPLY",
+                "jurisdiction": "elsewhere",
+                **self.CLOBBER}
+
+    # Clobbered too, so the sweep below catches a FUTURE site that starts splatting one of
+    # these. Neither is merged today — `exists` is read as a truthiness check in one place
+    # and picked apart by name in the other, and `holdings_for` goes through `_holdings`.
+    def exists(self, doc_id):
+        return {"id": doc_id, "title": "Stub", "doc_type": "record", **self.CLOBBER}
+
+    def holdings_for(self, slug):
+        return {"counts": {"verbatim": 1},
+                "coverage": {"documents": 1, "in_registry": 1, "no_registry_entry": 0,
+                             "unattributed": 0, "basis": "stub", **self.CLOBBER}}
+
+
+class _RecordWithItsOwnSourceBackend(_StubBackend):
+    """A backend whose get() SUCCEEDS and supplies the document's own authoritative_source.
+
+    This is the one place a backend is meant to win, and it is the case FileBackend hits on
+    every call — so it needs pinning separately from the two branches being fixed.
+    """
+    name = "own-source"
+
+    def get(self, doc_id, *, part="auto"):
+        return {"id": doc_id, "title": "Stub", "body": "live",
+                "source_url": "https://record.invalid/42",
+                "authoritative_source": "https://record.invalid/42"}
+
+
+class _NonStringEnvelopeBackend(_EnvelopeClobberingBackend):
+    """The same, with values the declared ResponseEnvelope cannot accept.
+
+    Since corpus-toolkit#103 the envelope types `corpus` and `archetype` as `str`, so a
+    None here is a hard ValidationError at serialization — a tool error on a path a corpus
+    author has no reason to expect one. The framework must never let the value get that
+    far.
+    """
+    name = "non-string"
+    CLOBBER = {"corpus": None, "archetype": None, "authoritative_source": []}
+
+
 def _with_backend(corpus: Path, factory_path: str) -> CorpusFramework:
     cfg_path = corpus / "_meta" / "corpus.yml"
     cfg_path.write_text(cfg_path.read_text() + textwrap.dedent(f"""
@@ -216,7 +281,9 @@ def _with_backend(corpus: Path, factory_path: str) -> CorpusFramework:
           retrieval_module: "{factory_path}"
     """))
     (corpus / "backend_mod.py").write_text(
-        "from tests.test_backends import _StubBackend, _BrokenBackend\n")
+        "from tests.test_backends import (_StubBackend, _BrokenBackend, "
+        "_EnvelopeClobberingBackend, _NonStringEnvelopeBackend, "
+        "_RecordWithItsOwnSourceBackend)\n")
     return CorpusFramework(load_config(str(cfg_path)))
 
 
@@ -230,6 +297,234 @@ def test_custom_backend_replaces_file_retrieval(corpus, monkeypatch):
     assert d["body"] == "live"
     # the envelope is still applied — a custom backend cannot drop the disclaimer
     assert "NON-AUTHORITATIVE" in d["disclaimer"] and d["corpus"] == "test-corpus"
+
+
+def test_not_found_response_names_this_corpus_even_when_the_record_names_another(corpus):
+    """corpus-toolkit#102. The not-found branch merged the backend's error record OVER the
+    envelope, so a record carrying `corpus` renamed the corpus on the one response an agent
+    gets when it guesses an id wrong — the response it is most likely to misread, and the
+    exact failure #38 fixed, re-openable from the backend side.
+
+    The success branch immediately below it already re-asserts these two after the record;
+    this branch did not."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _with_backend(corpus, "backend_mod:_EnvelopeClobberingBackend")
+
+    d = f.get_document("no-such-doc")
+
+    assert "error" in d                      # still the not-found branch
+    assert d["corpus"] == "test-corpus"      # config's value, not the record's
+    assert d["archetype"] == "document"
+
+
+def test_not_found_response_keeps_the_corpus_level_authoritative_source(corpus):
+    """corpus-toolkit#102, the third field. There is no document on this branch, so there
+    is no `source_url` to be more precise with — the corpus-level value is the only correct
+    answer, and the record cannot supply a better one.
+
+    This fixture declares no `corpus.authoritative_source`, so the right answer is `null`:
+    a documented value meaning "this corpus declares no front door", which convention 1
+    requires be distinguishable from a key nobody answered. A backend URL arriving in that
+    slot is the collapse this platform never makes."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _with_backend(corpus, "backend_mod:_EnvelopeClobberingBackend")
+
+    d = f.get_document("no-such-doc")
+
+    assert "authoritative_source" in d       # present, per convention 1
+    assert d["authoritative_source"] is None
+
+
+def test_corpus_overview_names_this_corpus_even_when_the_backend_names_another(corpus):
+    """corpus-toolkit#104 — the same defect as #102 at the second and only other site where
+    the framework merges a backend-supplied mapping into an enveloped response.
+
+    `corpus_overview` is the tool the server's own instructions tell a client to call
+    FIRST, so a corpus misreporting its own identity here misinforms every session that
+    starts correctly. `overview()`'s documented contract is "counts, commit/source stamp" —
+    a source stamp is exactly what a proxy backend would express under a key like `corpus`,
+    which makes this a plausible mistake rather than a contrived one."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _with_backend(corpus, "backend_mod:_EnvelopeClobberingBackend")
+
+    o = f.corpus_overview()
+
+    assert o["corpus"] == "test-corpus"
+    assert o["archetype"] == "document"
+    assert o["authoritative_source"] is None
+    # and the backend's own facts still arrive — this displaces three keys, drops nothing
+    assert o["documents_by_type"] == {"record": 1}
+
+
+def test_a_non_string_from_the_backend_never_reaches_the_declared_envelope(corpus):
+    """The loud half of corpus-toolkit#102/#104, and the reason the fix belongs in the
+    framework rather than in each backend's memory.
+
+    Since #103 the declared ResponseEnvelope types `corpus` and `archetype` as `str`, so a
+    None arriving in either slot is a hard ValidationError at serialization — a tool error
+    on a path a corpus author has no reason to expect one. Because the framework now
+    re-asserts the envelope, the offending value never gets that far and the response is
+    simply CORRECT rather than loudly broken.
+
+    Asserted through `ResponseEnvelope.model_validate` because that is what the SDK does to
+    these responses on the way out; a framework-level assertion alone would not prove the
+    wire path is safe."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from corpus_toolkit.mcp.responses import ResponseEnvelope
+    f = _with_backend(corpus, "backend_mod:_NonStringEnvelopeBackend")
+
+    for response in (f.get_document("no-such-doc"), f.corpus_overview()):
+        assert response["corpus"] == "test-corpus"
+        assert response["archetype"] == "document"
+        # serializes rather than raising — this is the assertion that matters
+        assert ResponseEnvelope.model_validate(response).corpus == "test-corpus"
+
+
+def _sweep_corpus(corpus: Path, factory_path: str) -> CorpusFramework:
+    """The corpus fixture with a REAL graph and a REAL issuing-body registry.
+
+    The plain fixture has an empty `graph.json` and no registry, so `graph_neighbors`,
+    `authority_chain` and `issuing_body_profile` all return their early error envelopes and
+    never reach the code that consumes a backend mapping. A sweep run against it asserts
+    only that four error shapes carry an envelope — which they do by construction — and
+    would go green over a future site that splatted `holdings_for()`'s mapping. Reaching the
+    success path is the entire point of the sweep.
+    """
+    (corpus / "_meta" / "registry.yml").write_text(json.dumps(
+        {"entries": [{"slug": "water-department", "name": "Water Department"}]}))
+    (corpus / "_meta" / "graph.json").write_text(json.dumps({
+        "nodes": [{"id": "ors-1.010", "title": "Definitions", "doc_type": "statute"},
+                  {"id": "ors-2.020", "title": "Fees", "doc_type": "statute"}],
+        "edges": [{"from": "ors-2.020", "to": "ors-1.010", "type": "implements"}]}))
+    (corpus / "_meta" / "corpus.yml").write_text(textwrap.dedent(f"""
+        corpus:
+          id: test-corpus
+          name: Test Corpus
+          jurisdiction: oregon
+          archetype: document
+        content_roots:
+          - path: statutes
+            doc_type: statute
+        graph_path: _meta/graph.json
+        plugins:
+          retrieval_module: "{factory_path}"
+          issuing_body_registry: _meta/registry.yml
+    """).strip() + "\n")
+    (corpus / "backend_mod.py").write_text(
+        "from tests.test_backends import (_StubBackend, _BrokenBackend, "
+        "_EnvelopeClobberingBackend, _NonStringEnvelopeBackend, "
+        "_RecordWithItsOwnSourceBackend)\n")
+    return CorpusFramework(load_config(str(corpus / "_meta" / "corpus.yml")))
+
+
+def test_no_enveloped_response_anywhere_lets_the_backend_displace_the_envelope(corpus):
+    """The guard that makes corpus-toolkit#102/#104 stay fixed.
+
+    #102 listed the sites it believed were safe and cleared `corpus_overview`, which was
+    the second instance — found only because someone re-audited the list by hand rather
+    than trusting it. An inventory written once in prose goes stale; this sweeps every
+    enveloped tool through a backend that clobbers every method it can, so a THIRD site
+    added later fails here instead of shipping.
+
+    `search_corpus` is absent deliberately: it is list-shaped and carries no envelope, per
+    the documented exemption in response convention 1."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _sweep_corpus(corpus, "backend_mod:_EnvelopeClobberingBackend")
+
+    responses = {
+        "get_document": f.get_document("no-such-doc"),
+        "corpus_overview": f.corpus_overview(),
+        "resolve_citation": f.resolve_citation("ORS 1.010"),
+        "graph_neighbors": f.graph_neighbors("ors-2.020"),
+        "authority_chain": f.authority_chain("ors-2.020"),
+        "issuing_body_profile": f.issuing_body_profile("water-department"),
+    }
+
+    # EACH TOOL REACHED ITS REAL PATH, asserted rather than assumed. An earlier version of
+    # this sweep ran against a fixture with an empty graph and no registry, so four of the
+    # six tools returned early error envelopes and the sweep proved nothing about the code
+    # that consumes a backend mapping — it would have gone green over a future site
+    # splatting `holdings_for()`. A sweep that cannot fail is worse than no sweep.
+    assert "did_you_mean" in responses["get_document"]          # not-found branch proper
+    assert responses["corpus_overview"]["documents_by_type"] == {"record": 1}
+    assert responses["graph_neighbors"]["implements"], "graph tools hit the empty-graph error"
+    assert responses["authority_chain"]["title"] == "Fees"
+    assert responses["issuing_body_profile"]["in_repo"] == {"verbatim": 1}, (
+        "issuing_body_profile never reached backend.holdings_for()")
+
+    enveloped = {name: r for name, r in responses.items()
+                 if isinstance(r, dict) and "corpus" in r}
+    # If this trips, a tool stopped carrying the envelope — a convention 1 regression that
+    # would otherwise make the assertions below vacuously pass.
+    assert set(enveloped) == set(responses), (
+        f"not carrying an envelope: {sorted(set(responses) - set(enveloped))}")
+
+    for name, r in enveloped.items():
+        assert r["corpus"] == "test-corpus", f"{name} let the backend rename the corpus"
+        assert r["archetype"] == "document", f"{name} let the backend change the archetype"
+        assert r["authoritative_source"] is None, f"{name} took the backend's source URL"
+
+
+def test_a_backend_cannot_replace_the_disclaimer_on_corpus_overview(corpus):
+    """The non-authoritative disclaimer is the whole platform's load-bearing claim, and
+    `corpus_overview` is the tool response convention 4 names by name as carrying it.
+
+    A first pass at corpus-toolkit#104 moved the envelope past the backend's mapping but
+    left `disclaimer` and `jurisdiction` in front of it, so a proxy backend stamping its
+    upstream's terms of use replaced the NON-AUTHORITATIVE warning on the tool clients call
+    first — while `get_document`'s docstring goes on claiming "a new backend cannot forget
+    the disclaimer"."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _with_backend(corpus, "backend_mod:_EnvelopeClobberingBackend")
+
+    o = f.corpus_overview()
+
+    assert "NON-AUTHORITATIVE" in o["disclaimer"]
+    assert o["jurisdiction"] == "oregon"
+
+
+def test_re_asserting_the_envelope_displaces_three_keys_and_drops_nothing(corpus):
+    """Envelope-last must not become payload-last. The fix moves `**self._envelope()` after
+    the backend's mapping, and the failure mode of getting that wrong is silent deletion —
+    which is exactly how the v1.24.0 TypedDict incident destroyed `get_document`'s body at
+    serialization while the call still reported success (corpus-toolkit#61)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _with_backend(corpus, "backend_mod:_EnvelopeClobberingBackend")
+
+    d = f.get_document("no-such-doc")
+    assert d["error"] == "no document with id 'no-such-doc'"   # the record's own text
+    assert "did_you_mean" in d
+
+    o = f.corpus_overview()
+    assert o["documents_by_type"] == {"record": 1}             # the backend's own facts
+    assert o["commit"] == ""
+
+
+def test_the_success_branch_still_lets_a_record_supply_its_own_source(corpus):
+    """The one place a backend is SUPPOSED to win, pinned so this fix cannot over-reach.
+
+    A document's own `source_url` is the more precise answer to "where is the official
+    text" than the corpus's front door, so `get_document`'s success branch leaves
+    `authoritative_source` overridable on purpose — and that is what FileBackend relies on
+    for every call. Nothing here touches that branch; this asserts it rather than trusting
+    the diff, because the next change in this area (corpus-toolkit#90) edits exactly this
+    precedence and should find a guard already in place."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _with_backend(corpus, "backend_mod:_RecordWithItsOwnSourceBackend")
+
+    d = f.get_document("rec:42")
+
+    assert d["authoritative_source"] == "https://record.invalid/42"   # record wins
+    assert d["corpus"] == "test-corpus"        # ...but never over these two
+    assert d["archetype"] == "document"
 
 
 def test_incomplete_backend_fails_at_startup(corpus):

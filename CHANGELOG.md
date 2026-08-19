@@ -17,6 +17,31 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — a backend can no longer displace the response envelope
+
+**Can break you only if your corpus supplies `plugins.retrieval_module` AND its `get()` or
+`overview()` deliberately sets `corpus`, `archetype` or `authoritative_source`.** Those
+values are now ignored rather than obeyed. If you were relying on a backend to set them —
+which nothing documented and the envelope exists to prevent — the response will now carry
+the config's values instead. `FileBackend` corpora are unaffected.
+
+`CorpusFramework` merges a backend-supplied mapping into a response at exactly two sites,
+and at both the mapping won over the envelope: `get_document`'s **not-found** branch merged
+the backend's error record over it, and `corpus_overview` merged `overview()` over it. A
+wrong string was served silently — misattributing which corpus said "no such document", and
+misreporting the corpus's own identity on the tool a client calls first — and since #103 a
+non-string was a hard `ValidationError` at serialization. `corpus_overview` also stopped a
+backend replacing `disclaimer`, which had let an upstream's terms of use displace the
+NON-AUTHORITATIVE warning that response convention 4 names that tool as carrying.
+
+`get_document`'s **success** branch is deliberately unchanged: a record's
+`authoritative_source` still wins, because a document's own `source_url` is the more precise
+answer. See MIGRATION.md — the check to keep on your backend is narrower than before, not
+gone.
+
+Closes corpus-toolkit#102 and #104. A third site of the same class, where the mapping comes
+from graph data rather than a backend, is corpus-toolkit#105 and is not fixed here.
+
 ### Added — object-shaped tools declare response convention 1, openly
 
 The six object-shaped tools are annotated `-> ResponseEnvelope` (new,
