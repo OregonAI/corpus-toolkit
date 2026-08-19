@@ -524,7 +524,7 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
-### Unreleased — five relation names are reserved in `_meta/graph.json` (corpus-toolkit#105)
+### v1.27.0 — five relation names are reserved in `_meta/graph.json` (corpus-toolkit#105)
 
 **Check your graph's relation types before bumping the pin. Nothing else will tell you.**
 
@@ -558,7 +558,7 @@ the backend had no business setting them. A graph relation is your own declared 
 dropping it without a word would mean a relationship stopped being served and you never
 found out.
 
-### Unreleased — a corpus's own tools can satisfy response convention 1 (corpus-toolkit#96)
+### v1.27.0 — a corpus's own tools can satisfy response convention 1 (corpus-toolkit#96)
 
 **Nothing breaks and nothing is required.** Extension tools registered through
 `plugins.tools_module` keep working exactly as they do now. This adds the means to fix a
@@ -612,7 +612,7 @@ down in a single deploy, because the generated model is closed and silently drop
 it does not declare. `ResponseEnvelope` is open (`extra="allow"`) precisely so your payload
 travels intact.
 
-### Unreleased — declarable issuing-body sentinels (corpus-toolkit#94)
+### v1.27.0 — declarable issuing-body sentinels (corpus-toolkit#94)
 
 **Every corpus rebuilds its FTS cache once.** The index schema version goes to 4 for exactly
 the reason it went to 3: same column, different values, which no content-key check can
@@ -717,7 +717,7 @@ coverage without those counts, reports `attribution.complete: null`, because hal
 measurement is not a measurement and "did not check" is not "nothing is missing". Report the
 buckets if you can classify against the registry; omit them if you cannot.
 
-### Unreleased — object-shaped tools declare response convention 1
+### v1.27.0 — object-shaped tools declare response convention 1
 
 **No action for a corpus using the built-in file backend, which is all eight live corpora.**
 Response bodies are unchanged; only the declared output schema moved, from
@@ -794,7 +794,7 @@ that is corpus-toolkit#96. If you want yours to advertise the convention, annota
 `-> ResponseEnvelope` from `corpus_toolkit.mcp.responses` — the same open model the built-ins
 use — and keep returning a plain dict.
 
-> **The last sentence is WRONG and corpus-toolkit#96 corrects it — see the Unreleased entry
+> **The last sentence is WRONG and corpus-toolkit#96 corrects it — see the v1.27.0 entry
 > above.** "Keep returning a plain dict" reads as "change the annotation and nothing else",
 > which is the one thing that does not work: the three envelope fields are required with no
 > defaults, so a tool annotated `-> ResponseEnvelope` whose payload lacks them is a hard
