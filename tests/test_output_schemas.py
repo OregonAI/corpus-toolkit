@@ -180,3 +180,100 @@ def test_corpus_overview_serializes_end_to_end(sourceless_server):
         "schema would silently drop")
     assert len(out) > len(CONVENTION_1), (
         "response carries only the declared fields — the schema constrained the payload")
+
+
+# --------------------------------------------------------------- corpus-toolkit#15
+#
+# Everything above pins the half v1.24.0 broke: the declaration must not own the payload.
+# Everything below pins the half #15 asks for and that `dict[str, Any]` never delivered:
+# the declaration must SAY SOMETHING. Both halves have to hold at once, which is the whole
+# difficulty of the issue — the three fields are in every response body and were invisible
+# to field-level validation, and the obvious way to make them visible is the way that took
+# four corpora down.
+
+def _allows_null(subschema: dict) -> bool:
+    """Does this property schema admit JSON `null`?
+
+    Read structurally rather than by matching pydantic's exact emission, which is
+    `{"anyOf": [{"type": "string"}, {"type": "null"}]}` on both majors today and is an
+    implementation detail of the schema generator. What a validating client needs is that
+    `null` is legal somewhere in the property's type union."""
+    types = subschema.get("type")
+    if types == "null" or (isinstance(types, list) and "null" in types):
+        return True
+    return any(_allows_null(alt)
+               for alt in (subschema.get("anyOf") or subschema.get("oneOf") or []))
+
+
+def test_object_tools_advertise_convention_1(corpus_server):
+    """#15 itself. The three fields must be visible to a client that reads the SCHEMA,
+    not only to one that string-matches the response body.
+
+    `dict[str, Any]` emits `{"additionalProperties": true}` — a real output schema with no
+    `properties` at all, so a conformance harness, a validating client or a release gate
+    could assert nothing about convention 1. Three things are asserted together and the
+    combination is the point:
+
+      * the fields are NAMED, which is what the issue asks for;
+      * they are REQUIRED, so a response omitting one is a schema violation rather than a
+        shrug — "could not check" and "is not there" are opposite answers (CONTEXT.md);
+      * `additionalProperties` is `true` EXPLICITLY, which is what keeps the declaration
+        from becoming the container. v1.24.0's TypedDict emitted no `additionalProperties`
+        key at all, its author read the absence as "extras are permitted", and extras were
+        indeed permitted through validation and then discarded by the model that
+        serializes. Absent and `true` are not the same declaration.
+    """
+    tools = _tools(corpus_server)
+    checked = []
+    for name in OBJECT_TOOLS:
+        if name not in tools:
+            continue  # archetype-gated (issuing_body_profile needs a registry)
+        checked.append(name)
+        schema = getattr(tools[name], "output_schema", None) or {}
+        props = schema.get("properties") or {}
+        missing = [f for f in CONVENTION_1 if f not in props]
+        assert not missing, (
+            f"{name} declares an output schema that does not name {missing} — the "
+            f"fields are in the response body and invisible to schema-driven "
+            f"validation, which is corpus-toolkit#15. Schema: {schema}")
+        required = set(schema.get("required") or [])
+        assert set(CONVENTION_1) <= required, (
+            f"{name} names convention 1's fields but does not require "
+            f"{sorted(set(CONVENTION_1) - required)}; an optional field cannot tell a "
+            f"response that declared no source from one that never looked")
+        assert _allows_null(props["authoritative_source"]), (
+            f"{name} declares authoritative_source without admitting null. That null is "
+            f"documented (convention 1) and rejecting it is bug 1 of corpus-toolkit#61 "
+            f"verbatim. Schema: {props['authoritative_source']}")
+        assert schema.get("additionalProperties") is True, (
+            f"{name} does not explicitly permit additional properties "
+            f"({schema.get('additionalProperties')!r}). Per-tool keys and backend-merged "
+            f"keys are the whole payload; a declaration that does not admit them is one "
+            f"edit away from dropping them")
+    assert len(checked) >= 4, (
+        f"only {checked} were checked — the fixture is not serving the object-shaped "
+        f"tools this assertion exists for")
+
+
+def test_a_response_missing_a_convention_1_field_is_rejected(corpus_server):
+    """Point 4 of the issue: the declaration must be able to FAIL, or it is decoration.
+
+    Paired deliberately with the explicit-null case in the same test, because the two
+    together are the distinction the whole convention rests on: `authoritative_source:
+    null` is a corpus saying it has no front door and must serialize; an ABSENT
+    `authoritative_source` is a response that never answered the question and must not.
+    A field declared with a default would collapse the two by injecting the null."""
+    from pydantic import ValidationError
+
+    tools = _tools(corpus_server)
+    good = {"corpus": "t", "archetype": "document", "authoritative_source": None,
+            "detail": "tool-specific payload"}
+    for name in OBJECT_TOOLS:
+        if name not in tools:
+            continue
+        assert _serialize(tools[name], good)["authoritative_source"] is None, (
+            f"{name} rejected the documented null — see the test above")
+        for field in CONVENTION_1:
+            payload = {k: v for k, v in good.items() if k != field}
+            with pytest.raises(ValidationError):
+                _serialize(tools[name], payload)

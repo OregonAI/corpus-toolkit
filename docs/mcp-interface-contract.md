@@ -362,12 +362,43 @@ the hook and registering nothing is likewise an error rather than a no-op.
    across corpora must track which response came from which server. It
    already must, because it chose which server to call.
 
-   **What this convention does NOT yet buy anywhere**: the dict-returning
-   tools declare `dict[str, Any]`, whose schema is `{"additionalProperties":
-   true}` — a real output schema that says nothing about these three fields.
-   So `corpus`, `archetype` and `authoritative_source` are present in the
-   response and still invisible to *field-level* schema-driven validation.
-   That gap is tracked as corpus-toolkit#15.
+   **The three fields are declared, and the declaration is open**
+   (toolkit >= the release carrying corpus-toolkit#15). The object-shaped
+   tools are annotated `-> ResponseEnvelope`
+   (`corpus_toolkit/mcp/responses.py`), an open pydantic model, so the
+   emitted output schema names all three, marks them `required`, types
+   `authoritative_source` as `string | null`, and carries
+   `"additionalProperties": true` alongside. Identical on both SDK majors:
+
+   ```json
+   {"type": "object", "additionalProperties": true,
+    "required": ["corpus", "archetype", "authoritative_source"],
+    "properties": {"corpus": {"type": "string"},
+                   "archetype": {"type": "string"},
+                   "authoritative_source": {"anyOf": [{"type": "string"},
+                                                      {"type": "null"}]}}}
+   ```
+
+   Before that it was `{"additionalProperties": true}` and nothing else — a
+   real output schema that said nothing about these three fields, so they were
+   present in every response and invisible to *field-level* validation.
+
+   **What this asks of a corpus.** Nothing, unless it supplies its own
+   `plugins.retrieval_module`. The fields are required, so a response omitting
+   one is now a serialization error rather than a quietly non-conforming
+   answer; every built-in path assembles them in
+   `CorpusFramework._envelope()`, and the exposure is a backend record that
+   overrides one of the three with a non-string, which `get_document` merges
+   over the envelope. Required-and-nullable is deliberate: `null` is a corpus
+   saying it has no front door, an absent key is nobody having answered, and
+   collapsing those two is the one thing this platform never does. A field
+   with a default would collapse them by injecting the null.
+
+   **Extension tools are a separate question.** A `tools_module` tool
+   annotated bare `-> dict` declares no output schema at all, so it advertises
+   nothing and ships no structured content either — corpus-toolkit#96, which
+   this does not change beyond making `ResponseEnvelope` available to annotate
+   them with.
 
    **It is not as simple as declaring a TypedDict, and that is not a guess.**
    v1.24.0 did exactly that and broke every object-shaped tool on all four
@@ -380,11 +411,37 @@ the hook and registering nothing is likewise an error rather than a no-op.
    | `authoritative_source: str` | rejects the `null` this section mandates — `total=False` makes a key optional, not nullable |
    | undeclared keys | dropped at serialization; `get_document` returned its envelope and no document body, silently, still reporting success |
 
-   `Optional[str]` fixes the first and not the second. So whatever closes #15
-   must declare the fields to validation **without** owning serialization —
-   the response floor is a contract, not a container. A schema assertion
-   cannot detect either failure; only a round-trip through the SDK's
-   `convert_result` can, which `tests/test_output_schemas.py` now pins.
+   `Optional[str]` fixes the first and not the second. So the declaration had
+   to reach validation **without** owning serialization — the response floor
+   is a contract, not a container.
+
+   What closed it is one word of configuration rather than a different
+   mechanism: `extra="allow"`. The hazard was never that a model sits in the
+   response path — `-> dict[str, Any]` already made the SDK build
+   `RootModel[dict[str, Any]]` and dump every response through it — it was
+   that a TypedDict's generated model is **closed**. Measured against that
+   RootModel on 1.28.1 and 2.0.0, `ResponseEnvelope` emits the same keys with
+   the same values for keys shadowing `BaseModel` methods and attributes,
+   leading-underscore and dunder keys, the empty-string key, non-ASCII keys,
+   non-JSON values, falsy values and deep nesting.
+
+   The one thing that does change is **key order** in structured content:
+   `model_dump` emits declared fields first, so a response that merges the
+   envelope last (`resolve_citation`) now leads with it. JSON objects are
+   unordered and the content blocks are unaffected, so no client can observe
+   this — but it is the reason the claim above is "same keys and values"
+   rather than "byte-identical".
+
+   Setting `output_schema` on the registered tool after the fact was the other
+   candidate and is worse: `@tool()` takes no output-schema argument on either
+   major, and the schema and the validating model are used together, so
+   patching one would advertise a requirement the server does not enforce.
+
+   A schema assertion cannot detect either v1.24.0 failure; only a round-trip
+   through the SDK's `convert_result` can. `tests/test_output_schemas.py` pins
+   the convention across the object tools and
+   `tests/test_result_marshalling.py` pins whole-payload equality for every
+   registered tool, both halves, both majors.
 2. Document content responses include the provenance block (source_url,
    retrieved, source_sha256, last_verified).
 3. Live-data responses include executed_query + executed_at.

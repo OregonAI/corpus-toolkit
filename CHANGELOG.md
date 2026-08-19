@@ -17,7 +17,76 @@ it can break you.
 
 ## Unreleased
 
-Nothing yet.
+### Added — object-shaped tools declare response convention 1, openly
+
+The six object-shaped tools are annotated `-> ResponseEnvelope` (new,
+`corpus_toolkit/mcp/responses.py`) instead of `-> dict[str, Any]`. Their emitted output
+schema goes from this, on both SDK majors:
+
+```
+get_document  {"additionalProperties": true, "title": "get_documentDictOutput", "type": "object"}
+```
+
+to this:
+
+```
+get_document  {"additionalProperties": true, "title": "ResponseEnvelope", "type": "object",
+               "required": ["corpus", "archetype", "authoritative_source"],
+               "properties": {"corpus": {"type": "string"},
+                              "archetype": {"type": "string"},
+                              "authoritative_source": {"anyOf": [{"type": "string"},
+                                                                 {"type": "null"}]}}}
+```
+
+`corpus`, `archetype` and `authoritative_source` were in every response body and named by
+no declaration, so a conformance harness, a validating client or a release gate could
+assert nothing about the convention beyond string-matching prose (corpus-toolkit#15).
+`search_corpus` is untouched — it returns a list and is exempt from the convention.
+
+**Response bodies do not change.** The tools still return the same plain dicts; only the
+declared type moved. Verified by `tests/test_result_marshalling.py`, which round-trips
+every registered tool's real answer through the SDK's own conversion and asserts
+whole-payload equality in both halves, on both majors: 314 passed, 10 subtests on
+`mcp[cli]>=1.28,<2` (1.28.1) and `>=2,<3` (2.0.0), up from 312 with the two new tests.
+
+**Why this is not v1.24.0 again.** That release declared a TypedDict, which the SDK turns
+into a CLOSED pydantic model: it rejected the documented `authoritative_source: null` and
+dropped every undeclared key, so `get_document` returned three envelope fields and no
+document body while still reporting success (corpus-toolkit#61). The distinction is
+closedness, not declaration — a `-> dict[str, Any]` annotation already builds
+`RootModel[dict[str, Any]]` and dumps every response through it, so a pydantic model has
+been serializing object responses all along. `ResponseEnvelope` sets `extra="allow"`, and
+its output was measured against that RootModel's on both majors — same keys, same values —
+for keys shadowing `BaseModel` methods and attributes, leading-underscore and dunder keys,
+the empty-string key, non-ASCII keys, non-JSON values, falsy values and deep nesting.
+
+**Key order in structured content changes for one tool.** `model_dump` emits declared
+fields before extras, so `resolve_citation` — which merges `**self._envelope()` last — goes
+from `['citation','matches','unresolved','corpus',…]` to
+`['corpus','archetype','authoritative_source','citation',…]`. JSON objects are unordered,
+the content blocks are built from the raw return value and do not move, and every
+round-trip test compares mappings — so nothing can observe it. Recorded because the first
+draft of this entry called the output byte-identical, which was a stronger claim than the
+measurement supported.
+
+Both v1.24.0 failure modes are re-tested directly and pass: a payload carrying
+`authoritative_source: null` round-trips as null through every object tool, and
+`get_document`'s body survives in both the structured content and the content blocks. The
+gate was also re-armed adversarially — re-applying `daff198`'s `ObjectResponse` TypedDict
+on top of this change still turns `tests/test_result_marshalling.py` red with
+`get_document: keys dropped at serialization: ['body', 'citation', ...]` on both majors.
+
+**One behaviour change, and it can only fire on a non-conforming response.** The three
+fields are declared required (and `authoritative_source` nullable with no default), so a
+response that omits one is now a `ValidationError` rather than a quietly non-conforming
+answer. Every built-in path builds the envelope in `CorpusFramework._envelope()` and
+cannot hit this; a corpus supplying its own `plugins.retrieval_module` can — see
+MIGRATION.md.
+
+`.github/scripts/contract_smoke.py` gained the matching assertion at step 8: any tool
+whose declared schema describes properties at all must name the three. Extension tools
+annotated bare `-> dict` declare no schema and are out of scope there, which is
+corpus-toolkit#96 and a separate fix.
 
 ## v1.26.1 — 2026-08-19
 

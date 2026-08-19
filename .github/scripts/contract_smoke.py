@@ -466,6 +466,27 @@ def check_result_marshalling(dest: Path) -> None:
         # authoritative_source: null" here and the cheap fix would be to weaken this.
         if _sdk.declares_list_result(tool) or getattr(tool, "output_schema", None) is None:
             continue
+
+        # WHAT THE SCHEMA SAYS, not only what it survives (corpus-toolkit#15). The three
+        # fields were in every response body and named by no declaration, so a validating
+        # client could check nothing. Asserted here as well as in the suite because this
+        # gate builds a REAL corpus from corpus-template and reads the schemas the SDK
+        # actually emitted, which is the artifact a client consumes.
+        #
+        # Keyed on the schema HAVING properties at all: the built-ins declare
+        # `ResponseEnvelope` and so name them, while an extension tool annotated
+        # `dict[str, Any]` emits `{"additionalProperties": true}` with no properties and is
+        # not in scope here — its declaration says nothing, which is corpus-toolkit#96 and
+        # a different fix. Silence is the exemption; a schema that describes fields and
+        # omits these three is not.
+        props = (getattr(tool, "output_schema", None) or {}).get("properties") or {}
+        absent = [f for f in ("corpus", "archetype", "authoritative_source")
+                  if props and f not in props]
+        if absent:
+            problems.append(f"{name} declares an output schema describing "
+                            f"{sorted(props)} and does not name {absent} — response "
+                            f"convention 1 is invisible to schema-driven validation")
+
         payload = {"corpus": "smoke-corpus", "archetype": "hybrid",
                    "authoritative_source": None, "detail": "tool-specific payload"}
         try:
