@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -102,26 +103,56 @@ def extract_verbatim_quotes(body: str):
 
 # Byte patterns that change on every fetch without any content change (session ids,
 # CDN tokens). Strip before hashing so hash drift means real content drift.
+#
+# THIS LIST STAYS EMPTY, deliberately (corpus-toolkit#66). A generic toolkit cannot
+# enumerate the volatile tokens of every site it will ever crawl, and shipping even the
+# site-agnostic candidates (Cloudflare's `data-cfemail`, `/cdn-cgi/l/email-protection`)
+# would silently rehash every existing source carrying that markup across every corpus —
+# a wave of phantom drift arriving in a version bump, which is the one way this platform
+# has already broken corpora. A corpus declares the tokens ITS sources embed, under
+# `volatile_patterns:` in `_meta/corpus.yml`, and re-seeds its baselines in the same PR.
 VOLATILE_PATTERNS: list[bytes] = []
 
 
-def normalize_volatile(data: bytes) -> bytes:
-    for pat in VOLATILE_PATTERNS:
+def normalize_volatile(data: bytes,
+                       patterns: Sequence[re.Pattern[bytes]] = ()) -> bytes:
+    """Strip volatile byte patterns before hashing.
+
+    `patterns` is the CORPUS's list — `config.volatile_patterns`, compiled once at load —
+    and is PASSED IN rather than read from a module global. A global every caller has to
+    remember to populate first reproduces exactly the silent no-op #66 is about: the hash
+    would depend on whether some earlier code path happened to install the patterns, and
+    forgetting it looks identical to a corpus that declared none.
+    """
+    for pat in list(VOLATILE_PATTERNS) + list(patterns):
         data = re.sub(pat, b"", data)
     return data
 
 
-def content_hash(raw: bytes, fmt: str) -> str:
+def content_hash(raw: bytes, fmt: str,
+                 volatile_patterns: Sequence[re.Pattern[bytes]] = ()) -> str:
     """Content hash of a freshly-fetched source: sha256 of the whitespace-normalized
     extracted text (pdftotext for PDFs, tag-stripping for HTML/XML). Falls back to
-    the raw-byte hash when extraction yields <200 chars (e.g. image-only scans)."""
+    the raw-byte hash when extraction yields <200 chars (e.g. image-only scans).
+
+    `volatile_patterns` applies to the HTML/XML path only, which is where per-fetch and
+    per-release tokens live; PDFs go through text extraction and are largely immune, and
+    the binary formats have no text layer to normalize. A caller that passes none gets
+    byte-identical hashes to every release before v1.26.0 — the property that keeps this
+    change from re-hashing the platform (corpus-toolkit#66).
+
+    NOT the same hash as `hash_snapshot()`, which reads committed `.txt` and is deliberately
+    never re-derived from the source at verification time. Frontmatter `source_sha256` is
+    therefore NOT a valid seed for a manifest baseline: the two agree only for image-only
+    scans, where both fall back to raw bytes (measured on oregon-kpm, corpus-toolkit#68).
+    """
     if fmt == "pdf":
         proc = subprocess.run(["pdftotext", "-layout", "-", "-"], input=raw,
                               capture_output=True, check=False)
         text = proc.stdout.decode("utf-8", errors="replace") if proc.returncode == 0 else ""
     elif fmt in ("html", "xml"):
         from corpus_toolkit.html_to_text import html_to_text
-        text = html_to_text(normalize_volatile(raw))
+        text = html_to_text(normalize_volatile(raw, volatile_patterns))
     else:
         # binary formats with no text extractor (xls/xlsx/docx): raw-byte hash
         return hashlib.sha256(raw).hexdigest()

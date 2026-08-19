@@ -61,6 +61,83 @@ promise that every document sits under that URL — the reading that kept a seve
 corpus from declaring anything at all. A corpus asserting on either string in its own CI
 should expect it to have changed. (corpus-toolkit#70)
 
+### Fixed — drift detection could not record a baseline, and a truncated run looked clean
+
+**Read this if your corpus runs `detect-upstream-changes.yml`. Two exit codes change, and
+one of them will turn some scheduled runs red on purpose.**
+
+Three defects, one shape: the drift report said things about upstream that were really
+facts about the corpus, and said them quietly.
+
+- **`corpus-detect-changes` never wrote the baseline it computed** (#68). The manifest's
+  `sha256` was documented as "recorded at last ingest/refresh" and nothing in the toolkit
+  ever assigned it, so the only route to one was a per-corpus script reimplementing
+  `content_hash` — format inference, volatile normalization, `pdftotext -layout`,
+  whitespace normalization, the <200-char raw-byte fallback — where any divergence is
+  silent and permanent. oregon-counties (3,447 sources) and oregon-kpm (789) ran their
+  whole lifetimes with every `sha256: ''`: everything CHANGED every week, 25 spurious
+  issues filed, the rest dropped, run concluded `success`.
+
+  **New: `--record-baseline`.** It writes the freshly computed hash into the manifest group
+  files, in the working tree only — the manifest is curated data, so the diff goes through
+  review like any other, and nothing is committed or pushed. Bare (`seed`) fills sources
+  with **no** recorded baseline and leaves recorded ones alone; `--record-baseline=refresh`
+  also replaces recorded baselines, which is you accepting the observed change. A source
+  whose fetch failed is never written — a 403 must not overwrite a good baseline. Sources
+  are located by id and only their `sha256` value is rewritten; the edit is re-parsed and
+  compared before anything is written, and a file that does not verify is left untouched
+  and named. Comments, key order, and every other key survive. `--record-baseline` refuses
+  to run with `--open-issues`: seeding is not a drift report.
+
+  **Do not seed from frontmatter `source_sha256`.** Different hash, different input. The
+  two agree only for image-only scans, where both fall back to raw bytes — so a corpus that
+  seeds from frontmatter and spot-checks a scan sees a clean result and gets permanent
+  drift on every text-layer PDF, now with a populated "previous" hash that reads as a real
+  upstream change.
+
+- **`VOLATILE_PATTERNS` shipped empty with no way for a corpus to add to it** (#66), so
+  `normalize_volatile()` was an identity function for every consumer and the guarantee its
+  comment describes did not hold. One OARD footer bump (`v2.1.7` → `v2.1.8`) turned all 484
+  sources in ERF's `oar` group into drift with zero rule text changed.
+
+  **New: optional `volatile_patterns:` in `_meta/corpus.yml`** — a list of regexes, stripped
+  from the raw bytes on the HTML/XML path before hashing. Compiled once at load, and a bad
+  one fails there rather than mid-crawl: a bare string, a non-string entry, an empty
+  pattern, or an invalid regex is refused by name. **The built-in list stays empty**, so a
+  corpus that declares nothing hashes byte-identically to v1.25.0 — shipping "universal"
+  defaults would have re-hashed existing sources across the platform in a version bump. A
+  declared pattern that matches nothing in a run is reported, because a configured pattern
+  doing nothing is the bug this key exists to fix. So is the opposite and worse case: every
+  run reports how many bytes each pattern removed and what share of the fetched HTML/XML
+  that is, and warns above 10%. A pattern wide enough to swallow the body deletes content
+  before hashing — two versions differing only inside it hash identically and can never
+  report drift again — and that is measured and stated rather than forbidden, since how
+  much of a page is genuinely volatile is a corpus's call to make in a PR.
+
+- **A capped run reported as a clean run, and named a cause it had not checked** (#67). The
+  truncation notice went to stderr and the run exited 0; the message asserted an empty
+  baseline, which was exactly right for oregon-counties and exactly wrong for ERF, whose
+  maintainer checked and found zero. Both runs went green either way.
+
+  Every run now prints a **per-group breakdown** (`oar 484/484, oam 2/173`), capped or not,
+  with unseeded counts marked — the one line that separates a template change from a stale
+  baseline from real revisions. The capped message describes the shape of the drift and
+  reports the **measured** unseeded count instead of guessing, including when it is zero.
+
+**Exit-code changes.** A run now exits 1 when the issue cap truncated the report; when no
+in-scope source has a recorded baseline (that run cannot detect drift; `--record-baseline`
+is the fix, and a recording run exits 0); when the run's scope came out **empty**, e.g. a
+typo'd `--group` that checked 0 sources; and when `--record-baseline` **refused** a rewrite
+it could not account for, which in CI was otherwise a green run that recorded nothing.
+`--github-output` gains `unseeded=N` and stops reporting `changed=true` on an inert run. Under GitHub Actions both also emit a `::warning`
+annotation. An uncapped, seeded run is unchanged: drift is still a signal, not an error, and
+isolated fetch failures are still tolerated. `detect-upstream-changes.yml` now runs its
+STATUS.md steps with `if: always()`, so a red drift step no longer skips them.
+
+A corpus with a wholly unseeded manifest also stops having issues filed against it — the
+first run against a fresh manifest is a seeding operation, and 25 tickets a week whose
+"previous sha256" is empty were noise. Seed, review the diff, then let the cron report.
+
 ### Fixed — `issuing_body_profile` counted 1% of a corpus and said nothing about the other 99%
 
 **The number moves, a lot. That is the point of this note.** `in_repo` was counted from an

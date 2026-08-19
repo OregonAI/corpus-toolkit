@@ -101,6 +101,15 @@ class CorpusConfig:
     # set this key indexes byte-identically to before. Listed headings are CONCATENATED,
     # not first-match: a mirrored record often has several sections worth searching.
     index_headings: dict
+    # Byte-regexes stripped from HTML/XML before hashing, COMPILED at load — see
+    # _validated_volatile_patterns and corpus_toolkit.repo.normalize_volatile. Empty for a
+    # corpus that declares none, which hashes byte-identically to every release before
+    # v1.26.0. ADDING OR CHANGING A PATTERN CHANGES THE HASH of every page it matches, so
+    # the recorded baselines for those pages go stale in one wave; re-seed them with
+    # `corpus-detect-changes --record-baseline=refresh` in the same PR that adds the
+    # pattern, or the next scheduled run reports the whole group as drift
+    # (corpus-toolkit#66, #68).
+    volatile_patterns: list
     issuing_body_registry: Path | None
     issuing_body_registry_key: str
     issuing_body_profiles: Path | None
@@ -266,6 +275,17 @@ def load_source_manifest_groups(config: "CorpusConfig") -> list[dict]:
     Large corpora with many distinct source groups (different recheck
     cadences, different upstream owners) use directory mode; a small corpus
     just ships one `_meta/source-manifest.yml`."""
+    return [g for _, g in load_source_manifest_group_files(config)]
+
+
+def load_source_manifest_group_files(config: "CorpusConfig") -> list[tuple[Path, dict]]:
+    """(file path, parsed group) for every source-manifest group, in load order.
+
+    Same rules as `load_source_manifest_groups`, which is a thin wrapper on this. The path
+    is exposed because a writer needs it: `corpus-detect-changes --record-baseline` edits
+    the group file a source came from, and re-deriving "which file was that?" in the caller
+    is how the file/directory rules end up implemented twice and diverging
+    (corpus-toolkit#68)."""
     path = config.source_manifest_path
     if path is None:
         return []
@@ -274,7 +294,7 @@ def load_source_manifest_groups(config: "CorpusConfig") -> list[dict]:
         for p in sorted(path.glob("*.yml")):
             g = yaml.safe_load(p.read_text()) or {}
             g.setdefault("group", p.stem)
-            groups.append(g)
+            groups.append((p, g))
         if not groups:
             raise MissingSourceManifest(
                 f"source_manifest_path {path} is a directory containing no *.yml group "
@@ -282,7 +302,7 @@ def load_source_manifest_groups(config: "CorpusConfig") -> list[dict]:
                 f"*.yaml files is the usual cause — the loader only reads *.yml.)")
         return groups
     if path.is_file():
-        return [yaml.safe_load(path.read_text()) or {}]
+        return [(path, yaml.safe_load(path.read_text()) or {})]
     # A configured path that is neither file nor directory returned [] — so
     # corpus-detect-changes reported "0 changed, 0 fetch failure(s)" and exited 0,
     # forever, while checking nothing. A renamed file, a typo'd path, or a directory
@@ -451,6 +471,54 @@ def _validated_index_headings(raw) -> dict:
     return dict(raw)
 
 
+def _validated_volatile_patterns(raw) -> list:
+    """Parse, CHECK and COMPILE `volatile_patterns`, loudly (corpus-toolkit#66).
+
+    Per-fetch or per-release tokens embedded in a shared template — session ids, CDN
+    tokens, an application footer version — are hashed as content unless they are stripped
+    first. ERF's `oar` group is the measured case: one OARD footer bump (`v2.1.7` ->
+    `v2.1.8`) turned all 484 sources into drift with zero rule text changed.
+
+    Every failure mode here is a SILENT NO-OP if unchecked, which is indistinguishable from
+    the empty-list bug this key exists to fix, so each one fails at LOAD instead:
+
+      * a bare string is truthy AND iterable, so it would be walked CHARACTER BY CHARACTER
+        — each character compiled as its own regex, '(' and '[' raising mid-crawl and the
+        rest matching arbitrary bytes in every source. Same trap as _validated_index_headings.
+      * an invalid regex would otherwise raise inside the fetch loop, per source, after the
+        crawl has already been running for however long it takes to reach the first HTML
+        source — or, worse, be caught and swallowed as a fetch failure.
+      * an EMPTY pattern matches at every position and substitutes nothing: a pattern that
+        is configured and does nothing, which is exactly the reported bug.
+
+    Compiled here, once, rather than per source: this runs against 3,447-source manifests.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raise ValueError(
+            f"volatile_patterns is a string, not a list. Write [{raw!r}] — a bare string is "
+            f"iterated CHARACTER BY CHARACTER, so each character becomes its own regex.")
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"volatile_patterns must be a list of regex strings, got "
+                         f"{type(raw).__name__}")
+    out = []
+    for i, pattern in enumerate(raw):
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ValueError(f"volatile_patterns[{i}]: {pattern!r} must be a non-empty "
+                             f"string. An empty pattern matches everywhere and strips "
+                             f"nothing.")
+        try:
+            # Bytes, not text: normalization runs on the RAW response, before any text
+            # extraction, because that is where a session id or a footer version lives.
+            out.append(re.compile(pattern.encode("utf-8")))
+        except re.error as e:
+            raise ValueError(f"volatile_patterns[{i}]: {pattern!r} is not a valid regex "
+                             f"({e}). Refusing to load — a pattern that cannot compile "
+                             f"would otherwise be a pattern that never strips anything.")
+    return out
+
+
 def load(config_path: str | Path) -> CorpusConfig:
     config_path = Path(config_path).resolve()
     root = config_path.parent.parent
@@ -503,6 +571,7 @@ def load(config_path: str | Path) -> CorpusConfig:
         retrieval_module=plugins.get("retrieval_module"),
         tools_module=plugins.get("tools_module"),
         index_headings=_validated_index_headings(raw.get("index_headings")),
+        volatile_patterns=_validated_volatile_patterns(raw.get("volatile_patterns")),
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
         issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),
