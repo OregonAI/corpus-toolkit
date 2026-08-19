@@ -235,6 +235,55 @@ the hook and registering nothing is likewise an error rather than a no-op.
    as a required string is what broke every corpus at once in v1.24.0 — see
    the note at the end of this convention.
 
+   **The field is the corpus's front door, not a per-answer citation**
+   (corpus-toolkit#70). It answers "where do I start if I want the official
+   text for *this corpus*" — one URL, one corpus, `str | None` and staying
+   that way. It is not an assertion that every document in the corpus lives
+   under that URL, and a response is not wrong for carrying it when the thing
+   the response describes was published somewhere else.
+
+   Per-answer precision is a different field, and it already exists.
+   `get_document` returns the document's own `source_url` in this slot —
+   `FileBackend` puts it on the record, and the corpus URL is the fallback for
+   a record that carries none. So on the built-in document path, where a
+   caller is reading text it intends to verify, the front door is not cited
+   over a document URL that exists. **A corpus supplying its own
+   `plugins.retrieval_module` does not get this for free**: the fallback tests
+   the response slot rather than `source_url`, so a backend that returns a
+   `source_url` and no `authoritative_source` — which the documented backend
+   contract permits — has the front door stamped over it (corpus-toolkit#90).
+
+   What is left carrying the corpus URL is `corpus_overview`,
+   `resolve_citation`, the graph tools, `issuing_body_profile` and the error
+   shapes: responses that name documents rather than reproduce them, and that
+   carry per-hit ids and citations, so the precise source is one
+   `get_document` call away. `search_corpus` carries no envelope at all, by
+   the exemption below, so it never stamps the corpus URL on anything; its
+   hits carry the same per-hit identifiers.
+
+   **So a corpus spanning publishers declares its best single entry point,
+   and that is correct rather than a compromise.**
+   `executive-regulatory-frameworks` is the case that forced the question:
+   measured 2026-08-11, 1,972 sources across 7 hosts — ORS, OAR, executive
+   orders and agency policy, a set for which the state publishes no combined
+   index — and the field left unset on the reading that any one URL would be
+   wrong for most of the corpus. Under the front-door reading it is not
+   wrong, it is coarse, and the alternative it was being weighed against is
+   `null`: an agent told by the same response to "verify at source" and given
+   no place to start. Declare the publisher's own entry point where there is
+   one, and the closest thing to it where there is not.
+
+   Two other shapes were weighed on #70 and rejected. A **list** of URLs
+   changes the envelope's type for every consumer and for #15's declared
+   schema, which types this field as a nullable string; today a list is
+   rejected, though by `config.load()` raising on the value's missing
+   `.strip()` rather than by the validator's URL check, which never gets to
+   run (corpus-toolkit#89). A **per-content-root declaration** is strictly
+   more correct and considerably more work, and the precision it buys is the
+   precision `get_document` already delivers. If a corpus later shows the
+   front-door reading failing it in practice, that is a new issue with the
+   measurement attached.
+
    **`search_corpus` is exempt, deliberately, and stays a bare JSON list.**
    This convention was written as if it applied to every tool; it does not,
    and the exemption is a design decision rather than a gap to close later.

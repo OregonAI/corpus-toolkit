@@ -277,7 +277,12 @@ class CorpusFramework:
 
         `authoritative_source` is None when a corpus has not declared one. Emitting the
         key as null is deliberate: an absent key reads as "the server did not look",
-        a null one as "this corpus declared none", and only the second is true."""
+        a null one as "this corpus declared none", and only the second is true.
+
+        What the value means here is the corpus's FRONT DOOR — where a reader starts for
+        this corpus's official text — and not a citation for whatever this particular
+        response happens to be about (corpus-toolkit#70). `get_document` is the one tool
+        with something more precise to say, and overrides it below."""
         return {"corpus": self.config.id,
                 "archetype": self.config.archetype,
                 "authoritative_source": self.config.authoritative_source}
@@ -724,8 +729,9 @@ class CorpusFramework:
             out["config_warning"] = (
                 "this corpus declares no `corpus.authoritative_source` in "
                 "_meta/corpus.yml, which docs/mcp-interface-contract.md response "
-                "convention 1 requires on every response — set it to the URL where the "
-                "official text lives")
+                "convention 1 requires on every response — set it to this corpus's "
+                "front door, the one page a reader opens to reach its official text; "
+                "it need not cover every publisher this corpus draws on")
         return out
 
     # ---------- document-corpus extension: issuing-body profile ----------

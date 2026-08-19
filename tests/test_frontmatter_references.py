@@ -168,6 +168,32 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
         self.assertIn("warning", out)
         self.assertIn("corpus.authoritative_source is not set", out)
 
+    def test_the_warning_says_what_to_write_and_that_one_url_is_enough(self):
+        """corpus-toolkit#70. The wording IS the fix here — this message is where most
+        corpora meet the field — so it is asserted rather than left to review, and the
+        assertion covers ACTIONABILITY rather than vocabulary. Pinning the phrase "front
+        door" alone passes on a message that names the concept and leaves the reader with
+        nothing to do: the four things that have to survive a rewrite are the key to set,
+        an instruction to set it, the fact that one entry point suffices for a corpus
+        spanning several publishers, and the pointer to where per-document precision
+        actually comes from. The superseded text — "set it to the URL where the official
+        text lives" — was actionable and asserted the one thing that is not true."""
+        self.write_corpus()
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 0, out)
+        for fragment, guards in (("corpus.authoritative_source is not set", "which key"),
+                                 ("Set it to", "an instruction to act"),
+                                 ("front door", "what the value means"),
+                                 ("need not cover every publisher", "one URL is enough"),
+                                 ("get_document", "where precision comes from"),
+                                 ("source_url", "and the field it comes from")):
+            self.assertIn(fragment, out,
+                          f"the unset warning no longer carries {fragment!r} ({guards}), "
+                          f"so a corpus reading it cannot act on it:\n{out}")
+
     def test_a_non_url_authoritative_source_is_an_error(self):
         """Convention 1 says the field IS a URL, so a caller will try to follow it —
         a plausible-looking non-URL is worse than the omission."""

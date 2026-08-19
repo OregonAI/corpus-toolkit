@@ -250,13 +250,26 @@ def _check_config(config, r):
     `_meta/corpus.yml`:
 
         authoritative_source: "https://www.oregonlegislature.gov/bills_laws/Pages/ORS.aspx"
+
+    The message says FRONT DOOR rather than "the URL where the official text lives", and the
+    difference is not cosmetic: the second phrasing reads as a promise that every document in
+    the corpus sits under that URL, which for a corpus spanning several publishers is false.
+    `executive-regulatory-frameworks` has never carried the key, and corpus-toolkit#70's
+    triage attributes that to exactly this problem — no single URL it could name without
+    being wrong about most of its sources (measurement dated on the contract page, so it is
+    not restated here to go stale). The field is per-corpus and coarse by design;
+    `get_document` answers per document from that document's own `source_url`
+    (corpus-toolkit#70, and the contract's response convention 1).
     """
     rel = config.config_path.relative_to(config.root)
     if not config.authoritative_source:
         r.warn(rel, "corpus.authoritative_source is not set — MCP responses will carry "
                     "`authoritative_source: null`, so an agent is told to verify at "
-                    "source without being told where the source is (response "
-                    "convention 1). Set it to the URL where the official text lives.")
+                    "source without being told where to start (response convention 1). "
+                    "Set it to this corpus's front door: the one page a reader opens to "
+                    "reach its official text. It need not cover every publisher — a "
+                    "corpus spanning several declares its best single entry point, and "
+                    "get_document answers per document from that document's source_url.")
     elif not str(config.authoritative_source).startswith(("http://", "https://")):
         # A non-URL here is worse than nothing: convention 1 says the field IS a URL, so a
         # caller will try to follow it.

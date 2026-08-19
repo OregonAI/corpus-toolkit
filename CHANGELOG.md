@@ -33,6 +33,34 @@ it is the kind of thing an upstream does without telling you, and the contact UR
 during change detection — is **unchanged**. It is the token matched against robots.txt
 directives, so a host's `Disallow` naming it keeps matching exactly as before.
 
+### Documentation — `authoritative_source` is the corpus's front door
+
+**Nothing mechanical changes and no bump is required for this.** The type stays
+`str | None`, no response shape moves, and no validation is added or tightened. What
+changes is what the field *means*, which had never been written down.
+
+Response convention 1 in `docs/mcp-interface-contract.md` now states it: the corpus-level
+`authoritative_source` names where a reader starts for **this corpus's** official text —
+one URL, per corpus — and is not a citation for whatever the response carrying it happens
+to describe. Per-answer precision already exists and comes from `get_document`, which
+returns the document's own `source_url` in that slot and falls back to the corpus URL only
+for a document carrying none.
+
+**What this asks of a corpus**: one spanning several publishers declares its best single
+entry point rather than leaving the field unset, and that is correct rather than a
+compromise. `executive-regulatory-frameworks` — 1,972 sources across 7 hosts, measured
+2026-08-11 — was the one holdout with a *reason*, and this removes it. It is not the last
+holdout: `oregon-budget` and `oregon-legislature` are also undeclared, and corpus-toolkit#11
+still needs all three before its precondition is met. Neither of those two needed this
+settled; each has one dominant host.
+
+The message a corpus sees while the field is unset is reworded to match, in both places it
+appears: `corpus-validate-frontmatter`'s warning and `corpus_overview`'s `config_warning`.
+Both used to say "set it to the URL where the official text lives", which reads as a
+promise that every document sits under that URL — the reading that kept a seven-publisher
+corpus from declaring anything at all. A corpus asserting on either string in its own CI
+should expect it to have changed. (corpus-toolkit#70)
+
 ## v1.25.0 — 2026-08-11
 
 ### One behaviour change on the serve path, then fixes
