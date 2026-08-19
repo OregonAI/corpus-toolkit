@@ -626,6 +626,29 @@ MOUNTED corpus rebuilds out of band in `deploy_mounted()`, stopping the service 
 without the rebuild forces a 70s rebuild inside the container on the first request. After
 deploying, check the document count — `deploy.sh` aborts below `MIN_DOCS`.
 
+> **CORRECTION (corpus-toolkit#114): `--rebuild-image` is not needed, and does nothing
+> today.** The flag is guarded on a corpus being MOUNTED, and `platform-deploy` mounts none
+> — `deploy.sh` declares an empty mounted set and prints a notice if you pass it anyway.
+> Because nothing is mounted, an ordinary `deploy.sh <corpus> <ref>` builds the image every
+> time, so the index is re-baked as a matter of course.
+>
+> Measured on the v1.27.0 pin wave: ERF's image was rebuilt by the ordinary
+> reconcile-triggered deploy with no flag passed, and the corpus answered on the new commit
+> with all 75,905 documents.
+>
+> **The `MIN_DOCS` sentence above has the same defect.** `deploy.sh`'s document-count abort
+> lives inside `deploy_mounted()`, and its own comment calls it "the replacement for the
+> build-time content gate" — it exists *because* a mounted corpus has no Dockerfile bake to
+> guard it. A BAKED corpus gets no post-deploy count check; its guard is the Dockerfile's
+> build-time `RUN … ensure_index()`, which fails the image build instead. So the safety net
+> is real but it is a different one, and checking the count after deploying is still worth
+> doing by hand.
+>
+> **What remains true:** an FTS schema bump does require a rebuild, and for a baked corpus
+> that rebuild happens at image build. Both the flag and the `MIN_DOCS` abort become live
+> again the day a corpus is mounted, which is why this is a correction rather than a
+> deletion.
+
 **Nothing else is required.** No corpus declares `issuing_body_slug_field` today, so nothing
 on the platform changes until one adopts the two keys below.
 
@@ -677,6 +700,29 @@ in `deploy_mounted()`, which stops the service for roughly 8 minutes while it wa
 plain local run rebuilds silently on first use. After deploying, check the document count:
 `deploy.sh` aborts below `MIN_DOCS`, and that abort is the thing standing between you and an
 empty index served green.
+
+> **CORRECTION (corpus-toolkit#114): `--rebuild-image` is not needed, and does nothing
+> today.** The flag is guarded on a corpus being MOUNTED, and `platform-deploy` mounts none
+> — `deploy.sh` declares an empty mounted set and prints a notice if you pass it anyway.
+> Because nothing is mounted, an ordinary `deploy.sh <corpus> <ref>` builds the image every
+> time, so the index is re-baked as a matter of course.
+>
+> Measured on the v1.27.0 pin wave: ERF's image was rebuilt by the ordinary
+> reconcile-triggered deploy with no flag passed, and the corpus answered on the new commit
+> with all 75,905 documents.
+>
+> **The `MIN_DOCS` sentence above has the same defect.** `deploy.sh`'s document-count abort
+> lives inside `deploy_mounted()`, and its own comment calls it "the replacement for the
+> build-time content gate" — it exists *because* a mounted corpus has no Dockerfile bake to
+> guard it. A BAKED corpus gets no post-deploy count check; its guard is the Dockerfile's
+> build-time `RUN … ensure_index()`, which fails the image build instead. So the safety net
+> is real but it is a different one, and checking the count after deploying is still worth
+> doing by hand.
+>
+> **What remains true:** an FTS schema bump does require a rebuild, and for a baked corpus
+> that rebuild happens at image build. Both the flag and the `MIN_DOCS` abort become live
+> again the day a corpus is mounted, which is why this is a correction rather than a
+> deletion.
 
 **Nothing else is required, and a corpus that changes nothing keeps its current counts.**
 
