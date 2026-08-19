@@ -17,6 +17,39 @@ it can break you.
 
 ## Unreleased
 
+Nothing yet.
+
+## v1.26.0 — 2026-08-19
+
+### Every corpus rebuilds its FTS index on this bump — plan the rollout
+
+`SCHEMA_VERSION` goes 2 to 3, so the cached index is discarded and rebuilt. **This is not
+the usual pin bump.** What it costs depends on how your corpus ships:
+
+| | |
+|---|---|
+| baked image (e.g. ERF) | the rebuild happens at **image build** — `deploy.sh <corpus> main --rebuild-image`, ~70s on 76k documents |
+| mounted corpus | a stop-warm-start, **~8 minutes** |
+| local checkout / CLI | rebuilt silently on the next command |
+
+A pin bump alone is **inert** for a baked corpus: `requirements.txt` is baked into the
+image, so merging the bump changes nothing until the image is rebuilt. `deploy.sh`'s own
+help has said `--rebuild-image` is "needed after any toolkit release that changes the FTS
+cache schema" — this is such a release, and until now that flag appeared nowhere in the
+toolkit's docs.
+
+Rebuilding under live traffic is unlocked and uses a fixed temp filename, so a concurrent
+warm and a live rebuild collide (`disk I/O error`). Rebuild deliberately rather than
+letting the first request do it.
+
+### One REQUIRED action, for any corpus whose manifest has empty `sha256` values
+
+`corpus-detect-changes` now exits **1** rather than 0 on a run that recorded no baseline or
+checked nothing. A corpus that has never seeded its baselines goes red on its next
+scheduled run. That is the point — it was reporting 100% drift as a clean result — and the
+remedy is one command, `corpus-detect-changes --record-baseline`, reviewed as a PR. See
+MIGRATION.md.
+
 ### Changed — an outbound User-Agent string
 
 The sibling-index fetcher identifies itself as `corpus-toolkit/<installed version>` instead

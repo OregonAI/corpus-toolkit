@@ -446,7 +446,7 @@ If your corpus supplies its own `plugins.retrieval_module`, it keeps working unt
 `holdings_for` is optional. Implement it if you want that backend to serve
 `issuing_body_profile`, which before this release it could not do at any price.
 
-### Unreleased — REQUIRED action if your manifest has empty `sha256` values
+### v1.26.0 — REQUIRED action if your manifest has empty `sha256` values
 
 Two exit codes change in `corpus-detect-changes`, and a corpus whose baselines were never
 recorded will go **red** on its next scheduled run instead of green. That is the point: it
@@ -524,7 +524,7 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
-### Unreleased — `issuing_body_profile`'s counts, and one optional declaration
+### v1.26.0 — `issuing_body_profile`'s counts, and one optional declaration
 
 **Every corpus rebuilds its FTS cache once.** The index schema version goes to 3 because
 `issuing_body_slug` now holds a resolved slug rather than a path-derived one — same column,
