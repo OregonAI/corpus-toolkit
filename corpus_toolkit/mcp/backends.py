@@ -74,7 +74,14 @@ BIG_DOC_BYTES = 50 * 1024
 # is not wrong-shaped but wrong-valued: it would keep serving the 97% under-count of
 # corpus-toolkit#71 until something else happened to invalidate it. Bumping forces the
 # rebuild that makes the fix take effect.
-SCHEMA_VERSION = 3
+# 4: same column, different values again (corpus-toolkit#94). A corpus declaring
+# `plugins.issuing_body_slug_sentinels` now resolves a sentinel-carrying document to the
+# sentinel rather than falling through to its directory's slug, so a document under
+# `agencies/<slug>/` declaring `agency: statewide` moves from `<slug>` to `statewide`. An
+# index built by older code is not wrong-shaped but wrong-valued, and would keep attributing
+# those documents to a body the corpus says they do not belong to. A corpus that declares no
+# sentinels indexes identically to 3 — the bump costs it one rebuild and changes nothing.
+SCHEMA_VERSION = 4
 
 # What FTS5's own tokenizer would treat as a word, near enough for locating matches. Kept
 # identical to the pattern the query side uses so a term that can MATCH can also be found
@@ -271,6 +278,7 @@ class RetrievalBackend(Protocol):
             {"counts":   {content_mode: count},   # what is held for this slug
              "coverage": {"documents": int,       # documents in the corpus
                           "in_registry": int,     # ...whose slug names a registry entry
+                          "declared_no_body": int,    # ...carrying a declared sentinel
                           "no_registry_entry": int,   # ...whose slug names nothing there
                           "unattributed": int,    # ...carrying no slug at all
                           "basis": str}}          # how attribution was derived
@@ -282,11 +290,21 @@ class RetrievalBackend(Protocol):
         other two buckets are counted for NO body, and when either is non-zero every
         per-body count is a lower bound.
 
-        THREE BUCKETS BECAUSE "HAS A SLUG" IS NOT "IS COUNTED SOMEWHERE". On ERF 37,992
-        documents carry a value the registry does not contain — deliberate sentinels
-        (`statewide`) and typos (nothing checks: corpus-toolkit#94) are indistinguishable
-        from here — and reporting those as attributed would rebuild the same confident
-        wrong number this method exists to stop serving.
+        FOUR BUCKETS BECAUSE "HAS A SLUG" IS NOT "IS COUNTED SOMEWHERE", AND "COUNTED FOR
+        NOBODY" IS NOT "UNEXPLAINED". On ERF 37,992 documents carry a value the registry
+        does not contain: 37,991 deliberate `statewide` and one typo. Reporting those as
+        attributed would rebuild the confident wrong number this method exists to stop
+        serving; reporting them all as unexplained told a corpus that had done everything
+        right that its counts were lower bounds forever. So a corpus declares which values
+        mean "attributed to no body" (`plugins.issuing_body_slug_sentinels`) and those land
+        in `declared_no_body` — resolved, not a gap (corpus-toolkit#94).
+
+        `declared_no_body` IS REQUIRED ONLY OF A BACKEND WHOSE CORPUS DECLARES SENTINELS.
+        A backend that omits it there has classified every sentinel document as
+        `no_registry_entry`, so its split is not incomplete but WRONG, and
+        `CorpusFramework._holdings` reports coverage as unknown rather than reading it as a
+        measurement. Where no sentinels are declared the key may be omitted and is taken as
+        zero, so a three-bucket backend keeps working unchanged.
 
         REPORT ONLY WHAT YOU MEASURED. A backend that cannot classify against a registry
         omits the three counts (keeping `documents`/`basis`), and one that returns a bare
@@ -757,19 +775,23 @@ class FileBackend:
         1,876 are OAR rules, filed under a chapter-organised root because a rule belongs to
         its chapter, not to an agency folder (corpus-toolkit#71).
 
-        COVERAGE IS THREE BUCKETS, NOT A BOOLEAN. "Has a non-empty slug" is not the same
+        COVERAGE IS FOUR BUCKETS, NOT A BOOLEAN. "Has a non-empty slug" is not the same
         question as "is counted for some body in the registry", and answering the first as
         though it were the second reproduces #71 one level up: on ERF, 37,992 documents
         (50.05%) carry a value the registry does not contain — 37,991 deliberate
         `statewide` plus one `external` — and a two-bucket measure would call that corpus
-        fully attributed. So:
+        fully attributed. But collapsing the deliberate ones into "unexplained" is the
+        opposite error, and told a correct corpus its counts were floors forever. So:
 
             in_registry        the value names a registry entry; counted for that body
-            no_registry_entry  it names something else — a deliberate sentinel, or a typo
-                               nothing checks (corpus-toolkit#94). Counted for NO body.
-            unattributed       no value at all. Counted for no body.
+            declared_no_body   the value is one this corpus declared in
+                               `plugins.issuing_body_slug_sentinels`: attributed to no body
+                               ON PURPOSE. RESOLVED, not a gap (corpus-toolkit#94)
+            no_registry_entry  it names something else, undeclared — a typo, or a
+                               deliberate value nobody has declared yet. Counted for NO body
+            unattributed       no value at all. Counted for no body
 
-        The last two are why a per-body count can be a lower bound, and the tool says so.
+        The LAST TWO are why a per-body count can be a lower bound, and the tool says so.
         With no registry to read, `in_registry` is unanswerable, so the buckets are OMITTED
         rather than guessed and the tool reports coverage as unknown.
         """
@@ -778,10 +800,24 @@ class FileBackend:
             "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body_slug = ? "
             "GROUP BY content_mode", (slug,)).fetchall())
         field = self.config.issuing_body_slug_field
-        basis = (f"frontmatter `{field}` where it names a registry entry, else "
-                 "path-derived scope slug" if field
-                 else "path-derived scope slug only (no plugins.issuing_body_slug_field "
-                      "declared)")
+        # SERVED VERBATIM TO CALLERS as "how attribution was derived", so it has to match
+        # what `config.registry_slug_for` actually does. It claimed "else path-derived scope
+        # slug" unconditionally, which is wrong for a sentinel: those never fall back to the
+        # directory, and on ERF that would misdescribe 37,991 documents — telling a caller
+        # an `agency: statewide` document under `agencies/water-department/` was attributed
+        # by its directory, which is the re-attribution the sentinel rule exists to prevent.
+        sentinels = self.config.issuing_body_slug_sentinels
+        if not field:
+            basis = ("path-derived scope slug only (no plugins.issuing_body_slug_field "
+                     "declared)")
+        elif sentinels:
+            basis = (f"frontmatter `{field}`: a declared sentinel "
+                     f"({', '.join(sorted(sentinels))}) means no issuing body and is taken "
+                     f"as-is; otherwise the value where it names a registry entry, else the "
+                     f"path-derived scope slug")
+        else:
+            basis = (f"frontmatter `{field}` where it names a registry entry, else "
+                     "path-derived scope slug")
         # One grouped scan, classified in Python: a corpus has O(hundreds) of distinct
         # slugs, and the registry is a Python set rather than a table to join against.
         rows = con.execute(
@@ -791,9 +827,12 @@ class FileBackend:
         known = self.config.issuing_body_slugs
         if known is None:
             return {"counts": counts, "coverage": {"documents": total, "basis": basis}}
-        buckets = {"in_registry": 0, "no_registry_entry": 0, "unattributed": 0}
+        sentinels = self.config.issuing_body_slug_sentinels
+        buckets = {"in_registry": 0, "declared_no_body": 0,
+                   "no_registry_entry": 0, "unattributed": 0}
         for value, n in rows:
             key = ("unattributed" if not value
+                   else "declared_no_body" if value in sentinels
                    else "in_registry" if value in known else "no_registry_entry")
             buckets[key] += n
         return {"counts": counts,

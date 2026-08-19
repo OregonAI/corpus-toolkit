@@ -42,6 +42,51 @@ backend is narrower than before, not gone.
 Closes corpus-toolkit#102 and #104. A third site of the same class, where the mapping comes
 from graph data rather than a backend, is corpus-toolkit#105 and is not fixed here.
 
+### Added — a corpus can declare which slug values mean "no issuing body"
+
+**Every corpus rebuilds its FTS index once on this bump** (`SCHEMA_VERSION` 3 → 4). A corpus
+declaring no sentinels indexes identically to before and pays only the rebuild. **A custom
+backend implementing `holdings_for` needs a fourth coverage bucket, `declared_no_body`, only
+if its corpus declares sentinels** — without it that backend has counted every sentinel
+document as `no_registry_entry`, so it degrades to `complete: null` rather than reporting a
+wrong answer. Three-bucket backends serving corpora with no sentinels are unaffected. Note
+the coverage key `declared_no_body` is what a backend emits; the response field callers read
+is `documents_declared_no_issuing_body`.
+
+`plugins.issuing_body_slug_field` let a corpus name the frontmatter key carrying its registry
+slug, but nothing checked the values and nothing let a corpus say which non-registry values
+were deliberate. So a misspelling attributed a document to a body that does not exist and
+reached no per-agency count silently, while ERF's 37,991 `agency: statewide` documents — 
+correct, and carrying no agency by design — were indistinguishable from misspellings. That
+made `attribution.complete` report `false` permanently, for a reason that was 99.997%
+legitimate, which is the fastest way to teach callers to ignore the field.
+
+```yaml
+plugins:
+  issuing_body_slug_field: "agency"
+  issuing_body_slug_sentinels: ["statewide"]   # values meaning "attributed to no body"
+```
+
+Sentinels get their **own** coverage bucket (`documents_declared_no_issuing_body`) and are
+never folded into the registry-matched count: "counted for a registry body" and "deliberately
+counted for no body" are different answers, and `CONTEXT.md` forbids collapsing two distinct
+answers. A corpus where every document either names a registry entry or carries a declared
+sentinel now reports `complete: true`.
+
+The declaration is only safe because the values are now **validated**:
+`corpus-validate-frontmatter` errors when a declared slug is neither a registry entry nor a
+declared sentinel — the check the path-derived half of the same join has always had. Without
+it, the sentinel list would be a way to silence the coverage warning rather than answer it.
+
+A sentinel also stops falling through to the path-derived slug. It is the corpus positively
+asserting "no body", so re-attributing such a document by its directory contradicts the
+corpus about its own document — that is the value change behind the `SCHEMA_VERSION` bump.
+The fallback for a genuine **typo** is unchanged: an unchecked value still never displaces
+the CI-validated path slug.
+
+Closes corpus-toolkit#94. No corpus declares `issuing_body_slug_field` yet, so nothing
+changes on the platform until one adopts both keys.
+
 ### Fixed — `corpus.*` string fields are type-checked at load
 
 **Can break you if your `corpus.yml` has one of these wrong** — and if it does, it is

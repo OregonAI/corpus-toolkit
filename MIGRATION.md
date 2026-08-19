@@ -524,6 +524,56 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
+### Unreleased — declarable issuing-body sentinels (corpus-toolkit#94)
+
+**Every corpus rebuilds its FTS cache once.** The index schema version goes to 4 for exactly
+the reason it went to 3: same column, different values, which no content-key check can
+notice. A corpus that declares no sentinels indexes identically and pays only the rebuild.
+
+**Rebuild it deliberately — the operational note from the 3 bump applies unchanged.** A
+corpus that BAKES its index into the image (ERF's Dockerfile pre-builds it, ~70s at 76k
+documents) needs a fresh image: `./scripts/deploy.sh <corpus> <ref> --rebuild-image`. A
+MOUNTED corpus rebuilds out of band in `deploy_mounted()`, stopping the service for roughly
+8 minutes while it warms. Only a plain local run rebuilds silently on first use. Deploying
+without the rebuild forces a 70s rebuild inside the container on the first request. After
+deploying, check the document count — `deploy.sh` aborts below `MIN_DOCS`.
+
+**Nothing else is required.** No corpus declares `issuing_body_slug_field` today, so nothing
+on the platform changes until one adopts the two keys below.
+
+**If some of your slug values deliberately mean "no issuing body", declare them:**
+
+```yaml
+plugins:
+  issuing_body_slug_field: "agency"
+  issuing_body_slug_sentinels: ["statewide"]   # NEW: values meaning "attributed to no body"
+```
+
+Two things change for that corpus, and the second is the one to plan for.
+
+`attribution.complete` can finally be `true`. ERF's 37,991 `agency: statewide` documents were
+indistinguishable from typos, so every per-agency count was labelled a lower bound
+permanently, for a reason that was 99.997% legitimate.
+
+**Declared values are now VALIDATED, and that is the half that can fail your CI.**
+`corpus-validate-frontmatter` errors when a declared slug is neither a registry entry nor a
+declared sentinel — the check the path-derived half of this join has always had. Run it
+locally before you adopt the declaration: the errors are the point, but you want them on
+your terms rather than in the middle of a pin bump. ERF's single `external` document is
+exactly this case and needs a decision — sentinel, or a data fix.
+
+**A sentinel no longer falls back to the path-derived slug.** It is the corpus asserting "no
+body", so re-attributing such a document by its directory would contradict the corpus. This
+is the value change behind the schema bump. The fallback for a genuine **typo** is
+unchanged — an unchecked value still never displaces the CI-validated path slug.
+
+**If you supply `plugins.retrieval_module` and implement `holdings_for`**, add the
+`declared_no_body` count to your `coverage` mapping *if your corpus declares sentinels*.
+Without it, your backend has classified every sentinel document as `no_registry_entry` — its
+split is wrong rather than merely incomplete — and the toolkit reports coverage as unknown
+instead of serving a `complete: false` you would have to disbelieve. A backend serving a
+corpus with no sentinels needs no change.
+
 ### v1.26.0 — `issuing_body_profile`'s counts, and one optional declaration
 
 **Every corpus rebuilds its FTS cache once.** The index schema version goes to 3 because

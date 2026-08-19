@@ -117,6 +117,18 @@ class CorpusConfig:
     # None = this corpus attributes documents by directory only, and the path-derived
     # scope slug is the whole answer. See `registry_slug_for` for which wins and why.
     issuing_body_slug_field: str | None
+    # Values of `issuing_body_slug_field` that mean "attributed to NO body, deliberately" —
+    # ERF's `agency: statewide`, 37,991 documents that carry no agency by design. Empty
+    # frozenset for a corpus that declares none, which then behaves exactly as before.
+    #
+    # A sentinel is a positive assertion, not a gap. Without this the toolkit could not tell
+    # a deliberate `statewide` from a misspelling, so a corpus that had done everything right
+    # was told its per-agency counts were lower bounds — permanently, for a reason that was
+    # 99.997% legitimate (corpus-toolkit#94). They get their OWN coverage bucket rather than
+    # being folded into `in_registry`: "counted for a registry body" and "deliberately
+    # counted for no body" are different answers, and CONTEXT.md forbids collapsing two
+    # distinct answers into one.
+    issuing_body_slug_sentinels: frozenset[str]
     extra_schema_checks: list[dict]
     mcp_server_name: str
     mcp_transports: list[str]
@@ -197,9 +209,8 @@ class CorpusConfig:
         """
         if not self.issuing_body_registry or not self.issuing_body_registry.is_file():
             return None
-        data = yaml.safe_load(self.issuing_body_registry.read_text()) or {}
-        return frozenset(e["slug"] for e in data.get(self.issuing_body_registry_key, [])
-                         if isinstance(e, dict) and e.get("slug"))
+        return _parse_registry_slugs(self.issuing_body_registry,
+                                     self.issuing_body_registry_key)
 
     def registry_slug_for(self, frontmatter: dict, rel_parts: tuple[str, ...]) -> str | None:
         """The issuing-body slug this document is attributed to, or None if it carries no
@@ -245,6 +256,21 @@ class CorpusConfig:
         declared = ""
         if self.issuing_body_slug_field:
             declared = str(frontmatter.get(self.issuing_body_slug_field) or "").strip()
+        # RULE 0: A DECLARED SENTINEL WINS OUTRIGHT AND DOES NOT FALL THROUGH.
+        #
+        # It sits above the registry check because it is not a slug at all — it is the
+        # corpus positively asserting "this document is attributed to NO body"
+        # (corpus-toolkit#94). The rules below exist to stop an UNCHECKED value displacing
+        # a CHECKED one, which is right for a typo and wrong here: falling through would
+        # re-attribute a sentinel document by directory, contradicting the corpus about its
+        # own document. A sentinel is declared in config and validated at load, so it is not
+        # the unchecked input those rules guard against.
+        #
+        # This is what changes indexed values for an existing corpus that adopts sentinels,
+        # and why SCHEMA_VERSION moved to 4: a sentinel document under a scoped root used to
+        # resolve to its directory's slug and now resolves to the sentinel.
+        if declared and declared in self.issuing_body_slug_sentinels:
+            return declared
         known = self.issuing_body_slugs
         if declared and (known is None or declared in known):
             return declared
@@ -384,6 +410,105 @@ def _validated_corpus_string(raw, field: str, *, default=None):
             break
     raise ValueError(f"corpus.{field}: {value!r} is a {type(value).__name__}, "
                      f"not a string.{hint}")
+
+
+# Distinguishes "key absent" from "key present with a null value" — see
+# _validated_slug_sentinels, and the `corpus:` block check for the same distinction.
+_ABSENT = object()
+
+
+def _registry_slugs_at_load(registry_path, key: str):
+    """The registry's slugs during `load()`, or None when there is no registry to read.
+
+    `CorpusConfig.issuing_body_slugs` answers the same question but is a cached_property on
+    the config being constructed, so it is unavailable here. Reads through the same key and
+    the same shape; the sentinel/registry clash check is the only caller, and a registry
+    that cannot be read yields None, which that check treats as "unknown" and skips rather
+    than as "no slugs" — a missing registry file must not turn every sentinel into a
+    spurious clash-free pass OR a spurious error.
+    """
+    if not registry_path or not Path(registry_path).is_file():
+        return None
+    try:
+        return _parse_registry_slugs(Path(registry_path), key)
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def _parse_registry_slugs(path: Path, key: str) -> frozenset[str]:
+    """THE one registry parser. `CorpusConfig.issuing_body_slugs` and the load-time clash
+    check both go through it.
+
+    Its docstring warns that "two parsers disagreeing about which slugs exist is the kind of
+    drift that shows up as a count instead of an error", and the load-time check was briefly
+    a second one that differed in two ways — admitting `slug: null` into the set, and
+    treating a null entry list differently. Sharing the function is the only way that
+    warning stays true.
+    """
+    data = yaml.safe_load(path.read_text()) or {}
+    return frozenset(e["slug"] for e in (data.get(key) or [])
+                     if isinstance(e, dict) and e.get("slug"))
+
+
+def _validated_slug_sentinels(raw, *, field: str | None, registry_slugs) -> frozenset[str]:
+    """Parse and CHECK `plugins.issuing_body_slug_sentinels`, loudly.
+
+    Every failure here is silent if unchecked, and each produces a corpus that misreports
+    its own coverage while looking healthy — which is the defect this feature exists to fix,
+    so shipping a way to *silence* the warning rather than answer it would be worse than
+    shipping nothing (corpus-toolkit#94).
+
+      * declared without `issuing_body_slug_field`: there is no field for them to apply to,
+        so the declaration cannot mean anything. A corpus author who wrote it believes those
+        documents are attributed, and would read the resulting coverage as a measurement
+        rather than as their declaration being dropped.
+      * a bare string instead of a list: `sentinels: statewide` would otherwise iterate as
+        the characters of the word.
+      * an EMPTY list: declares nothing while looking like it declares something.
+      * a value the REGISTRY also contains: that value would mean both "this body" and "no
+        body" at once, and the two mechanisms would disagree about the same document
+        silently — exactly the class of contradiction `registry_slug_for`'s precedence
+        exists to prevent.
+    """
+    if raw is _ABSENT:
+        return frozenset()
+    # `issuing_body_slug_sentinels:` with nothing under it is PRESENT-BUT-EMPTY, not absent —
+    # the same distinction the `corpus:` block check draws. Returning early on None let a
+    # corpus author who commented out their only entry hit exactly the failure the
+    # empty-list branch below calls out, silently: the key looks declared, declares nothing,
+    # and its documents fall back into `no_registry_entry`.
+    if raw is None:
+        raise ValueError(
+            "plugins.issuing_body_slug_sentinels is declared with no value, which declares "
+            "nothing. Remove the key, or list the values that mean 'attributed to no body'.")
+    if not field:
+        raise ValueError(
+            "plugins.issuing_body_slug_sentinels is declared but "
+            "plugins.issuing_body_slug_field is not, so there is no frontmatter key for "
+            "the sentinels to apply to. Declare the field, or remove the sentinels.")
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            f"plugins.issuing_body_slug_sentinels must be a list of strings, got "
+            f"{type(raw).__name__}: {raw!r}")
+    if not raw:
+        raise ValueError(
+            "plugins.issuing_body_slug_sentinels is an empty list, which declares nothing. "
+            "Remove the key, or list the values that mean 'attributed to no body'.")
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"plugins.issuing_body_slug_sentinels: every entry must be a non-empty "
+                f"string, got {entry!r}")
+    sentinels = frozenset(e.strip() for e in raw)
+    if registry_slugs is not None:
+        clash = sorted(sentinels & registry_slugs)
+        if clash:
+            raise ValueError(
+                f"plugins.issuing_body_slug_sentinels: {', '.join(clash)} also name(s) an "
+                f"entry in the issuing-body registry, so the value would mean both 'this "
+                f"body' and 'no body'. A sentinel must be a value the registry does not "
+                f"contain.")
+    return sentinels
 
 
 def _validated_archetype(raw) -> str:
@@ -598,6 +723,13 @@ def load(config_path: str | Path) -> CorpusConfig:
         for cr in raw.get("content_roots", []) or []
     ]
     plugins = raw.get("plugins", {}) or {}
+    # Routed through the same validated-string path as the `corpus.*` fields (the preceding
+    # commit in this stack): `issuing_body_slug_field: [agency]` used to raise a bare
+    # `AttributeError: 'list' object has no attribute 'strip'` naming no config key, which
+    # is the defect class that commit eliminated one level up.
+    _slug_field = (_validated_corpus_string(
+        plugins.get("issuing_body_slug_field"), "plugins.issuing_body_slug_field",
+        default="") or "").strip() or None
     mcp = raw.get("mcp", {}) or {}
     status = raw.get("status", {}) or {}
     provenance = raw.get("provenance", {}) or {}
@@ -642,7 +774,13 @@ def load(config_path: str | Path) -> CorpusConfig:
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
         issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),
-        issuing_body_slug_field=(plugins.get("issuing_body_slug_field") or "").strip() or None,
+        issuing_body_slug_field=_slug_field,
+        issuing_body_slug_sentinels=_validated_slug_sentinels(
+            plugins.get("issuing_body_slug_sentinels", _ABSENT),
+            field=_slug_field,
+            registry_slugs=_registry_slugs_at_load(
+                _resolve(root, plugins.get("issuing_body_registry")),
+                plugins.get("issuing_body_registry_key", "entries"))),
         extra_schema_checks=plugins.get("extra_schema_checks", []) or [],
         mcp_server_name=mcp.get("server_name") or corpus_id or "corpus",
         mcp_transports=mcp.get("transports", ["stdio", "http"]),
