@@ -320,6 +320,50 @@ class CorpusFramework:
 
     # ---------- graph ----------
 
+    def with_envelope(self, payload: dict) -> dict:
+        """`payload` plus response convention 1's three fields, WITH THE ENVELOPE WINNING.
+
+        The supported way an extension tool registered through `plugins.tools_module`
+        satisfies the convention (corpus-toolkit#96):
+
+            @mcp.tool()
+            def list_datasets() -> ResponseEnvelope:
+                return framework.with_envelope({"datasets": [...]})
+
+        A MERGE RATHER THAN A GETTER, because precedence is not each corpus's to remember.
+        The first version of this shipped a getter and documented
+        `{**framework.response_envelope(), **payload}` — envelope FIRST, payload last —
+        which is precisely the class corpus-toolkit#102/#104 eliminated, reinstated across
+        a repo boundary where it is harder to see. Every built-in puts the assembled front
+        LAST for that reason: `get_document`'s not-found branch, `corpus_overview`,
+        `resolve_citation`. Blessing the opposite for corpora would have made the toolkit
+        enforce on itself a rule it told everyone else to invert.
+
+        It is not hypothetical. A `join_lookup` relating this corpus to a sibling has
+        `corpus` as its natural key, and oregon-budget ships one: measured, such a payload
+        served `corpus: "oregon-legislature"` from a corpus whose id was something else —
+        #38 reopened from the extension side — and a list-valued `corpus` stopped the tool
+        answering at all.
+
+        A corpus that genuinely needs to name another corpus in its payload should use a
+        key that is not one of the three; `corpus` means "who is answering", and that is
+        never the extension tool's to decide.
+
+        Annotating a tool `-> ResponseEnvelope` WITHOUT going through this is a hard tool
+        error, not a weaker response: the three fields are required with no defaults. The
+        annotation and the payload change together.
+        """
+        return {**payload, **self._envelope()}
+
+    def response_envelope(self) -> dict:
+        """Response convention 1's three fields, as a copy, for READING.
+
+        Use `with_envelope` to build a response — it merges in the correct direction.
+        Spreading this into a payload yourself risks the payload displacing the envelope,
+        which is the failure described there.
+        """
+        return dict(self._envelope())
+
     def _envelope(self) -> dict:
         """The three fields docs/mcp-interface-contract.md, response convention 1,
         requires on every response. Assembled in ONE place because it kept being

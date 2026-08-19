@@ -385,6 +385,10 @@ def check_result_marshalling(dest: Path) -> None:
         ("graph_neighbors", {"doc_id": DOC_ID}),
         ("authority_chain", {"doc_id": DOC_ID}),
         ("list_datasets", {}),
+        # The CONFORMING extension tool (corpus-toolkit#96). Registering it without adding
+        # it here is what this step's own uncovered-tool check caught during development —
+        # which is the check doing its job, and the reason it exists.
+        ("join_lookup", {"document_id": DOC_ID}),
     ]
     uncovered = sorted(set(tools) - {name for name, _ in calls})
     if uncovered:
@@ -473,12 +477,17 @@ def check_result_marshalling(dest: Path) -> None:
         # gate builds a REAL corpus from corpus-template and reads the schemas the SDK
         # actually emitted, which is the artifact a client consumes.
         #
-        # Keyed on the schema HAVING properties at all: the built-ins declare
-        # `ResponseEnvelope` and so name them, while an extension tool annotated
-        # `dict[str, Any]` emits `{"additionalProperties": true}` with no properties and is
-        # not in scope here — its declaration says nothing, which is corpus-toolkit#96 and
-        # a different fix. Silence is the exemption; a schema that describes fields and
-        # omits these three is not.
+        # Keyed on the schema HAVING properties at all: a tool annotated bare `-> dict`
+        # declares no schema, and one annotated `dict[str, Any]` emits
+        # `{"additionalProperties": true}` with no properties, so neither is in scope here
+        # — its declaration says nothing. Silence is the exemption; a schema that describes
+        # fields and omits these three is not.
+        #
+        # An extension tool CAN now declare the convention (corpus-toolkit#96) via
+        # `framework.with_envelope` and `-> ResponseEnvelope`, and SMOKE_TOOLS registers one
+        # so this assertion actually runs against a corpus-supplied tool rather than only
+        # the built-ins. The bare tool beside it keeps the exemption honest: it is what the
+        # live corpora still ship.
         props = (getattr(tool, "output_schema", None) or {}).get("properties") or {}
         absent = [f for f in ("corpus", "archetype", "authoritative_source")
                   if props and f not in props]
@@ -511,11 +520,27 @@ def check_result_marshalling(dest: Path) -> None:
 # ------------------------------------------------- hybrid leg (corpus-toolkit#38)
 
 SMOKE_TOOLS = """\
+from corpus_toolkit.mcp.responses import ResponseEnvelope
+
+
 def register(mcp, framework):
     @mcp.tool()
     def list_datasets() -> dict:
-        \"\"\"Smoke fixture: the minimal hybrid extension surface.\"\"\"
+        \"\"\"Smoke fixture: the extension surface as the live corpora ship it TODAY —
+        bare `-> dict`, no envelope. Kept so the gate keeps covering what is deployed.\"\"\"
         return {"datasets": [], "note": "contract-smoke fixture"}
+
+    @mcp.tool()
+    def join_lookup(document_id: str = "") -> ResponseEnvelope:
+        \"\"\"Smoke fixture: the CONFORMING extension surface (corpus-toolkit#96).
+
+        Here because the gate could not otherwise notice this path exists. The marshalling
+        step skips a tool with no declared schema, and the convention-1 check below is
+        keyed on the schema having properties at all — so a corpus registering only
+        bare-`dict` tools is exempt by construction, and nothing end-to-end ever built a
+        conforming extension tool against a real template-instantiated corpus on either SDK
+        major. That is exactly what this gate exists for.\"\"\"
+        return framework.with_envelope({"document_id": document_id, "rows": []})
 """
 
 

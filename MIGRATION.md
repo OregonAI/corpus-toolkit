@@ -524,6 +524,60 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
+### Unreleased — a corpus's own tools can satisfy response convention 1 (corpus-toolkit#96)
+
+**Nothing breaks and nothing is required.** Extension tools registered through
+`plugins.tools_module` keep working exactly as they do now. This adds the means to fix a
+gap, and the fix itself is a follow-up in each corpus repo.
+
+**The gap.** Every extension tool on the platform is annotated bare `-> dict`, which makes
+the SDK emit **no output schema and no structured content at all**. The answer is in the
+JSON text block, which is why nobody has noticed — but a client reading structured content
+(corpus-gateway's fan-out, a schema-driven validator) sees a hybrid corpus as having half a
+tool surface, with no error anywhere. Five live tools: `list_datasets` and `query_dataset`
+in `oregon-legislature`; `join_lookup`, `list_datasets` and `query_dataset` in
+`oregon-budget`.
+
+**What to change, when you get to it:**
+
+```python
+from corpus_toolkit.mcp.responses import ResponseEnvelope
+
+@mcp.tool()
+def list_datasets() -> ResponseEnvelope:                     # was: -> dict
+    return framework.with_envelope({"datasets": [...]})      # payload unchanged
+```
+
+`with_envelope` MERGES THE ENVELOPE OVER YOUR PAYLOAD, deliberately. If a key of yours
+collides with `corpus`, `archetype` or `authoritative_source`, the envelope wins — those
+three say who is answering, and that is not a tool's to decide. A `join_lookup` relating
+your corpus to a sibling is the realistic collision: name the other corpus under a key of
+your own.
+
+**BOTH LINES OR NEITHER.** The three envelope fields are required with no defaults, so
+annotating the return type while leaving the payload alone does not degrade the response —
+it is a hard `ToolError` and the tool stops answering:
+
+```
+ToolError: 3 validation errors for ResponseEnvelope
+  corpus                Field required
+  archetype             Field required
+  authoritative_source  Field required
+```
+
+None of the five live tools currently emits any of the three, so an annotation-only sweep
+would take out both hybrid corpora. Change the payload in the same commit, and call the tool
+once before merging.
+
+**A LIST-shaped extension tool needs no change.** `-> list[dict]` already produces a schema
+and one content block per item, and is exempt from convention 1 for exactly the reason
+`search_corpus` is — the exemption is about shape, not about which module registered it.
+
+**Do not reach for a TypedDict.** That is corpus-toolkit#61: it took all four live corpora
+down in a single deploy, because the generated model is closed and silently drops every key
+it does not declare. `ResponseEnvelope` is open (`extra="allow"`) precisely so your payload
+travels intact.
+
 ### Unreleased — declarable issuing-body sentinels (corpus-toolkit#94)
 
 **Every corpus rebuilds its FTS cache once.** The index schema version goes to 4 for exactly
@@ -705,6 +759,15 @@ annotated bare `-> dict` emits no output schema and no structured content on eit
 that is corpus-toolkit#96. If you want yours to advertise the convention, annotate it
 `-> ResponseEnvelope` from `corpus_toolkit.mcp.responses` — the same open model the built-ins
 use — and keep returning a plain dict.
+
+> **The last sentence is WRONG and corpus-toolkit#96 corrects it — see the Unreleased entry
+> above.** "Keep returning a plain dict" reads as "change the annotation and nothing else",
+> which is the one thing that does not work: the three envelope fields are required with no
+> defaults, so a tool annotated `-> ResponseEnvelope` whose payload lacks them is a hard
+> `ToolError` on every call, not a tool that advertises more. It has to return a dict
+> CARRYING THE ENVELOPE, which is what `framework.with_envelope(payload)` is for. Left in
+> place rather than deleted because this is the section a maintainer lands on when they
+> search for `ResponseEnvelope`, and a silently-removed instruction teaches nothing.
 
 ### Adopting any of these in a corpus repo
 

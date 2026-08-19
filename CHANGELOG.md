@@ -42,6 +42,45 @@ backend is narrower than before, not gone.
 Closes corpus-toolkit#102 and #104. A third site of the same class, where the mapping comes
 from graph data rather than a backend, is corpus-toolkit#105 and is not fixed here.
 
+### Added — a corpus's own tools can satisfy response convention 1
+
+**Nothing breaks and nothing is required.** Extension tools registered through
+`plugins.tools_module` keep working unchanged; this adds the means to close a gap, and the
+fix is a follow-up in each corpus repo.
+
+Every extension tool on the platform is annotated bare `-> dict`, which makes the SDK emit
+**no output schema and no structured content at all**. The answer is in the JSON text block,
+which is why nobody has noticed — but a client reading structured content sees a hybrid
+corpus as having half a tool surface, with no error anywhere, while every built-in returns a
+parsed object. Those responses also carry none of convention 1's three fields, and the two
+facts were one problem: the toolkit offered extension tools no supported way to satisfy the
+convention.
+
+`CorpusFramework.with_envelope(payload)` is the supported accessor — the same single
+assembly point the built-ins use, merged in the same direction they merge it:
+
+```python
+@mcp.tool()
+def list_datasets() -> ResponseEnvelope:                  # was: -> dict
+    return framework.with_envelope({"datasets": [...]})
+```
+
+It merges the envelope **over** the payload, so a corpus's own key can never displace the
+three fields — the rule the entry above enforces for backends, applied to the tools corpora
+write.
+
+**Both lines or neither.** The three fields are required with no defaults, so annotating the
+return type while leaving the payload alone is a hard `ToolError` — the tool stops answering
+rather than answering weakly. None of the five live extension tools emits any of the three
+today, so an annotation-only sweep would take out both hybrid corpora. See MIGRATION.md.
+
+A list-shaped extension tool needs no change: `-> list[dict]` is exempt for the same reason
+`search_corpus` is, and the exemption is about shape rather than which module registered the
+tool.
+
+Closes corpus-toolkit#96 (the toolkit half). The five annotation changes in
+`oregon-legislature` and `oregon-budget` are follow-ups after this release is pinned.
+
 ### Added — a corpus can declare which slug values mean "no issuing body"
 
 **Every corpus rebuilds its FTS index once on this bump** (`SCHEMA_VERSION` 3 → 4). A corpus

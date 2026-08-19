@@ -121,16 +121,22 @@ QUERY = "correspondence"
 # assertions have to hold for the surface the live corpora serve, not a nicer one. That
 # these tools ship no structured half at all is its own finding — corpus-toolkit#96.
 EXT_TOOLS = '''
-from typing import Any
+from corpus_toolkit.mcp.responses import ResponseEnvelope
 
 
 def register(mcp, framework):
     @mcp.tool()
     def list_datasets() -> dict:
-        """Fixture: the extension surface as the live hybrid corpora annotate it."""
-        return {"corpus": "t", "archetype": "hybrid",
-                "authoritative_source": None,
-                "datasets": [{"key": "budget", "rows": 3, "note": None}],
+        """Fixture: the extension surface as the live hybrid corpora ACTUALLY ship it —
+        bare `-> dict` AND no convention-1 envelope in the payload.
+
+        This carried the three envelope fields while claiming to mirror tools that do not
+        (corpus-toolkit#96). That made it a fixture that lies in the one direction that
+        matters: a sweep annotating the live tools `-> ResponseEnvelope` without touching
+        their payloads would have gone GREEN here — the fields were already present — and
+        then failed as a hard ToolError on oregon-legislature and oregon-budget, whose
+        `list_datasets` returns `{datasets, note, disclaimer}` and nothing else."""
+        return {"datasets": [{"key": "budget", "rows": 3, "note": None}],
                 "corpus_specific_key": {"nested": ["a", "b"]}}
 
     @mcp.tool()
@@ -139,13 +145,22 @@ def register(mcp, framework):
         return [{"key": key, "row": n, "value": None} for n in range(limit)]
 
     @mcp.tool()
-    def join_lookup(document_id: str) -> dict[str, Any]:
-        """Fixture: an extension tool annotated the way the built-ins are, so it DOES
-        declare an output schema and does serialize a structured half."""
-        return {"corpus": "t", "archetype": "hybrid", "authoritative_source": None,
-                "document_id": document_id,
-                "rows": [{"key": "budget", "amount": 1, "note": None}],
-                "corpus_specific_key": {"nested": ["a", "b"]}}
+    def join_lookup(document_id: str) -> ResponseEnvelope:
+        """Fixture: an extension tool annotated the way the built-ins ACTUALLY are, going
+        through the supported accessor.
+
+        SIBLING INSTANCE of the fixture that lied, three lines below it. This said
+        "annotated the way the built-ins are" while using `dict[str, Any]` — false since
+        #58/#15 made every built-in `-> ResponseEnvelope`, and `dict[str, Any]` is the
+        option corpus-toolkit#96 explicitly rejected, since it declares no fields and
+        leaves convention 1 unsatisfiable by field-level validation. It also hand-rolled
+        the three envelope keys, which is the divergence `with_envelope` exists to stop,
+        inside the toolkit's own tests."""
+        return framework.with_envelope({
+            "document_id": document_id,
+            "unmatched": None,
+            "rows": [{"key": "budget", "amount": 1, "note": None}],
+            "corpus_specific_key": {"nested": ["a", "b"]}})
 '''
 
 # name -> arguments. EVERY registered tool must appear here; `test_every_registered_tool_is
@@ -468,11 +483,20 @@ def test_a_null_value_inside_a_corpus_supplied_payload_survives(hybrid_server):
     null` is pinned for the built-ins by test_output_schemas.py; extension tools are
     written by a corpus, carry their own nulls and their own keys, and go through the same
     converter. `join_lookup` is the fixture's schema-declaring extension tool, so this
-    asserts on the structured half a payload-owning schema would have eaten."""
+    asserts on the structured half a payload-owning schema would have eaten.
+
+    The envelope assertion used to be `authoritative_source is None`, which held only
+    because the fixture HAND-ROLLED that null — this corpus declares a front door. It was
+    asserting the fixture's fiction rather than the corpus's config, and convention 1's
+    genuine null case is pinned for real in test_output_schemas.py. Now that the fixture
+    goes through `with_envelope`, the value is the config's, and the null coverage this
+    test is actually for comes from the corpus-supplied payload: top-level and nested."""
     tools = _tools(hybrid_server)
     raw = _call(hybrid_server, "join_lookup", {"document_id": "alpha"})
     structured = _sdk.structured_result(tools["join_lookup"], raw)
-    assert structured["authoritative_source"] is None
+    assert structured["authoritative_source"] == "https://example.invalid/official"
+    assert structured["unmatched"] is None, (
+        "a null at the TOP LEVEL of a corpus-supplied payload did not survive")
     assert structured["rows"][0]["note"] is None, (
         "a null nested inside a corpus-supplied payload did not survive serialization")
     assert structured["corpus_specific_key"] == {"nested": ["a", "b"]}, (

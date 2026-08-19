@@ -420,10 +420,10 @@ the hook and registering nothing is likewise an error rather than a no-op.
    real output schema that said nothing about these three fields, so they were
    present in every response and invisible to *field-level* validation.
 
-   **What this asks of a corpus.** Nothing, unless it supplies its own
-   `plugins.retrieval_module`. The fields are required, so a response omitting
-   one is now a serialization error rather than a quietly non-conforming
-   answer; every built-in path assembles them in
+   **What this asks of a corpus.** Nothing for the built-in tools, unless it
+   supplies its own `plugins.retrieval_module`. The fields are required, so a
+   response omitting one is a serialization error rather than a quietly
+   non-conforming answer; every built-in path assembles them in
    `CorpusFramework._envelope()`, and the exposure is a backend record that
    overrides one of the three with a non-string, which `get_document` merges
    over the envelope. Required-and-nullable is deliberate: `null` is a corpus
@@ -431,11 +431,46 @@ the hook and registering nothing is likewise an error rather than a no-op.
    collapsing those two is the one thing this platform never does. A field
    with a default would collapse them by injecting the null.
 
-   **Extension tools are a separate question.** A `tools_module` tool
-   annotated bare `-> dict` declares no output schema at all, so it advertises
-   nothing and ships no structured content either — corpus-toolkit#96, which
-   this does not change beyond making `ResponseEnvelope` available to annotate
-   them with.
+   **It asks something of a corpus's OWN tools** (corpus-toolkit#96). An
+   extension tool registered through `plugins.tools_module` that returns an
+   OBJECT is an object-shaped response and carries the envelope like any other:
+
+   ```python
+   from corpus_toolkit.mcp.responses import ResponseEnvelope
+
+   @mcp.tool()
+   def list_datasets() -> ResponseEnvelope:
+       return framework.with_envelope({"datasets": [...]})
+   ```
+
+   `CorpusFramework.with_envelope(payload)` is the supported accessor — the
+   same single assembly point the built-ins use. Hand-rolling the three keys
+   instead is the divergence that assembly point exists to prevent, spread
+   across repo boundaries where it is harder to see.
+
+   **It merges the envelope OVER the payload, and that direction is the point.**
+   Every built-in puts the assembled front last, because a mapping the
+   framework does not control must never displace the envelope
+   (corpus-toolkit#102/#104). Spreading the three fields in FIRST and letting a
+   payload land on top would invert, for corpora, the rule the toolkit enforces
+   on itself. It is not hypothetical: a `join_lookup` relating this corpus to a
+   sibling has `corpus` as its natural key, and a payload carrying it served
+   the sibling's id as the answering corpus. If your payload needs to name
+   another corpus, use a key that is not one of the three — `corpus` means
+   "who is answering", and that is never an extension tool's to decide.
+
+   **The annotation and the payload change together.** The fields are required
+   with no defaults, so annotating a tool `-> ResponseEnvelope` while leaving
+   its payload alone is a hard tool error, not a weaker answer — it stops
+   answering. A bare `-> dict` annotation, which is what every extension tool
+   on the platform ships today, declares no output schema at all and therefore
+   carries no structured content either: the answer travels only as a JSON text
+   block, so a client reading structured content gets nothing from a corpus's
+   own tools while getting a parsed object from every built-in.
+
+   A LIST-shaped extension tool keeps `-> list[dict]` and is exempt for exactly
+   the reason `search_corpus` is. The exemption is about shape, not about which
+   module registered the tool.
 
    **It is not as simple as declaring a TypedDict, and that is not a guess.**
    v1.24.0 did exactly that and broke every object-shaped tool on all four
