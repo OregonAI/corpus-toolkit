@@ -242,17 +242,47 @@ def test_incomplete_backend_fails_at_startup(corpus):
 
 
 def test_holdings_is_a_capability_a_backend_can_lack(corpus):
-    """`CorpusFramework.ensure_index` used to stand here, raising "not file-backed" so
-    that `issuing_body_profile`'s raw SQL had somewhere to fail politely. The tool now
-    asks the backend, so the shim is gone and the question a caller cares about is
-    whether the backend can answer at all — which server.py checks before registering
-    the tool (corpus-toolkit#75)."""
+    """`issuing_body_profile` asks the backend rather than reaching through an FTS
+    connection, so the question a caller cares about is whether the backend can answer at
+    all — which server.py checks before registering the tool (corpus-toolkit#75).
+
+    THIS TEST USED TO ASSERT `not hasattr(f, "ensure_index")`, pinning a deletion that was
+    itself the bug: ERF's Dockerfile bakes its index by calling exactly that method, so
+    every ERF image build failed and the reconcile loop rebuilt it every ten minutes for
+    hours (platform-deploy#28). A test can enshrine a breaking change as firmly as it can
+    prevent one — this one made the regression look deliberate to anyone reading the suite.
+    The assertion is gone; `ensure_index` is restored and covered below."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent))
     f = _with_backend(corpus, "backend_mod:_StubBackend")
 
-    assert not hasattr(f, "ensure_index")
     assert not callable(getattr(f.backend, "holdings_for", None))
+
+
+def test_ensure_index_is_reachable_from_the_framework(corpus):
+    """The call ERF's Dockerfile makes, in the form it makes it.
+
+    A search of `corpus_toolkit/` and `tests/` found no caller before #75 deleted this,
+    which is why it read as dead code. The callers are in the corpus repos that pin this
+    one, and nothing in this repo's CI sees them — so the guard has to live here."""
+    f = fw(corpus)
+
+    con = f.ensure_index()
+    try:
+        assert con.execute("SELECT COUNT(*) FROM docs").fetchone()[0] > 0
+    finally:
+        con.close()
+
+
+def test_a_backend_without_an_index_says_so_rather_than_AttributeError(corpus):
+    """An API-archetype corpus legitimately has no FTS index. It should be told which
+    backend and why, not handed the bare AttributeError that broke ERF."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _with_backend(corpus, "backend_mod:_StubBackend")
+
+    with pytest.raises(AttributeError, match="not file-backed"):
+        f.ensure_index()
 
 
 def test_file_backend_counts_holdings_through_the_seam(corpus):

@@ -275,6 +275,42 @@ class CorpusFramework:
         storage one."""
         return self.config.root / "_meta" / ".cache"
 
+    def ensure_index(self):
+        """Build or open this corpus's FTS index. Delegates to the backend.
+
+        RESTORED AFTER BEING DELETED IN #75, WHICH BROKE EVERY ERF DEPLOY. The FTS index is
+        a FileBackend implementation detail, `issuing_body_profile` no longer reaches
+        through it, and nothing inside this package called this — so it looked like dead
+        code. It was not. `executive-regulatory-frameworks`'s Dockerfile bakes its index at
+        image build:
+
+            RUN python3 -c "... CorpusFramework(config_mod.load('_meta/corpus.yml')).ensure_index()"
+
+        Deleting it turned that into `AttributeError: 'CorpusFramework' object has no
+        attribute 'ensure_index'`, so the image build failed, `deployed.txt` never advanced,
+        and the reconcile loop re-detected the same drift and rebuilt a 1 GB context every
+        ten minutes for hours — starving every other corpus behind it (platform-deploy#28).
+
+        THE LESSON, WORTH MORE THAN THE METHOD. A search of `corpus_toolkit/` and `tests/`
+        found no caller, and that was the whole of the evidence. The callers are in EIGHT
+        OTHER REPOSITORIES that pin this one, and nothing on this platform checks a release
+        against them — `release-gate.yml` instantiates a corpus from `corpus-template`,
+        which does not call this. A method reachable from a corpus repo is public surface
+        whether or not it looks like it.
+
+        Kept as a real method rather than restored-then-deprecated: it is one line of
+        delegation, a corpus is entitled to ask its framework to build the index, and a
+        deprecation would only move the same breakage to a later release.
+        """
+        idx = getattr(self.backend, "ensure_index", None)
+        if idx is None:
+            # An API-archetype corpus has no FTS index. Say which backend and why, rather
+            # than an AttributeError that reads as a toolkit bug.
+            raise AttributeError(
+                f"{type(self.backend).__name__} has no FTS index — this corpus is not "
+                "file-backed, so ensure_index() is not meaningful for it")
+        return idx()
+
     def _extract_section(self, body: str, heading: str):
         """Kept as a method because corpora reach for it. It used to be implemented as
         `FileBackend._extract_section(self, body, heading)` — an unbound method of an
