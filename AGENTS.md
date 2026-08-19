@@ -5,6 +5,15 @@ contains tooling and specs only — never civic content.
 
 ## Rules
 - Read `docs/reference-architecture.md` before changing anything structural.
+- **Anything reachable from a corpus repo is public surface**, whether or not
+  this repo calls it — Dockerfile build steps, corpus scripts, console scripts.
+  Grepping `corpus_toolkit/` and `tests/` does not answer "is this used"; the
+  callers live in the corpus repos (corpus-toolkit#75, #100). Removing or
+  renaming one is a breaking change. The release gate runs the template's
+  Dockerfile `RUN` commands, so it catches that surface — it does NOT yet
+  cover the `CMD` argv or the extras named in a corpus's `requirements.txt`
+  (corpus-toolkit#116). Treat a green gate as covering the build step and
+  nothing further.
 - Schema or MCP-contract changes require updating the matching doc in the
   same PR; breaking changes bump the major version.
 - Reusable workflows must stay corpus-agnostic: all corpus specifics come

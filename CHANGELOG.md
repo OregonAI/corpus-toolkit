@@ -17,6 +17,41 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — the release gate runs corpus-template's own build commands
+
+**Nothing required of a corpus.** This changes what the toolkit's own CI asserts, not what a
+corpus does.
+
+`release-gate.yml` checked `corpus-template` out and ran `contract_smoke.py` against it — a
+Python-level check that never executed the template's **Dockerfile**. That `RUN` is the one
+artifact in the org describing how a corpus actually starts, and no CI anywhere ran it.
+
+corpus-toolkit#75 deleted `CorpusFramework.ensure_index` after searching `corpus_toolkit/`
+and `tests/` and finding no caller. The template's Dockerfile calls it at image build. The
+gate went green, v1.25.0 and v1.26.0 both shipped, and every corpus image build failed until
+v1.26.1 — while a pull-based reconcile loop retried the failing build every ten minutes and
+contributed to the deploy host reaching 100% disk.
+
+The gate now **extracts** the toolkit-facing commands from the template's `RUN` instructions
+and runs them against the candidate toolkit. Extracted rather than copied: a duplicate in CI
+drifts from the Dockerfile and then asserts nothing, which is the same species of bug. It
+**refuses a step it does not recognise** and reports what it skipped, because an extractor
+that quietly matches nothing rebuilds the green this exists to remove.
+
+Verified the only way that matters: deleting `ensure_index` again turns the gate red with the
+same `AttributeError` that shipped.
+
+`CONTEXT.md` gains **consumed surface** — what a corpus reaches into the toolkit for that is
+not an MCP tool, including the `CMD` argv and the extras a corpus's `requirements.txt` names
+— and `AGENTS.md` the rule that would have prevented the deletion outright: anything
+reachable from a corpus repo is public, whether or not this repo calls it. That rule says
+plainly what the gate does and does not yet cover, rather than implying it covers all of it:
+the `CMD` argv and the requirements extras are still uncovered, tracked as
+corpus-toolkit#116.
+
+Closes corpus-toolkit#100.
+
+
 ### Fixed — release-note guidance to pass `--rebuild-image` is corrected
 
 Docs only; no code change. Five places across this file and `MIGRATION.md` told a maintainer

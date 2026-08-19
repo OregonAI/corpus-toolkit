@@ -75,6 +75,25 @@ Two contracts, deliberately. The gateway does not re-implement the corpus contra
 each server's tool inventory live from `tools/list`, so it cannot drift from what a corpus
 actually registers.
 
+**Consumed surface** — everything a corpus repo reaches into the toolkit for that is *not* an
+MCP tool: `CorpusFramework.ensure_index` in a Dockerfile's build step, `corpus_toolkit.repo`
+helpers in a corpus's own scripts, the `corpus-*` console scripts, the argv in a corpus
+Dockerfile's `CMD`, and **the extras named in a corpus's `requirements.txt`** —
+`corpus-toolkit[mcp,semantic]` means `semantic` is a name a corpus depends on. Renaming it
+makes pip emit a warning, the image build succeed, and every corpus lose numpy while
+reporting healthy. It is a contract as real as
+the corpus contract and, until corpus-toolkit#100, nothing in this repo executed any of it.
+
+**Anything reachable from a corpus repo is public, whether or not this repo calls it.**
+corpus-toolkit#75 deleted `ensure_index` after searching `corpus_toolkit/` and `tests/` and
+finding no caller. `corpus-template`'s Dockerfile called it, every corpus image build failed
+for two releases, and the reviewer, the gate and the author all read "no caller here" as "no
+caller". Absence of a local caller is not evidence; the corpus repos are where the callers
+live.
+
+_Avoid_: "internal" for anything importable. If a corpus can reach it, it is consumed surface
+no matter what it is named.
+
 **Client seam** — `corpus_toolkit.mcp.sdk` (historically `_sdk`), the one place that knows
 whether `mcp` 1.x or 2.x is installed. Used on both sides: by corpus servers, and by the
 consumer tier — see [ADR-0006](docs/adr/0006-one-package-public-client-seam.md).
