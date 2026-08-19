@@ -68,7 +68,13 @@ BIG_DOC_BYTES = 50 * 1024
 # agrees with me about the schema". Without this, upgrading the toolkit under an existing
 # cache leaves a valid-looking index whose `docs` table lacks a column the new queries
 # select -- an OperationalError on the first request, on every deployed server at once.
-SCHEMA_VERSION = 2
+# 3: `issuing_body_slug` is now the RESOLVED registry slug (declared frontmatter field
+# first, path-derived scope slug as the fallback — config.registry_slug_for), where it used
+# to be path-derived only. Same column, different values, so an index built by older code
+# is not wrong-shaped but wrong-valued: it would keep serving the 97% under-count of
+# corpus-toolkit#71 until something else happened to invalidate it. Bumping forces the
+# rebuild that makes the fix take effect.
+SCHEMA_VERSION = 3
 
 # What FTS5's own tokenizer would treat as a word, near enough for locating matches. Kept
 # identical to the pattern the query side uses so a term that can MATCH can also be found
@@ -243,7 +249,35 @@ class RetrievalBackend(Protocol):
     # ---------- optional ----------
 
     def holdings_for(self, slug: str) -> dict:
-        """{content_mode: count} for one issuing-body slug — what this corpus holds for it.
+        """What this corpus holds for one issuing-body slug, AND how much of the corpus
+        that answer could see:
+
+            {"counts":   {content_mode: count},   # what is held for this slug
+             "coverage": {"documents": int,       # documents in the corpus
+                          "in_registry": int,     # ...whose slug names a registry entry
+                          "no_registry_entry": int,   # ...whose slug names nothing there
+                          "unattributed": int,    # ...carrying no slug at all
+                          "basis": str}}          # how attribution was derived
+
+        `coverage` is what makes the count readable. A count taken from a column populated
+        for 1.3% of the corpus looks exactly like a count taken from a complete one, which
+        is how `issuing_body_profile` served a 97% under-report as a confident number
+        (corpus-toolkit#71). Only `in_registry` documents can be counted for a body; the
+        other two buckets are counted for NO body, and when either is non-zero every
+        per-body count is a lower bound.
+
+        THREE BUCKETS BECAUSE "HAS A SLUG" IS NOT "IS COUNTED SOMEWHERE". On ERF 37,992
+        documents carry a value the registry does not contain — deliberate sentinels
+        (`statewide`) and typos (nothing checks: corpus-toolkit#94) are indistinguishable
+        from here — and reporting those as attributed would rebuild the same confident
+        wrong number this method exists to stop serving.
+
+        REPORT ONLY WHAT YOU MEASURED. A backend that cannot classify against a registry
+        omits the three counts (keeping `documents`/`basis`), and one that returns a bare
+        `{content_mode: count}` mapping — the shape this method had in v1.25.0 — is still
+        honoured. Both are reported as coverage UNKNOWN rather than complete: unknown and
+        none are opposite answers (CONTEXT.md; response convention 5), and a partial
+        measurement is not a complete one.
 
         OPTIONAL, and the only optional member of this protocol; see
         REQUIRED_BACKEND_METHODS. A backend that cannot answer it simply omits it, and
@@ -420,7 +454,12 @@ class FileBackend:
             rel = p.relative_to(self.config.root)
             cur = con.execute("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 fm["id"], str(rel), fm["doc_type"],
-                fm.get("issuing_body", ""), self.config.scope_slug_for(rel.parts) or "",
+                # The RESOLVED registry slug: the corpus's declared frontmatter field
+                # where it has one, else the path-derived scope slug. Empty means this
+                # document is attributed to no issuing body at all, and `holdings_for`
+                # counts those so a caller can tell a partial answer from a complete one.
+                fm.get("issuing_body", ""),
+                self.config.registry_slug_for(fm, rel.parts) or "",
                 fm.get("citation", ""), fm["title"],
                 fm.get("status", ""), fm.get("source_url", ""), str(fm.get("retrieved", "")),
                 str(fm.get("effective_date") or ""), fm.get("content_mode", ""),
@@ -691,18 +730,58 @@ class FileBackend:
         return {"documents_by_type": by_type, "content_mode": by_mode, "commit": head}
 
     def holdings_for(self, slug: str) -> dict:
-        """{content_mode: count} for one issuing-body slug.
+        """Counts for one slug, plus how much of the corpus this count could see.
 
-        `issuing_body_slug` is PATH-derived (see config.scope_slug_for), not read from the
-        document's own free-text `issuing_body` field — which is why this query belongs to
-        the backend that owns the path-to-row mapping rather than to the tool that asks the
-        question. Known to under-report where a corpus is not issuing-body-scoped; that is
-        a separate defect in WHAT is counted (#71), not in who counts it.
+        `issuing_body_slug` is the RESOLVED slug — the corpus's declared
+        `plugins.issuing_body_slug_field` where its value names a registry entry, else the
+        path-derived scope slug, else the declared value even though the registry does not
+        contain it (config.registry_slug_for owns that precedence and the reasoning). It
+        used to be path-derived only, which is why this query answered 53 documents for
+        ERF's Department of Environmental Quality against the 1,929 that exist: the missing
+        1,876 are OAR rules, filed under a chapter-organised root because a rule belongs to
+        its chapter, not to an agency folder (corpus-toolkit#71).
+
+        COVERAGE IS THREE BUCKETS, NOT A BOOLEAN. "Has a non-empty slug" is not the same
+        question as "is counted for some body in the registry", and answering the first as
+        though it were the second reproduces #71 one level up: on ERF, 37,992 documents
+        (50.05%) carry a value the registry does not contain — 37,991 deliberate
+        `statewide` plus one `external` — and a two-bucket measure would call that corpus
+        fully attributed. So:
+
+            in_registry        the value names a registry entry; counted for that body
+            no_registry_entry  it names something else — a deliberate sentinel, or a typo
+                               nothing checks (corpus-toolkit#94). Counted for NO body.
+            unattributed       no value at all. Counted for no body.
+
+        The last two are why a per-body count can be a lower bound, and the tool says so.
+        With no registry to read, `in_registry` is unanswerable, so the buckets are OMITTED
+        rather than guessed and the tool reports coverage as unknown.
         """
         con = self.ensure_index()
-        return dict(con.execute(
+        counts = dict(con.execute(
             "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body_slug = ? "
             "GROUP BY content_mode", (slug,)).fetchall())
+        field = self.config.issuing_body_slug_field
+        basis = (f"frontmatter `{field}` where it names a registry entry, else "
+                 "path-derived scope slug" if field
+                 else "path-derived scope slug only (no plugins.issuing_body_slug_field "
+                      "declared)")
+        # One grouped scan, classified in Python: a corpus has O(hundreds) of distinct
+        # slugs, and the registry is a Python set rather than a table to join against.
+        rows = con.execute(
+            "SELECT issuing_body_slug, COUNT(*) FROM docs GROUP BY issuing_body_slug"
+        ).fetchall()
+        total = sum(n for _, n in rows)
+        known = self.config.issuing_body_slugs
+        if known is None:
+            return {"counts": counts, "coverage": {"documents": total, "basis": basis}}
+        buckets = {"in_registry": 0, "no_registry_entry": 0, "unattributed": 0}
+        for value, n in rows:
+            key = ("unattributed" if not value
+                   else "in_registry" if value in known else "no_registry_entry")
+            buckets[key] += n
+        return {"counts": counts,
+                "coverage": {"documents": total, "basis": basis, **buckets}}
 
     def health(self) -> dict:
         """A file corpus is reachable iff its index holds anything.

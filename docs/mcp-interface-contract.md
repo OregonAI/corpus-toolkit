@@ -158,13 +158,67 @@ corpus without a graph answers the first row above.
   Registered when **both** hold: the corpus declares
   `plugins.issuing_body_registry`, and its retrieval backend implements
   `holdings_for(slug)` — the optional member of `RetrievalBackend` that answers
-  "what does this corpus hold for this issuing body". A backend that does not
+  "what does this corpus hold for this issuing body", as
+  `{"counts": {content_mode: n}, "coverage": {"documents", "in_registry",
+  "no_registry_entry", "unattributed", "basis"}}`. A backend that
+  cannot classify against the registry omits the three counts, and one still
+  returning v1.25.0's bare `{content_mode: n}` keeps working; both are reported
+  as coverage unknown rather than complete. A backend that does not
   implement it leaves the tool unregistered and says so on stderr at startup;
   registering a tool that raises on every call is worse than not having it. The
   built-in `FileBackend` implements it, so a document-archetype corpus needs to
   do nothing. (Before v1.25.0 the gate tested for `ensure_index`, FileBackend's
   private FTS connection, so no corpus-supplied backend could serve this tool at
   any price — corpus-toolkit#75.)
+
+  **`in_repo` counts the documents attributed to a body in the registry, and
+  `attribution` says how much of the corpus that count could see.** Attribution
+  is per-document, and only a document whose slug names a **registry entry** can
+  be counted for anybody: the rest — a value the registry does not contain, or no
+  value at all — are counted for nobody. A bare number cannot be told apart from
+  a complete one, so `attribution` is present on every success:
+
+  | field | meaning |
+  |---|---|
+  | `complete` | `true` every document in the corpus is counted for a registry body, so this count is the whole answer; `false` some are counted for none, so each per-body count is a **lower bound**; `null` nobody measured — an old-shape backend, coverage reported without its counts, or an empty index — which is **unknown, not none** |
+  | `basis` | how attribution was derived (the declared frontmatter field, the path-derived scope slug, or `"unknown"`) |
+  | `documents_in_corpus` | the denominator, present whenever the backend reported counts |
+  | `documents_matched_to_a_registry_entry` | counted for a body |
+  | `documents_naming_no_registry_entry` | carry a slug the registry does not contain — a deliberate sentinel (`agency: statewide`) or a typo; nothing distinguishes them yet (corpus-toolkit#94). Counted for no body |
+  | `documents_with_no_issuing_body` | carry no slug at all. Counted for no body |
+  | `note` | the same thing in prose, for a caller that renders rather than branches |
+
+  Three buckets rather than a boolean because "has a slug" and "is counted
+  somewhere" are different questions, and answering the first as though it were
+  the second rebuilds the confident wrong number this field exists to prevent —
+  on `executive-regulatory-frameworks`, 50.05% of documents carry a value the
+  registry does not contain.
+
+  `in_repo` for a body with nothing held stays the documented string, and now
+  says **which** nothing it means: `"no documents ingested for this issuing
+  body yet"` only where coverage is complete; otherwise a string naming the gap
+  and pointing at `attribution`. "Nothing ingested" is a claim about the corpus
+  and is only true when everything in it reaches a count.
+
+  **How a document is attributed**, in order: the corpus's declared
+  `plugins.issuing_body_slug_field` where its value names a registry entry; else
+  the path-derived slug under a `scoped: true` content root; else the declared
+  value even though the registry does not contain it, so it is counted and
+  reported rather than dropped. Both mechanisms are supported — the path is
+  correct for a corpus organised by issuing body, the field is what reaches
+  documents no agency directory can contain, since a rule is filed by chapter.
+  **The path slug is validated (`corpus-validate-frontmatter` fails CI on an
+  unregistered scoped path) and the declared field is not, which is why an
+  unregistered declared value never overrides it**: otherwise one typo removes a
+  correctly-filed document from a count that was previously right. This is *not*
+  the free-text `issuing_body` field, which is a sub-unit name rather than a
+  registry slug.
+
+  These are additive fields, `in_repo`'s own shape is unchanged, and a corpus
+  declaring no slug field reports the counts it reported before, so this stays
+  contract v1. What changes is the *number* a corpus reports once it declares the
+  field — see the release note; on `executive-regulatory-frameworks` its largest
+  agencies move by ~36× (corpus-toolkit#71).
 
   *Correction (2026-07): this extension was written here as
   `agency_profile(agency)`. No server has ever implemented that name.
