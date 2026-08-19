@@ -75,6 +75,27 @@ def check_file(path):
             findings.append(("error", f"doc_type '{doc_type}' belongs under a "
                             f"'{er.path}/' content root, not here"))
 
+    # THE DECLARED HALF OF THE JOIN, checked (corpus-toolkit#94). The path-derived half
+    # below has failed CI since it existed; `plugins.issuing_body_slug_field` had no
+    # equivalent, so a misspelling attributed a document to a body that does not exist and
+    # nothing said so — it simply reached no per-agency count.
+    #
+    # This is also what makes `issuing_body_slug_sentinels` safe rather than a mute button.
+    # Without it, declaring sentinels would be a way to silence the coverage warning instead
+    # of answering it, and a genuine typo would stay invisible in the same bucket.
+    #
+    # Checked for EVERY document, not only those under a scoped root: the declared field is
+    # the only join for a chapter-organised corpus, which is 98.7% of ERF.
+    if _REGISTRY is not None and config.issuing_body_slug_field:
+        declared = str(fm.get(config.issuing_body_slug_field) or "").strip()
+        if declared and declared not in _REGISTRY:
+            if declared not in config.issuing_body_slug_sentinels:
+                findings.append(("error", (
+                    f"{config.issuing_body_slug_field} '{declared}' is not in the "
+                    f"issuing-body registry. If it names a body, fix the spelling or add "
+                    f"it to the registry; if it deliberately means 'no issuing body', "
+                    f"declare it in plugins.issuing_body_slug_sentinels")))
+
     if _REGISTRY is not None and expected_here is not None:
         # only scoped content roots (issuing-body-scoped dirs) carry a slug segment
         for cr in config.content_roots:

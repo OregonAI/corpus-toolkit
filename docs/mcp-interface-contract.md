@@ -160,8 +160,8 @@ corpus without a graph answers the first row above.
   `holdings_for(slug)` — the optional member of `RetrievalBackend` that answers
   "what does this corpus hold for this issuing body", as
   `{"counts": {content_mode: n}, "coverage": {"documents", "in_registry",
-  "no_registry_entry", "unattributed", "basis"}}`. A backend that
-  cannot classify against the registry omits the three counts, and one still
+  "declared_no_body", "no_registry_entry", "unattributed", "basis"}}`. A backend
+  that cannot classify against the registry omits the counts, and one still
   returning v1.25.0's bare `{content_mode: n}` keeps working; both are reported
   as coverage unknown rather than complete. A backend that does not
   implement it leaves the tool unregistered and says so on stderr at startup;
@@ -184,15 +184,25 @@ corpus without a graph answers the first row above.
   | `basis` | how attribution was derived (the declared frontmatter field, the path-derived scope slug, or `"unknown"`) |
   | `documents_in_corpus` | the denominator, present whenever the backend reported counts |
   | `documents_matched_to_a_registry_entry` | counted for a body |
-  | `documents_naming_no_registry_entry` | carry a slug the registry does not contain — a deliberate sentinel (`agency: statewide`) or a typo; nothing distinguishes them yet (corpus-toolkit#94). Counted for no body |
+  | `documents_declared_no_issuing_body` | carry a value this corpus declared in `plugins.issuing_body_slug_sentinels`: attributed to no body **on purpose**. Resolved, not a gap — these do not make a count a lower bound (backend coverage key: `declared_no_body`) |
+  | `documents_naming_no_registry_entry` | carry a slug the registry does not contain and which this corpus has **not** declared a sentinel — a typo, or a deliberate value nobody has declared yet. Counted for no body |
   | `documents_with_no_issuing_body` | carry no slug at all. Counted for no body |
   | `note` | the same thing in prose, for a caller that renders rather than branches |
 
-  Three buckets rather than a boolean because "has a slug" and "is counted
-  somewhere" are different questions, and answering the first as though it were
-  the second rebuilds the confident wrong number this field exists to prevent —
-  on `executive-regulatory-frameworks`, 50.05% of documents carry a value the
-  registry does not contain.
+  Four buckets rather than a boolean because "has a slug" and "is counted
+  somewhere" are different questions, and so are "counted for nobody" and
+  "unexplained". Answering the first as though it were the second rebuilds the
+  confident wrong number this field exists to prevent — on
+  `executive-regulatory-frameworks`, 50.05% of documents carry a value the
+  registry does not contain. Collapsing the deliberate ones into the unexplained
+  bucket is the opposite error, and told a corpus that had done everything right
+  that its counts were floors forever (corpus-toolkit#94).
+
+  **A backend needs `declared_no_body` only if its corpus declares sentinels.**
+  Omitting it there means the backend counted every sentinel document as
+  `no_registry_entry`, so its split is wrong rather than merely incomplete, and
+  coverage is reported as unknown. Where no sentinels are declared the key may be
+  omitted and is taken as zero, so a three-bucket backend keeps working.
 
   `in_repo` for a body with nothing held stays the documented string, and now
   says **which** nothing it means: `"no documents ingested for this issuing
@@ -200,17 +210,23 @@ corpus without a graph answers the first row above.
   and pointing at `attribution`. "Nothing ingested" is a claim about the corpus
   and is only true when everything in it reaches a count.
 
-  **How a document is attributed**, in order: the corpus's declared
-  `plugins.issuing_body_slug_field` where its value names a registry entry; else
-  the path-derived slug under a `scoped: true` content root; else the declared
-  value even though the registry does not contain it, so it is counted and
-  reported rather than dropped. Both mechanisms are supported — the path is
+  **How a document is attributed**, in order: a value the corpus declared in
+  `plugins.issuing_body_slug_sentinels`, taken as-is and meaning "no issuing
+  body"; else the declared `plugins.issuing_body_slug_field` where its value
+  names a registry entry; else the path-derived slug under a `scoped: true`
+  content root; else the declared value even though the registry does not contain
+  it, so it is counted and reported rather than dropped. Both mechanisms are supported — the path is
   correct for a corpus organised by issuing body, the field is what reaches
   documents no agency directory can contain, since a rule is filed by chapter.
-  **The path slug is validated (`corpus-validate-frontmatter` fails CI on an
-  unregistered scoped path) and the declared field is not, which is why an
-  unregistered declared value never overrides it**: otherwise one typo removes a
-  correctly-filed document from a count that was previously right. This is *not*
+  **Both halves are now validated** — `corpus-validate-frontmatter` fails CI on
+  an unregistered scoped path, and (since corpus-toolkit#94) on a declared value
+  that is neither a registry entry nor a declared sentinel. An *undeclared*
+  unregistered value still never overrides the path slug: otherwise one typo
+  removes a correctly-filed document from a count that was previously right. A
+  **sentinel** does override it, because it is the corpus positively asserting
+  "no body" — re-attributing such a document by its directory would contradict
+  the corpus about its own document. That validation is what makes the sentinel
+  list a way to *answer* the coverage question rather than silence it. This is *not*
   the free-text `issuing_body` field, which is a sub-unit name rather than a
   registry slug.
 

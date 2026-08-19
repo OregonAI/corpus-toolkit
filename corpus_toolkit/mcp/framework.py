@@ -925,11 +925,27 @@ class CorpusFramework:
         coverage = raw.get("coverage") if isinstance(raw.get("coverage"), dict) else None
         basis = (coverage or {}).get("basis") or "unknown"
 
+        # `declared_no_body` is required only when this corpus DECLARES sentinels.
+        #
+        # A backend on the four-key shape is still reporting a complete measurement for a
+        # corpus with no sentinels — every document it saw fell into one of the three
+        # buckets, and the fourth would be zero. Demanding the key anyway would degrade
+        # every existing custom backend to `complete: None` for no gain.
+        #
+        # Where sentinels ARE declared, the key is required and its absence is decisive:
+        # such a backend counted every sentinel document as `no_registry_entry`, so its
+        # split is not merely incomplete but WRONG, and `complete` would read False for a
+        # corpus that is in fact fully attributed. "Could not check" is not "is not there"
+        # (corpus-toolkit#94).
+        required = self._COVERAGE_COUNTS
+        if self.config.issuing_body_slug_sentinels:
+            required = required + ("declared_no_body",)
+
         if coverage is None or not all(
-                isinstance(coverage.get(k), int) for k in self._COVERAGE_COUNTS):
+                isinstance(coverage.get(k), int) for k in required):
             missing = "reports no attribution coverage" if coverage is None else (
                 "reported attribution coverage without "
-                + ", ".join(k for k in self._COVERAGE_COUNTS
+                + ", ".join(k for k in required
                             if not isinstance(coverage.get(k), int)))
             return counts, {
                 "complete": None,
@@ -942,11 +958,34 @@ class CorpusFramework:
         total = coverage["documents"]
         matched, unmatched = coverage["in_registry"], coverage["no_registry_entry"]
         unattributed = coverage["unattributed"]
+        # Absent means zero ONLY because the guard above already required this key wherever
+        # its absence could hide something (i.e. wherever sentinels are declared).
+        #
+        # TYPE-CHECKED like its four siblings. Where sentinels are not declared this key is
+        # not in `required`, so without this a backend's string or float would pass straight
+        # into the response and into the prose note's arithmetic — the same "a value from a
+        # backend reaches the response unchecked" asymmetry the envelope commits in this
+        # stack closed. A non-int is treated as absent rather than raising: it cannot be
+        # load-bearing here, since the guard above already covers every case where its value
+        # could change an answer.
+        _declared = coverage.get("declared_no_body")
+        declared_none = _declared if isinstance(_declared, int) else 0
         out = {
+            # A DECLARED SENTINEL IS RESOLVED, NOT A GAP (corpus-toolkit#94). It is the
+            # corpus saying "this document belongs to no body", which is an answer; only an
+            # UNDECLARED out-of-registry value and a missing value leave something
+            # unaccounted for. Before sentinels existed, ERF's 37,991 deliberate
+            # `statewide` documents made `complete` False permanently, for a reason that
+            # was 99.997% legitimate.
             "complete": None if total == 0 else (unmatched == 0 and unattributed == 0),
             "basis": basis,
             "documents_in_corpus": total,
             "documents_matched_to_a_registry_entry": matched,
+            # Its OWN field, never added to the matched count. "Counted for a registry body"
+            # and "deliberately counted for no body" answer different questions, and folding
+            # them would rebuild corpus-toolkit#71 one level up — a corpus calling itself
+            # fully attributed while half of it reaches no per-body count.
+            "documents_declared_no_issuing_body": declared_none,
             "documents_naming_no_registry_entry": unmatched,
             "documents_with_no_issuing_body": unattributed,
         }
@@ -958,21 +997,39 @@ class CorpusFramework:
                            "of zero for this body — it is no measurement at all; check "
                            "corpus_overview and the server's health before reading it")
         elif out["complete"]:
-            out["note"] = (f"every one of this corpus's {total} documents is attributed to "
-                           "a body in its issuing-body registry, so this count is complete")
+            declared = (f" ({declared_none} of them to no body, by this corpus's declared "
+                        f"sentinels)" if declared_none else "")
+            out["note"] = (f"every one of this corpus's {total} documents is accounted "
+                           f"for{declared}, so this count is complete")
         else:
             gaps = []
             if unmatched:
-                gaps.append(f"{unmatched} {'names' if unmatched == 1 else 'name'} a value "
-                            "the registry does not contain (a deliberate sentinel such as "
-                            "`statewide`, or a typo — nothing checks, corpus-toolkit#94)")
+                gaps.append(
+                    f"{unmatched} {'names' if unmatched == 1 else 'name'} a value the "
+                    "registry does not contain and this corpus has not declared as a "
+                    "sentinel (so: a typo, or a deliberate value that should be added to "
+                    "plugins.issuing_body_slug_sentinels)")
             if unattributed:
                 gaps.append(f"{unattributed} "
                             f"{'carries' if unattributed == 1 else 'carry'} no "
                             "issuing-body attribution at all")
+            # LEADS WITH THE GAP, NOT THE MATCHED PERCENTAGE (corpus-toolkit#94). The
+            # `complete` branch above was updated to name the sentinel count and this one
+            # was not, so a corpus declaring sentinels with ONE unexplained value read
+            # "37913 of 75905 documents (50%) are attributed to a registry body" — the
+            # 37,991 deliberate ones absent, and a caller concluding half the corpus was
+            # unaccounted for when the real gap was one document. That is the message this
+            # whole feature exists to remove, surviving in the branch that fires whenever a
+            # single typo does.
+            unaccounted = unmatched + unattributed
+            accounted = (
+                f"{matched} attributed to a registry body and {declared_none} declared to "
+                f"belong to no issuing body" if declared_none
+                else f"{matched} attributed to a registry body")
             out["note"] = (
-                f"{matched} of this corpus's {total} documents ({matched / total:.0%}) are "
-                f"attributed to a registry body; " + " and ".join(gaps) +
-                ". Those are counted for NO body, so every per-body count here is a "
-                "LOWER BOUND, not a total")
+                f"{unaccounted} of this corpus's {total} documents "
+                f"({unaccounted / total:.1%}) are unaccounted for: " + " and ".join(gaps)
+                + f". The other {total - unaccounted}: {accounted}. Those unaccounted for "
+                "are counted for NO body, so every per-body count here is a LOWER BOUND, "
+                "not a total")
         return counts, out

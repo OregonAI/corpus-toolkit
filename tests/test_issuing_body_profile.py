@@ -316,22 +316,36 @@ def test_the_declared_field_wins_over_the_directory(tmp_path):
         "no documents ingested for this issuing body yet")
 
 
-def test_a_value_the_registry_does_not_contain_is_not_a_complete_count(chapter_organised):
-    """`agency: statewide` is a value the registry does not contain, and from here a
-    sentinel and a typo are the same thing: both are counted for NO body. Reporting them
-    as attributed rebuilds #71 one level up — on ERF that is 37,992 documents, 50.05%, so
-    the corpus would call itself fully attributed while half of it reaches no count.
+def test_an_UNDECLARED_out_of_registry_value_is_not_a_complete_count(chapter_organised):
+    """`agency: statewide` is a value the registry does not contain, and where the corpus
+    has NOT declared it a sentinel, it is indistinguishable from a typo: both are counted
+    for NO body. Reporting them as attributed rebuilds #71 one level up — on ERF that is
+    37,992 documents, 50.05%, so the corpus would call itself fully attributed while half
+    of it reaches no count.
 
-    `complete` therefore means "every document is counted for a body in the registry", not
-    "every document has a non-empty string in a column"."""
+    `complete` therefore means "every document is accounted for", not "every document has a
+    non-empty string in a column".
+
+    KEPT IN FORCE THROUGH corpus-toolkit#94, which added the sentinel declaration. This
+    fixture declares none, so nothing here changes: the value is still unexplained and the
+    count is still a floor. The paired case — the same value, DECLARED — is
+    `test_a_declared_sentinel_is_its_own_bucket_and_completes_the_count` in
+    tests/test_issuing_body_sentinels.py, and the two together are what stop the
+    declaration becoming a way to silence the warning rather than answer it.
+
+    The note used to cite corpus-toolkit#94 as the reason nothing checked these values.
+    That issue is closed and the note now names the remedy instead — declare the value as a
+    sentinel if it is deliberate — so the assertion moved to the remedy rather than being
+    dropped."""
     out = fw(chapter_organised).issuing_body_profile(DAS)
 
     assert out["attribution"]["complete"] is False
     assert out["attribution"]["documents_in_corpus"] == 8
     assert out["attribution"]["documents_matched_to_a_registry_entry"] == 7
     assert out["attribution"]["documents_naming_no_registry_entry"] == 1
+    assert out["attribution"]["documents_declared_no_issuing_body"] == 0
     assert out["attribution"]["documents_with_no_issuing_body"] == 0
-    assert "corpus-toolkit#94" in out["attribution"]["note"]
+    assert "issuing_body_slug_sentinels" in out["attribution"]["note"]
     assert "LOWER BOUND" in out["attribution"]["note"]
 
 
@@ -357,7 +371,13 @@ def test_a_partial_count_says_it_is_a_lower_bound(unattributed_documents):
     assert out["attribution"]["complete"] is False
     assert out["attribution"]["documents_with_no_issuing_body"] == 2
     assert out["attribution"]["documents_matched_to_a_registry_entry"] == 3
-    assert "3 of this corpus's 5 documents (60%)" in out["attribution"]["note"]
+    # The note LEADS WITH THE GAP rather than the matched percentage (corpus-toolkit#94).
+    # Phrasing it the other way round read "3 of 5 (60%) are attributed" — fine here, and
+    # actively misleading once sentinels exist, where it became "50% attributed" for a
+    # corpus whose real gap was one document in 75,905.
+    assert "2 of this corpus's 5 documents (40.0%) are unaccounted for" in (
+        out["attribution"]["note"])
+    assert "The other 3: 3 attributed to a registry body" in out["attribution"]["note"]
     assert "LOWER BOUND" in out["attribution"]["note"]
 
 
