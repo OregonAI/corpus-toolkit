@@ -16,7 +16,6 @@ driven equivalents — see docs/reference-architecture.md and MIGRATION.md.
 """
 import argparse
 import json
-import multiprocessing as mp
 import os
 import re
 
@@ -25,7 +24,7 @@ import yaml
 
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.repo import (
-    Reporter, changed_content_files, content_files, parse_frontmatter,
+    Reporter, changed_content_files, content_files, map_documents, parse_frontmatter,
 )
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*[a-z0-9]$")
@@ -350,15 +349,12 @@ def main():
     registry = _load_registry(config)
 
     docs = {}
-    jobs = max(1, args.jobs)
-    if jobs == 1 or len(paths) < 50:
-        _init_worker(doc_schema, config, registry)
-        results = [check_file(p) for p in paths]
-    else:
-        ctx = mp.get_context("fork")
-        with ctx.Pool(jobs, initializer=_init_worker,
-                      initargs=(doc_schema, config, registry)) as pool:
-            results = list(pool.imap_unordered(check_file, paths, chunksize=64))
+    # The fork-pool, the 50-file threshold and the chunk size live in repo.map_documents —
+    # they were written out here AND in validate/provenance.py, identically, so tuning
+    # either meant finding both (corpus-toolkit#76). The worker-global handoff below is
+    # unchanged: _init_worker still populates this module's globals, which check_file reads.
+    results = map_documents(paths, check_file, jobs=args.jobs, setup=_init_worker,
+                            setup_args=(doc_schema, config, registry))
     for rel, findings, doc_id in results:
         for level, msg in findings:
             (r.error if level == "error" else r.warn)(rel, msg)
