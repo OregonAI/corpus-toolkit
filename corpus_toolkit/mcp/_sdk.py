@@ -68,7 +68,8 @@ from mcp.server.transport_security import TransportSecuritySettings  # noqa: E40
 __all__ = ["SDK_MAJOR", "Server", "TransportSecuritySettings", "sdk_version",
            "http_kwargs", "build_http_app", "run_http", "run_http_app", "with_cors",
            "server_log_level", "session_allowed_hosts",
-           "tool_names", "call_tool", "structured_result",
+           "tool_names", "tools_by_name", "call_tool",
+           "structured_result", "serialized_result", "declares_list_result",
            # The client half of the same seam — see "THE CLIENT SIDE" below.
            "CLIENT_SYMBOL", "open_client_streams", "tool_input_schema",
            "result_is_error"]
@@ -205,7 +206,17 @@ def tool_names(server) -> set[str]:
     """Registered tool names, synchronously. The tool manager's `list_tools` is sync on
     both majors while the server's is a coroutine — using the sync one keeps a
     before/after name diff out of an event loop."""
-    return {t.name for t in server._tool_manager.list_tools()}
+    return set(tools_by_name(server))
+
+
+def tools_by_name(server) -> dict:
+    """The registered tool OBJECTS, keyed by name — what `serialized_result` needs.
+
+    `tool_names` is this call with the objects thrown away. Here because the alternative
+    is every caller that wants a tool object reaching into `server._tool_manager`, which
+    is a private attribute on both majors and already differs in what its `call_tool`
+    requires; the whole point of this module is that such reaches live in one file."""
+    return {t.name: t for t in server._tool_manager.list_tools()}
 
 
 async def call_tool(server, name: str, arguments: dict):
@@ -226,23 +237,16 @@ async def call_tool(server, name: str, arguments: dict):
     return await tm.call_tool(name, arguments)
 
 
-def structured_result(tool, payload: dict) -> dict:
-    """Serialize a payload through a registered tool's OWN output schema and return the
-    structured content a client would receive.
-
-    THE COMPLEMENT TO `call_tool`, and the reason it exists is corpus-toolkit#61. That
-    function deliberately passes `convert_result=False` so the release gate sees the
-    toolkit's answer rather than the SDK's marshalling — correct for asserting on
-    behaviour, and it meant NOTHING in the suite exercised the conversion step. A declared
-    output schema that silently dropped every document body shipped green through it.
-
-    So: when the marshalling IS the behaviour under test, use this. Anywhere else, use
-    `call_tool`.
+def _convert_result(tool, payload):
+    """Run the SDK's own result conversion for `tool`, normalised to `(blocks, structured)`.
 
     `Tool.fn_metadata` is a declared model field on both majors; what `convert_result`
     hands back is not. 1.x returns `(content_blocks, structured)`; 2.x returns a
-    `CallToolResult` carrying `structured_content` — the same wrapper divergence that
-    motivated `call_tool`'s note above, one layer down."""
+    `CallToolResult` carrying `content` and `structured_content` — the same wrapper
+    divergence that motivated `call_tool`'s note above, one layer down. Normalising here
+    rather than at each call site is the point of the seam: an earlier version of
+    test_output_schemas.py unpacked the 1.x tuple inline, passed there, and on 2.x
+    asserted `field in <pydantic model>`, a membership test that quietly answers False."""
     meta = getattr(tool, "fn_metadata", None)
     if meta is None or not hasattr(meta, "convert_result"):
         # Loud, not None. A caller testing serialization that silently receives nothing
@@ -254,11 +258,83 @@ def structured_result(tool, payload: dict) -> dict:
             f"this SDK major converts tool results and teach this function about it.")
     converted = meta.convert_result(payload)
     if isinstance(converted, tuple):          # 1.x: (content_blocks, structured)
-        return converted[1]
+        return list(converted[0] or []), converted[1]
+    if isinstance(converted, list):
+        # 1.x, tool with NO output schema: blocks only, no structured half at all. Reached
+        # by any tool annotated `-> dict` (bare) or left unannotated, which is how both
+        # live hybrid corpora write their extension tools — measured, see #96. 2.x returns
+        # the same information as a CallToolResult whose structured_content is None, so
+        # normalising the two here is what keeps that case out of a caller's if-branch.
+        return converted, None
+    blocks = list(getattr(converted, "content", None) or [])
     structured = getattr(converted, "structured_content", None)
-    if structured is None:                    # 2.x: CallToolResult
+    if not blocks and structured is None:     # 2.x: CallToolResult
         raise RuntimeError(
-            f"{type(converted).__name__} carried no structured_content on mcp "
+            f"{type(converted).__name__} carried neither content nor structured_content "
+            f"on mcp {sdk_version()}; the result shape changed again.")
+    return blocks, structured
+
+
+def declares_list_result(tool) -> bool:
+    """True when the tool's declared output schema is the SDK's LIST wrapper.
+
+    A list-returning tool cannot have an object at the top of a JSON Schema, so the SDK
+    wraps it as `{"properties": {"result": {"type": "array"}}}` and its structured content
+    arrives as `{"result": [...]}`. Verified identical on 1.28.1 and 2.0.0.
+
+    Here because the alternative is a caller keying on the tool's NAME. Anything feeding a
+    probe payload through the converter has to match the declared shape: an object probe
+    through a list-shaped tool raises a ValidationError that reads exactly like a rejected
+    payload, and the cheap fix for that is to weaken the assertion."""
+    schema = getattr(tool, "output_schema", None) or {}
+    result = (schema.get("properties") or {}).get("result") or {}
+    return result.get("type") == "array"
+
+
+def serialized_result(tool, payload):
+    """BOTH halves of what a client receives for `payload`: `(block_texts, structured)`.
+
+    THE COMPLEMENT TO `call_tool`, and the reason this pair exists is corpus-toolkit#61
+    and #63. `call_tool` deliberately passes `convert_result=False` so the release gate
+    sees the toolkit's answer rather than the SDK's marshalling — correct for asserting on
+    behaviour, and it meant NOTHING exercised the conversion step. A declared output
+    schema that silently dropped every document body shipped green through it.
+
+    So: when the marshalling IS the behaviour under test, use this. Anywhere else, use
+    `call_tool`. Keeping them separate rather than flipping the flag is deliberate — one
+    says the toolkit computed the wrong answer, the other says the right answer did not
+    survive the trip, and a merged assertion could say neither.
+
+    `structured_result` below is the narrow form of this, and it is enough only for
+    object-shaped tools. Two things it cannot see:
+
+      * the CONTENT BLOCKS. A response carries them alongside the structured content and a
+        client renders them, so a payload can survive in one half and not the other.
+      * the LIST path. `search_corpus` returns `list[dict]`, which the SDK converts to ONE
+        BLOCK PER HIT and wraps under `{"result": [...]}` — a different branch of the
+        converter from the one the six object tools take, and the branch corpus-toolkit#58
+        left alone and #63 found uncovered.
+
+    Block TEXTS rather than block objects, because the block classes are SDK types whose
+    field names have moved between majors before (breaks 5 and 6 below) and every corpus
+    tool emits text. A caller checking that a hit survived should be reading its text.
+    """
+    blocks, structured = _convert_result(tool, payload)
+    return [getattr(b, "text", str(b)) for b in blocks], structured
+
+
+def structured_result(tool, payload) -> dict:
+    """Just the structured content a client would receive — `serialized_result`'s second
+    half, for the object-shaped tools whose whole answer travels there.
+
+    A list-shaped payload serializes here too and arrives wrapped as `{"result": [...]}`;
+    that wrapper is the SDK's, not the toolkit's, and a caller asserting on a list answer
+    wants `serialized_result` so it sees the per-hit blocks as well."""
+    _, structured = _convert_result(tool, payload)
+    if structured is None:
+        raise RuntimeError(
+            f"the conversion of a {type(payload).__name__} payload for tool "
+            f"{getattr(tool, 'name', tool)!r} carried no structured content on mcp "
             f"{sdk_version()}; the result shape changed again.")
     return structured
 

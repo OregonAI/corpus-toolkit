@@ -194,6 +194,54 @@ validated path — but for a document no directory attributes, a typo still land
 `documents_naming_no_registry_entry` and is counted for no body. Live on ERF today at one
 document (`agency: external`), alongside 37,991 deliberate `statewide`.
 
+### Internal — what a client RECEIVES is now asserted, for every tool
+
+**Nothing about a corpus's behaviour changes and no bump is required for this.** No
+response shape moves, no annotation changes, no validation is added or tightened. It is
+test and release-gate coverage, plus two functions on the SDK compat seam.
+
+Every assertion this repo made about a tool — in `tests/`, in the release gate, everywhere
+— went through `_sdk.call_tool`, which passes `convert_result=False` and therefore sees the
+tool's raw Python return value rather than the response a client is sent. That is
+deliberate and stays: the gate asserts that an external graph neighbour comes back
+`{citation, external: true}`, and asserting that through the SDK's marshalling would test
+the SDK. The gap was that nothing asserted the marshalling either — which is how v1.24.0
+shipped an output schema that dropped every document body on the way out, reported success
+doing it, and passed the `corpus-end-to-end` gate green (corpus-toolkit#61, #63).
+
+Added, without flipping that flag, so behaviour and marshalling stay separately pinned and
+a failure says which one broke:
+
+- `tests/test_result_marshalling.py` round-trips EVERY registered tool's real answer, from
+  a real corpus on disk, through the SDK's own conversion and asserts whole-payload
+  equality in both halves of the response — the content blocks a client renders and the
+  structured content it parses. It covers what `tests/test_output_schemas.py` (which pins
+  response convention 1 on the six object-shaped tools) structurally cannot: `search_corpus`,
+  whose list answer takes a different conversion path entirely — one content block per hit,
+  wrapped as `{"result": [...]}` — and the `tools_module` extension tools a hybrid or api
+  corpus registers, which nothing reached at all. Its fixtures declare an
+  `issuing_body_registry` so `issuing_body_profile` — config-gated, one of the six tools
+  v1.24.0 annotated, and previously round-tripped by nothing anywhere — is actually served,
+  and its coverage guard fires in both directions so a listed-but-unregistered tool cannot
+  read as covered.
+- Step 8 of `.github/scripts/contract_smoke.py` does the same against the corpus the gate
+  already builds, on the same calls it already makes, including the hybrid extension tool.
+  It also pushes `authoritative_source: null` through each object tool's own converter,
+  which is the other half of what #61 broke. Both round trips treat "no structured content"
+  as legitimate only when the tool DECLARED no output schema; declaring one and serializing
+  nothing is reported as the regression it is.
+- `_sdk.serialized_result()` returns both halves of a conversion, `_sdk.tools_by_name()`
+  returns the registered tool objects, `_sdk.declares_list_result()` answers whether a tool
+  declares the SDK's list wrapper (so a caller keys on the declared shape rather than on a
+  tool's name), and `structured_result()` is now the narrow form of the first. A third result shape the seam did not know about is handled: on mcp 1.x a tool
+  with no declared output schema converts to a bare list of blocks rather than a
+  `(blocks, structured)` tuple. Every extension tool on the platform is in that state, which
+  is corpus-toolkit#96.
+
+Verified by re-applying v1.24.0's `TypedDict` annotation: the new coverage goes red on both
+SDK majors, naming each dropped key and each rejected null, while the existing behaviour
+assertions stay green — the exact green that shipped the incident.
+
 ## v1.25.0 — 2026-08-11
 
 ### One behaviour change on the serve path, then fixes
