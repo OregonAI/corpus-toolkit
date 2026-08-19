@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import multiprocessing as mp
+import os
 import re
 import subprocess
 import sys
@@ -225,6 +227,93 @@ def changed_content_files(config: CorpusConfig, base_ref: str | None = None):
         if p.is_file() and _is_content_path(config, p):
             out.append(p)
     return sorted(out)
+
+
+# Below this many files, forking costs more than it saves. Above it, the per-file work
+# (schema validation, snapshot hashing) dominates process setup.
+#
+# A DUPLICATED CONSTANT UNTIL NOW: `validate/frontmatter.py` and `validate/provenance.py`
+# each carried their own `len(paths) < 50` and their own `chunksize=64`, so tuning either
+# meant finding both (corpus-toolkit#76).
+PARALLEL_THRESHOLD = 50
+CHUNKSIZE = 64
+
+
+def map_documents(paths, fn, *, jobs: int | None = None, setup=None, setup_args=()):
+    """Run `fn` over every path, forking when that is worth it.
+
+    `setup` is the per-process initializer — the toolkit's validators hand their worker
+    state (a compiled JSON schema, a config, a snapshot-slicing plugin) to module globals
+    that `fn` then reads, because those objects are expensive to build and awkward to
+    pickle per call. It runs ONCE in-process on the sequential path and once per worker on
+    the parallel one.
+
+    That handoff is the part of these tools hardest to get right and easiest to copy
+    wrong, and it was written out twice before this existed.
+
+    RESULT ORDER IS NOT GUARANTEED. The parallel path is `imap_unordered`, so results
+    arrive as workers finish; the sequential path is naturally in order. Both callers
+    aggregate rather than index, so the difference has never mattered — but making it
+    uniform either way would be a behaviour change rather than a refactor, so the existing
+    asymmetry is preserved and named instead.
+
+    `fn` and `setup` must be importable at module scope: `fork` is used, but the pool still
+    pickles the callables.
+    """
+    paths = list(paths)
+    # `is not None`, NOT a falsy check: both validators previously did `max(1, args.jobs)`,
+    # so `-j 0` meant "do not fork". A falsy check reads 0 as "unset" and forks across every
+    # CPU instead — the exact opposite, and silently, in the constrained environments where
+    # someone would have disabled it on purpose.
+    jobs = max(1, jobs if jobs is not None else (os.cpu_count() or 1))
+    if jobs == 1 or len(paths) < PARALLEL_THRESHOLD:
+        if setup is not None:
+            setup(*setup_args)
+        return [fn(p) for p in paths]
+    # `fork` specifically, not the default start method: the validators rely on inheriting
+    # an already-loaded config rather than re-reading it per worker.
+    ctx = mp.get_context("fork")
+    with ctx.Pool(jobs, initializer=setup, initargs=setup_args) as pool:
+        return list(pool.imap_unordered(fn, paths, chunksize=CHUNKSIZE))
+
+
+def check_generated(path: Path, rendered: str, *, normalize=None,
+                    hint: str = "") -> tuple[bool, str]:
+    """Is the committed artifact at `path` still what regenerating would produce?
+
+    Returns `(current, message)` and NEVER RAISES — a checker that throws is a checker
+    whose caller learns nothing, the same rule `FileBackend.index_status` follows. That
+    means catching BOTH families `read_text` produces: `OSError` for the file, and
+    `UnicodeDecodeError` for its bytes. The second is a `ValueError`, not an `OSError`, so
+    an `except OSError` alone lets a single stray latin-1 byte in a committed artifact
+    escape as a traceback — which is how the first version of this got it wrong.
+
+    `normalize` decides what counts as a difference: `index.py` drops the `generated` key
+    because it is metadata rather than derived from the documents, `status.py` strips
+    date-shaped lines because a regeneration date is not staleness. Without it every gate
+    would fail daily and be switched off within a week.
+
+    FOUR STATES, KEPT APART. Missing, unparseable, stale, and current are four different
+    answers, and telling someone to regenerate a corrupt file is right while telling them
+    it is merely stale is not. status.py's predecessor collapsed all of them into "does the
+    file contain this heading?" — a gate that could not fail, which reads as coverage.
+    """
+    normalize = normalize or (lambda s: s)
+    name = path.name
+    if not path.is_file():
+        return False, f"{name} is missing{hint}"
+    try:
+        current = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return False, f"{name} could not be read ({type(e).__name__}: {e}){hint}"
+    try:
+        a, b = normalize(current), normalize(rendered)
+    except Exception as e:                       # noqa: BLE001 — any parse failure, one answer
+        return False, (f"{name} is not in the expected format "
+                       f"({type(e).__name__}: {e}){hint}")
+    if a != b:
+        return False, f"{name} is STALE{hint}"
+    return True, f"{name} is current"
 
 
 class Reporter:

@@ -36,7 +36,7 @@ import json
 import sys
 
 from corpus_toolkit import config as config_mod
-from corpus_toolkit.repo import content_files, parse_frontmatter
+from corpus_toolkit.repo import check_generated, content_files, parse_frontmatter
 
 DEFAULT_OUTPUT = "_meta/corpus-index.json"
 
@@ -98,9 +98,15 @@ def build_index(config, generated: str | None = None) -> dict:
     return payload
 
 
-def _comparable(payload: dict) -> dict:
-    """`generated` is metadata, not derived from the documents — ignore it when
-    deciding whether a committed index is stale."""
+def _comparable(text: str):
+    """The committed JSON, minus what is not derived from the documents.
+
+    `generated` is metadata — a wall-clock stamp would make `--check` fail every day, which
+    is how a gate gets switched off. Raises on malformed JSON, which `repo.check_generated`
+    reports as "not in the expected format" rather than as staleness: telling someone to
+    regenerate a corrupt file is right, telling them it is merely out of date is not.
+    """
+    payload = json.loads(text)
     return {k: v for k, v in payload.items() if k != "generated"}
 
 
@@ -120,27 +126,40 @@ def main():
     out_path = (config.root / args.output).resolve()
 
     if args.check:
-        hint = (f"{args.output} is stale — run: corpus-generate-index "
-                f"--config {args.config} --output {args.output}")
-        if not out_path.is_file():
-            print(f"{args.output} is missing — run: corpus-generate-index "
-                  f"--config {args.config} --output {args.output}")
+        rendered = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        hint = (f" — run: corpus-generate-index --config {args.config} "
+                f"--output {args.output}")
+        # Missing / unparseable / stale / current are four answers, kept apart by
+        # repo.check_generated rather than by a second copy of that logic here
+        # (corpus-toolkit#76).
+        current, msg = check_generated(out_path, rendered, normalize=_comparable, hint=hint)
+        if not current:
+            print(msg)
+            # The counts are index-specific and worth having: "stale" says regenerate,
+            # "committed 412, generated 418" says what moved.
+            #
+            # `isinstance`, not a bare `.get`: a committed file can be valid JSON and still
+            # not an object — `[]`, `null`, `"x"` from a truncation or a merge artifact —
+            # and `.get` on those is an AttributeError. Crashing here would defeat the point
+            # of routing through a helper that never raises.
+            try:
+                committed = json.loads(out_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                committed = None
+            if isinstance(committed, dict):
+                n_now = len(committed.get("documents") or {})
+                print(f"  committed: {n_now} document(s); "
+                      f"generated: {payload['n_documents']} document(s)")
             sys.exit(1)
-        try:
-            current = json.loads(out_path.read_text())
-        except ValueError:
-            print(f"{args.output} is not valid JSON — {hint}")
-            sys.exit(1)
-        if _comparable(current) != _comparable(payload):
-            n_now = len((current or {}).get("documents") or {})
-            print(f"{hint}\n  committed: {n_now} document(s); "
-                  f"generated: {payload['n_documents']} document(s)")
-            sys.exit(1)
-        print(f"{args.output} is up to date ({payload['n_documents']} documents).")
+        print(f"{msg} ({payload['n_documents']} documents).")
         return
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    # utf-8 explicitly: `ensure_ascii=False` means non-ASCII titles are written as
+    # characters, and the locale default would encode them differently from the utf-8 the
+    # `--check` path reads back.
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
     print(f"wrote {args.output} ({payload['n_documents']} documents)")
 
 

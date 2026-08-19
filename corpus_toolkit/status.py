@@ -14,7 +14,7 @@ from collections import Counter
 
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.config import load_source_manifest_groups
-from corpus_toolkit.repo import content_files, parse_frontmatter
+from corpus_toolkit.repo import check_generated, content_files, parse_frontmatter
 
 
 def _parse_date(s):
@@ -112,17 +112,20 @@ def main():
         # months out of date. A gate that cannot fail is worse than no gate, because it
         # reads as coverage. Generation timestamps are excluded from the comparison,
         # since those legitimately differ on every run.
-        current = out_path.read_text() if out_path.is_file() else ""
+        # Missing / unparseable / stale / current, decided in one place
+        # (repo.check_generated, corpus-toolkit#76). Generation timestamps are excluded by
+        # _comparable below, since those legitimately differ on every run.
+        current, msg = check_generated(out_path, content, normalize=_comparable,
+                                       hint=" — regenerate with corpus-generate-status")
+        print(msg)
         if not current:
-            print(f"{args.output} is missing — run corpus-generate-status")
             sys.exit(1)
-        if _comparable(current) != _comparable(content):
-            print(f"{args.output} is STALE — regenerate with corpus-generate-status")
-            sys.exit(1)
-        print(f"{args.output} is current.")
         return
 
-    out_path.write_text(content)
+    # utf-8 explicitly. A corpus name with a non-ASCII character used to be written in the
+    # locale encoding and is now read back as utf-8 by the staleness gate; on a non-UTF-8
+    # locale that mismatch would report a perfectly current file as unreadable.
+    out_path.write_text(content, encoding="utf-8")
     print(f"wrote {args.output}")
 
 

@@ -28,14 +28,14 @@ must be summary. Legacy [VERBATIM] quote blocks are checked wherever present.
   -j N / --jobs N     parallelize across N processes (default: all CPUs)
 """
 import argparse
-import multiprocessing as mp
 import os
 
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.plugins import snapshot_slice_fn
 from corpus_toolkit.repo import (
     Reporter, changed_content_files, content_files, extract_fulltext,
-    extract_verbatim_quotes, hash_snapshot, normalize_ws, parse_frontmatter,
+    extract_verbatim_quotes, hash_snapshot, map_documents, normalize_ws,
+    parse_frontmatter,
 )
 
 # Doc types whose content we MIRROR and therefore verify line-by-line against a snapshot.
@@ -235,14 +235,10 @@ def main():
 
     r = Reporter()
     checked = quotes = fulltexts = 0
-    jobs = max(1, args.jobs)
-    if jobs == 1 or len(paths) < 50:
-        _init_worker(config, slice_fn)
-        results = [check_file(p) for p in paths]
-    else:
-        ctx = mp.get_context("fork")
-        with ctx.Pool(jobs, initializer=_init_worker, initargs=(config, slice_fn)) as pool:
-            results = list(pool.imap_unordered(check_file, paths, chunksize=64))
+    # See repo.map_documents — this and validate/frontmatter.py carried the same pool,
+    # threshold and chunk size (corpus-toolkit#76).
+    results = map_documents(paths, check_file, jobs=args.jobs, setup=_init_worker,
+                            setup_args=(config, slice_fn))
     for rel, findings, c, f, q in results:
         for level, msg in findings:
             (r.error if level == "error" else r.warn)(rel, msg)
