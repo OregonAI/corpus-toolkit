@@ -133,6 +133,20 @@ def test_get_document_carries_the_corpus_envelope(corpus):
     assert d["source_url"] == "https://example.invalid/ors-2.020"
 
 
+def test_file_backend_cites_the_document_not_the_corpus(corpus):
+    """The built-in path's side of corpus-toolkit#90's precedence, which nothing asserted.
+
+    `FileBackend` derives `source_url` and `authoritative_source` from the SAME document
+    column, so it lands on step 1 of the precedence and can never observe steps 2 or 3 —
+    which is exactly why the missing middle step stayed invisible for as long as it did.
+    Pinned here so a future change to the precedence has to keep the built-in path citing
+    the document rather than the corpus."""
+    d = fw(corpus).get_document("ors-2.020")
+
+    assert d["authoritative_source"] == "https://example.invalid/ors-2.020"
+    assert d["authoritative_source"] == d["source_url"]
+
+
 def test_missing_document_suggests_alternatives(corpus):
     d = fw(corpus).get_document("ors-9.999")
     assert "error" in d and "did_you_mean" in d
@@ -192,7 +206,14 @@ class _StubBackend:
                  "doc_type": "record", "issuing_body": "", "path": "", "snippet": query}]
 
     def get(self, doc_id, *, part="auto"):
-        return {"id": doc_id, "title": "Stub", "body": "live", "executed_at": "2026-07-26T00:00:00Z"}
+        # `source_url` and NO `authoritative_source`, which is exactly what the documented
+        # `RetrievalBackend.get()` contract permits ("Record metadata + body"). This stub
+        # used to omit both, which is why corpus-toolkit#90 was invisible to the suite: the
+        # only tests of this fallback went through FileBackend, which happens to populate
+        # both keys from one column.
+        return {"id": doc_id, "title": "Stub", "body": "live",
+                "source_url": "https://api.invalid/records/42",
+                "executed_at": "2026-07-26T00:00:00Z"}
 
     def exists(self, doc_id):
         return {"id": doc_id, "title": "Stub", "doc_type": "record"}
@@ -257,9 +278,40 @@ class _RecordWithItsOwnSourceBackend(_StubBackend):
     name = "own-source"
 
     def get(self, doc_id, *, part="auto"):
+        # DELIBERATELY DIFFERENT from source_url. FileBackend sets both from one column, so
+        # equal values cannot tell "authoritative_source won" from "source_url won" — which
+        # is the distinction corpus-toolkit#90's precedence turns on.
         return {"id": doc_id, "title": "Stub", "body": "live",
-                "source_url": "https://record.invalid/42",
-                "authoritative_source": "https://record.invalid/42"}
+                "source_url": "https://api.invalid/records/42",
+                "authoritative_source": "https://official.invalid/canonical/42"}
+
+
+class _RecordWithNoSourceBackend(_StubBackend):
+    """A record offering nothing more precise than the corpus: no `authoritative_source`,
+    and an EMPTY `source_url`. Empty and absent are both "not supplied"."""
+    name = "no-source"
+
+    def get(self, doc_id, *, part="auto"):
+        return {"id": doc_id, "title": "Stub", "body": "live", "source_url": ""}
+
+
+class _RecordOmittingSourceBackend(_StubBackend):
+    """The same, with the key absent rather than empty."""
+    name = "omits-source"
+
+    def get(self, doc_id, *, part="auto"):
+        return {"id": doc_id, "title": "Stub", "body": "live"}
+
+
+class _RecordWithNonStringSourceUrlBackend(_StubBackend):
+    """`source_url` as a list of mirrors — plausible for a proxy backend, and permitted:
+    the protocol never types this key. It is not a candidate for a field declared
+    `str | None`."""
+    name = "list-source"
+
+    def get(self, doc_id, *, part="auto"):
+        return {"id": doc_id, "title": "Stub", "body": "live",
+                "source_url": ["https://a.invalid/42", "https://b.invalid/42"]}
 
 
 class _NonStringEnvelopeBackend(_EnvelopeClobberingBackend):
@@ -283,7 +335,8 @@ def _with_backend(corpus: Path, factory_path: str) -> CorpusFramework:
     (corpus / "backend_mod.py").write_text(
         "from tests.test_backends import (_StubBackend, _BrokenBackend, "
         "_EnvelopeClobberingBackend, _NonStringEnvelopeBackend, "
-        "_RecordWithItsOwnSourceBackend)\n")
+        "_RecordWithItsOwnSourceBackend, _RecordWithNoSourceBackend, "
+        "_RecordOmittingSourceBackend, _RecordWithNonStringSourceUrlBackend)\n")
     return CorpusFramework(load_config(str(cfg_path)))
 
 
@@ -384,6 +437,41 @@ def test_a_non_string_from_the_backend_never_reaches_the_declared_envelope(corpu
         assert ResponseEnvelope.model_validate(response).corpus == "test-corpus"
 
 
+def _corpus_declaring_a_front_door(corpus: Path, factory_path: str,
+                                   front_door: str | None = "https://front.invalid/door"):
+    """The corpus fixture with a declared `corpus.authoritative_source`, plus a backend.
+
+    The plain fixture declares none, so it cannot show the front door being stamped OVER a
+    per-document URL — the whole of corpus-toolkit#90. `front_door=None` gives back the
+    undeclared case, for the `null` assertions.
+    """
+    # dedent BEFORE interpolating: an interpolated line carries its own indentation and
+    # would otherwise redefine the common prefix dedent strips from every other line.
+    config = textwrap.dedent("""
+        corpus:
+          id: test-corpus
+          name: Test Corpus
+          jurisdiction: oregon
+          archetype: document
+        content_roots:
+          - path: statutes
+            doc_type: statute
+        graph_path: _meta/graph.json
+        plugins:
+          retrieval_module: "{factory_path}"
+    """).strip().format(factory_path=factory_path)
+    if front_door:
+        config = config.replace("  archetype: document",
+                                f'  archetype: document\n  authoritative_source: "{front_door}"')
+    (corpus / "_meta" / "corpus.yml").write_text(config + "\n")
+    (corpus / "backend_mod.py").write_text(
+        "from tests.test_backends import (_StubBackend, _BrokenBackend, "
+        "_EnvelopeClobberingBackend, _NonStringEnvelopeBackend, "
+        "_RecordWithItsOwnSourceBackend, _RecordWithNoSourceBackend, "
+        "_RecordOmittingSourceBackend, _RecordWithNonStringSourceUrlBackend)\n")
+    return CorpusFramework(load_config(str(corpus / "_meta" / "corpus.yml")))
+
+
 def _sweep_corpus(corpus: Path, factory_path: str) -> CorpusFramework:
     """The corpus fixture with a REAL graph and a REAL issuing-body registry.
 
@@ -417,7 +505,8 @@ def _sweep_corpus(corpus: Path, factory_path: str) -> CorpusFramework:
     (corpus / "backend_mod.py").write_text(
         "from tests.test_backends import (_StubBackend, _BrokenBackend, "
         "_EnvelopeClobberingBackend, _NonStringEnvelopeBackend, "
-        "_RecordWithItsOwnSourceBackend)\n")
+        "_RecordWithItsOwnSourceBackend, _RecordWithNoSourceBackend, "
+        "_RecordOmittingSourceBackend, _RecordWithNonStringSourceUrlBackend)\n")
     return CorpusFramework(load_config(str(corpus / "_meta" / "corpus.yml")))
 
 
@@ -507,6 +596,91 @@ def test_re_asserting_the_envelope_displaces_three_keys_and_drops_nothing(corpus
     assert o["commit"] == ""
 
 
+def test_a_records_source_url_beats_the_corpus_front_door(corpus):
+    """corpus-toolkit#90. The fallback tested the assembled response's slot rather than the
+    record's `source_url`, so a backend honouring the documented `get()` contract — which
+    nowhere requires `authoritative_source` — had the corpus's front door stamped over a
+    per-document URL it had supplied in the same payload.
+
+    That is a WRONG answer rather than a missing one: the response tells an agent to verify
+    at the front door while carrying the exact URL the record came from. It bites hardest on
+    the `api` and `hybrid` archetypes, which are the ones that ship a `retrieval_module`."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _corpus_declaring_a_front_door(corpus, "backend_mod:_StubBackend")
+
+    d = f.get_document("stub:1")
+
+    assert d["source_url"] == "https://api.invalid/records/42"
+    assert d["authoritative_source"] == "https://api.invalid/records/42"
+
+
+@pytest.mark.parametrize("factory", ["_RecordWithNoSourceBackend",
+                                     "_RecordOmittingSourceBackend"])
+def test_a_record_offering_nothing_more_precise_falls_back_to_the_front_door(corpus, factory):
+    """Step 3 of the precedence, for both spellings of "not supplied".
+
+    Falling THROUGH source_url must not become falling PAST the front door: a record with
+    nothing more precise to say still gets the corpus's entry point, which is what
+    convention 1 promises for every object-shaped response."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _corpus_declaring_a_front_door(corpus, f"backend_mod:{factory}")
+
+    d = f.get_document("stub:1")
+
+    assert d["authoritative_source"] == "https://front.invalid/door"
+
+
+@pytest.mark.parametrize("factory", ["_RecordWithNoSourceBackend",
+                                     "_RecordOmittingSourceBackend"])
+def test_a_corpus_with_no_front_door_still_emits_the_documented_null(corpus, factory):
+    """The end of the precedence, where every step declines.
+
+    `null` is a documented value — "this corpus declares no front door" — and an ABSENT key
+    means "nobody answered the question". CONTEXT.md's rule that outranks the vocabulary is
+    that those two never collapse, and `ResponseEnvelope` types the field
+    required-and-nullable precisely so a default cannot manufacture the first answer for a
+    tool that gave neither."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from corpus_toolkit.mcp.responses import ResponseEnvelope
+    f = _corpus_declaring_a_front_door(corpus, f"backend_mod:{factory}", front_door=None)
+
+    d = f.get_document("stub:1")
+
+    assert "authoritative_source" in d          # present, not omitted
+    assert d["authoritative_source"] is None
+    assert ResponseEnvelope.model_validate(d).authoritative_source is None
+
+
+def test_a_non_string_source_url_is_not_promoted_into_the_envelope(corpus):
+    """Falling through `source_url` must not turn a harmless record key into a tool error.
+
+    `authoritative_source` is declared `str | None`, and the protocol never types
+    `source_url` at all — a proxy backend may reasonably put a list of mirrors there.
+    Before the precedence change such a value was an undeclared extra key that rode along
+    while the slot took the front door, and the call succeeded. Promoting it unchecked would
+    make every `get_document` on that corpus a hard ValidationError: exactly the class the
+    parent commit closed for the not-found branch and `corpus_overview`, reopened on the
+    success branch by the fix for it.
+
+    So step 2 DECLINES a non-string and falls through. The asymmetry with step 1 is
+    deliberate — see the framework comment."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from corpus_toolkit.mcp.responses import ResponseEnvelope
+    f = _corpus_declaring_a_front_door(
+        corpus, "backend_mod:_RecordWithNonStringSourceUrlBackend")
+
+    d = f.get_document("stub:1")
+
+    assert d["authoritative_source"] == "https://front.invalid/door"
+    assert d["source_url"] == ["https://a.invalid/42", "https://b.invalid/42"]  # rides along
+    assert ResponseEnvelope.model_validate(d).authoritative_source == (
+        "https://front.invalid/door")
+
+
 def test_the_success_branch_still_lets_a_record_supply_its_own_source(corpus):
     """The one place a backend is SUPPOSED to win, pinned so this fix cannot over-reach.
 
@@ -518,11 +692,15 @@ def test_the_success_branch_still_lets_a_record_supply_its_own_source(corpus):
     precedence and should find a guard already in place."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    f = _with_backend(corpus, "backend_mod:_RecordWithItsOwnSourceBackend")
+    f = _corpus_declaring_a_front_door(corpus,
+                                       "backend_mod:_RecordWithItsOwnSourceBackend")
 
     d = f.get_document("rec:42")
 
-    assert d["authoritative_source"] == "https://record.invalid/42"   # record wins
+    # Step 1 of the precedence beats both step 2 (the record's own source_url) and step 3
+    # (the corpus front door) — three distinct URLs, so this cannot pass by coincidence.
+    assert d["authoritative_source"] == "https://official.invalid/canonical/42"
+    assert d["source_url"] == "https://api.invalid/records/42"
     assert d["corpus"] == "test-corpus"        # ...but never over these two
     assert d["archetype"] == "document"
 

@@ -625,8 +625,25 @@ document's `source_url` string is the supported case and is what `FileBackend` d
 > So the check to keep is narrower than the one above, not gone: `get()`'s success return
 > may carry `authoritative_source` and it must be a string or absent; it should not carry
 > `corpus` or `archetype` at all, and if it does they are now ignored rather than obeyed.
-> The precedence by which `authoritative_source` is resolved on that branch is the subject
-> of corpus-toolkit#90 and is not affected here.
+>
+> **And `source_url` joined that checklist in corpus-toolkit#90.** On the success branch the
+> slot is now resolved by precedence — the record's `authoritative_source`, then its
+> `source_url`, then the corpus front door — so `source_url` decides what an agent is told
+> to verify against whenever the record carries no explicit `authoritative_source`. Two
+> things follow for a custom backend:
+>
+> * **It must be a string, or it is ignored.** A non-string `source_url` (a list of mirrors,
+>   a `Path`, an int id) is declined and the resolution falls through to the front door,
+>   rather than being promoted into a field declared `str | None` and failing the call. So
+>   this one cannot break you — but it will quietly not do what you meant.
+> * **It should be where a READER verifies the text, not where your backend fetched it.**
+>   For an `api` or `hybrid` corpus those can differ: if `source_url` holds an authenticated
+>   JSON endpoint, that endpoint is now what the response cites. Put the human-readable
+>   official-text URL there and keep the fetch endpoint under a key of your own.
+>
+> `RetrievalBackend.get()`'s contract is otherwise unchanged and `authoritative_source`
+> stays optional on a record — that optionality is exactly why the precedence lives in the
+> framework rather than in every backend's memory.
 
 **Why required rather than optional.** `authoritative_source: null` means this corpus
 declares no front door; an absent key means nobody answered. Those are opposite answers and

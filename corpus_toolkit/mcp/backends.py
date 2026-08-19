@@ -224,7 +224,23 @@ class RetrievalBackend(Protocol):
         ...
 
     def get(self, doc_id: str, *, part: str = "auto") -> dict:
-        """Record metadata + body, or {"error": ...}."""
+        """Record metadata + body, or {"error": ...}.
+
+        `authoritative_source` is OPTIONAL and `source_url` is LOAD-BEARING. On the success
+        path `CorpusFramework.get_document` resolves response convention 1's
+        `authoritative_source` by precedence — the record's own `authoritative_source`, then
+        its `source_url` if that is a string, then the corpus front door (corpus-toolkit#90).
+        The optionality is deliberate and is why the rule lives in the framework: a backend
+        that forgets the field still gets a correct response.
+
+        So `source_url` should be **where a reader verifies the official text**, not the
+        endpoint this backend fetched the record from. For an `api` or `hybrid` corpus those
+        can differ, and an authenticated JSON endpoint sitting in this key is what the
+        response will cite. Keep the fetch endpoint under a key of your own.
+
+        A non-string `source_url` is declined rather than promoted, so it cannot break the
+        call — it just will not be used.
+        """
         ...
 
     def exists(self, doc_id: str) -> dict | None:
