@@ -192,3 +192,241 @@ def test_works_for_a_hybrid_corpus(tmp_path):
     names = _names(build_server(config))
     assert "list_datasets" in names
     assert "authority_chain" in names
+
+
+# ---------- name collisions with a built-in (corpus-toolkit#111) ----------
+
+SHADOWS_A_BUILTIN = '''
+    def register(mcp, framework):
+        @mcp.tool()
+        def corpus_overview() -> dict:
+            """A corpus tool whose name collides with a built-in."""
+            return {"mine": True}
+
+        @mcp.tool()
+        def join_lookup(document_id: str = "") -> dict:
+            return {"rows": []}
+'''
+
+ALL_COLLIDE = '''
+    def register(mcp, framework):
+        @mcp.tool()
+        def corpus_overview() -> dict:
+            return {}
+
+        @mcp.tool()
+        def get_document(doc_id: str = "") -> dict:
+            return {}
+'''
+
+REGISTERS_NOTHING = '''
+    def register(mcp, framework):
+        pass
+'''
+
+
+def test_a_tool_colliding_with_a_builtin_refuses_to_start(tmp_path):
+    """corpus-toolkit#111. The SDK keeps the EXISTING tool on a duplicate name, so the
+    built-in wins and the corpus's version never exists. Nothing said so: the summary
+    infers what was added by set difference, and a shadowed name was already present
+    before the hook ran, so it can never appear in the difference.
+
+    The corpus author ships a tool, it never runs, and the output reports success — which
+    is indistinguishable from the tool working, because a built-in of the same name
+    answers. This is the outcome the surrounding block already refuses to allow for a
+    module that fails to LOAD; reaching it by a different route makes it no better."""
+    config = _corpus(tmp_path, archetype="hybrid", tools_py=SHADOWS_A_BUILTIN,
+                     module="shadow_tools")
+
+    with pytest.raises(RuntimeError) as e:
+        build_server(config)
+
+    assert "corpus_overview" in str(e.value)
+
+
+def test_the_collision_error_is_not_the_registered_nothing_error(tmp_path):
+    """Two different mistakes must not produce one message.
+
+    When EVERY registration collides, the set difference is empty and the pre-existing
+    guard fired "registered no tools" — blaming the corpus for the opposite mistake. It
+    registered two; both were rejected."""
+    config = _corpus(tmp_path, archetype="hybrid", tools_py=ALL_COLLIDE,
+                     module="all_collide_tools")
+
+    with pytest.raises(RuntimeError) as e:
+        build_server(config)
+
+    message = str(e.value)
+    assert "registered no tools" not in message
+    assert "corpus_overview" in message and "get_document" in message
+
+
+def test_a_module_that_genuinely_registers_nothing_still_says_so(tmp_path):
+    """The pre-existing guard, unchanged. Declaring the hook and adding nothing is its own
+    mistake and keeps its own message."""
+    config = _corpus(tmp_path, archetype="hybrid", tools_py=REGISTERS_NOTHING,
+                     module="empty_tools")
+
+    with pytest.raises(RuntimeError) as e:
+        build_server(config)
+
+    assert "registered no tools" in str(e.value)
+
+
+NO_COLLISION = '''
+    def register(mcp, framework):
+        @mcp.tool()
+        def join_lookup(document_id: str = "") -> dict:
+            return {"rows": []}
+'''
+
+
+def test_a_module_with_no_collisions_starts_exactly_as_before(tmp_path):
+    """The control. A corpus registering only its own names is untouched by this."""
+    config = _corpus(tmp_path, archetype="hybrid", tools_py=NO_COLLISION,
+                     module="clean_tools")
+
+    names = _names(build_server(config))
+
+    assert BUILTINS <= names
+    assert "join_lookup" in names
+
+
+# ---------- ways the first version of the #111 guard could be walked past ----------
+
+POSITIONAL_NAME = '''
+    def register(mcp, framework):
+        @mcp.tool("corpus_overview")
+        def my_overview() -> dict:
+            """`name` is the FIRST POSITIONAL parameter of tool()."""
+            return {"mine": True}
+'''
+
+DUPLICATE_WITHIN_MODULE = '''
+    def register(mcp, framework):
+        @mcp.tool()
+        def join_lookup(document_id: str = "") -> dict:
+            return {"first": True}
+
+        @mcp.tool(name="join_lookup")
+        def join_lookup_v2(document_id: str = "") -> dict:
+            return {"second": True}
+'''
+
+VIA_ADD_TOOL = '''
+    def register(mcp, framework):
+        def corpus_overview() -> dict:
+            return {"mine": True}
+        mcp.add_tool(corpus_overview)
+
+        @mcp.tool()
+        def join_lookup(document_id: str = "") -> dict:
+            return {"rows": []}
+'''
+
+RESERVED_BUT_UNREGISTERED = '''
+    def register(mcp, framework):
+        @mcp.tool()
+        def issuing_body_profile(slug: str = "") -> dict:
+            """A CONTRACT name this corpus does not happen to register."""
+            return {"mine": True}
+'''
+
+
+def test_a_positionally_named_collision_is_caught(tmp_path):
+    """`@mcp.tool("corpus_overview")` — the first version read only `kwargs["name"]`, so it
+    recorded the FUNCTION's name, the intersection was empty, and corpus-toolkit#111
+    survived its own fix. Worse, when that was the module's only tool the fallback fired
+    "registered no tools" — the exact mis-blame the fix claims to have separated."""
+    config = _corpus(tmp_path, archetype="hybrid", tools_py=POSITIONAL_NAME,
+                     module="positional_tools")
+
+    with pytest.raises(RuntimeError) as e:
+        build_server(config)
+
+    assert "corpus_overview" in str(e.value)
+    assert "registered no tools" not in str(e.value)
+
+
+def test_a_duplicate_within_the_module_is_caught(tmp_path):
+    """Sibling instance: the guard compared against names that existed BEFORE the hook, so
+    two registrations of one name inside the module never met each other. The SDK keeps the
+    first there too, so the second tool is discarded and the summary prints success."""
+    config = _corpus(tmp_path, archetype="hybrid", tools_py=DUPLICATE_WITHIN_MODULE,
+                     module="dup_tools")
+
+    with pytest.raises(RuntimeError) as e:
+        build_server(config)
+
+    assert "join_lookup" in str(e.value)
+
+
+def test_registering_through_add_tool_is_caught_too(tmp_path):
+    """`add_tool` is public on both majors and is what `tool()` calls internally. Wrapping
+    only the decorator left the choke point itself unguarded."""
+    config = _corpus(tmp_path, archetype="hybrid", tools_py=VIA_ADD_TOOL,
+                     module="addtool_tools")
+
+    with pytest.raises(RuntimeError) as e:
+        build_server(config)
+
+    assert "corpus_overview" in str(e.value)
+
+
+def test_a_reserved_contract_name_is_refused_even_when_not_registered(tmp_path):
+    """`issuing_body_profile` and `authority_chain` are CONDITIONALLY registered. Keying the
+    guard on what happens to be present let a corpus without a registry claim the name and
+    start clean — serving corpus semantics under a core contract name, and flipping to
+    fatal later when a registry is added, with no change to the tools module."""
+    config = _corpus(tmp_path, archetype="hybrid", tools_py=RESERVED_BUT_UNREGISTERED,
+                     module="reserved_tools")
+
+    with pytest.raises(RuntimeError) as e:
+        build_server(config)
+
+    assert "issuing_body_profile" in str(e.value)
+
+
+def test_the_sdk_really_keeps_the_first_registration(tmp_path):
+    """THE PREMISE THE WHOLE GUARD RESTS ON, asserted rather than read off the source.
+
+    Every other test here passes whether the SDK keeps the first registration or replaces
+    with the last — they only assert that `build_server` raises. If a future major flips to
+    last-wins, the guard still fires while its message ("these were DISCARDED and the
+    built-ins answer in their place") becomes false, and the real hazard inverts to a corpus
+    tool OVERWRITING a core tool. This is the test that would notice."""
+    from corpus_toolkit.mcp import _sdk
+
+    srv = _sdk.Server("premise-check")
+
+    @srv.tool()
+    def duplicated() -> dict:
+        return {"which": "first"}
+
+    @srv.tool(name="duplicated")
+    def duplicated_again() -> dict:
+        return {"which": "second"}
+
+    import asyncio
+    answer = asyncio.new_event_loop().run_until_complete(
+        _sdk.call_tool(srv, "duplicated", {}))
+
+    assert answer == {"which": "first"}, (
+        "this SDK replaces on duplicate registration rather than keeping the first — "
+        "corpus-toolkit#111's guard message and its hazard both need rewriting")
+
+
+def test_the_reserved_list_covers_every_tool_the_server_registers(tmp_path):
+    """The reserved list and the server must not drift apart.
+
+    A hardcoded list is only correct while it matches what `build_server` actually
+    registers. If a new built-in arrives and this set does not, a corpus can claim its name
+    — which is the hole `authority_chain` and `issuing_body_profile` were already in,
+    because they are conditional and the first guard keyed on what happened to be present."""
+    from corpus_toolkit.mcp.server import RESERVED_TOOL_NAMES
+
+    registered = _names(build_server(_corpus(tmp_path)))
+
+    assert registered <= RESERVED_TOOL_NAMES, (
+        f"built-in(s) missing from RESERVED_TOOL_NAMES: "
+        f"{sorted(registered - RESERVED_TOOL_NAMES)}")

@@ -69,6 +69,18 @@ from corpus_toolkit.mcp.responses import ResponseEnvelope
 # own answer and onto the SDK's marshalling, which is the separation those two exist for.
 
 
+# Tool names the MCP interface contract owns. A `plugins.tools_module` may not take one,
+# whether or not this corpus happens to register it: `authority_chain` and
+# `issuing_body_profile` are CONDITIONAL — on archetype and on the backend implementing
+# `holdings_for` — so keying the check on what is present let a corpus claim the name today
+# and turn fatal the day the condition changed, with no edit to its tools module
+# (corpus-toolkit#111).
+RESERVED_TOOL_NAMES = frozenset({
+    "search_corpus", "get_document", "resolve_citation", "graph_neighbors",
+    "corpus_overview", "authority_chain", "issuing_body_profile",
+})
+
+
 def build_server(config):
     # A DECLARED ARCHETYPE IS A PROMISE ABOUT THE TOOL SURFACE, enforced here because it
     # was broken silently once: oregon-legislature declared `hybrid`, registered no
@@ -176,10 +188,17 @@ def build_server(config):
                   f"tool would raise on every call. Implement it to serve this tool.",
                   file=sys.stderr)
 
-    # Corpus-specific tools, registered LAST so they see a fully-built server and cannot
-    # be shadowed by a built-in added later. The seam exists because the built-in seven
-    # are a closed set: a hybrid corpus needs tools keyed on a dataset rather than a
-    # document id, and there was no way to express that short of forking this file.
+    # Corpus-specific tools, registered LAST so they see a fully-built server. The seam
+    # exists because the built-in seven are a closed set: a hybrid corpus needs tools keyed
+    # on a dataset rather than a document id, and there was no way to express that short of
+    # forking this file.
+    #
+    # THIS USED TO SAY extension tools "cannot be shadowed by a built-in added later",
+    # which is true and beside the point: no built-in is added later. The direction that
+    # bites is the reverse — a built-in ALREADY PRESENT wins the name, because both SDK
+    # majors keep the first registration — and nothing addressed it until
+    # corpus-toolkit#111. A comment that reassures about the harmless direction while the
+    # dangerous one goes unmentioned is worse than no comment.
     #
     # A FAILURE HERE IS FATAL, DELIBERATELY. Catching the import and starting anyway
     # would produce a server that looks healthy, answers every built-in call correctly,
@@ -190,7 +209,76 @@ def build_server(config):
         from corpus_toolkit.plugins import load_attr
         before = _sdk.tool_names(mcp)
         register = load_attr(config.tools_module, config.root)
-        register(mcp, fw)
+
+        # RECORD WHAT THE MODULE ATTEMPTS, because the difference below cannot see a
+        # collision (corpus-toolkit#111). Both SDK majors keep the EXISTING tool when a
+        # name is registered twice, so a corpus tool named for a built-in is discarded and
+        # the built-in answers in its place. The name was already in `before`, so it can
+        # never appear in `added`, and the summary reported success while the corpus's tool
+        # did not exist. Same outcome the block above refuses to allow for a module that
+        # fails to load, reached by a different route.
+        #
+        # `tool()` has an identical signature on 1.28.1 and 2.0.0, so one wrapper serves
+        # both; it is installed only for the duration of the hook.
+        # WRAPPED AT `add_tool`, NOT `tool`. `add_tool` is public on both majors and is
+        # what the `@mcp.tool()` decorator calls internally, so it is the single choke
+        # point every registration passes through. Wrapping only the decorator left a
+        # corpus free to call `mcp.add_tool(fn)` directly and walk past the guard —
+        # corpus-toolkit#111 intact via a different public API.
+        #
+        # `add_tool(fn, name=None, ...)` is identical on 1.28.1 and 2.0.0, so one wrapper
+        # serves both. It is installed only for the duration of the hook.
+        attempted: list[str] = []
+        original_add_tool = mcp.add_tool
+
+        def _recording_add_tool(*args, **kwargs):
+            fn = args[0] if args else kwargs.get("fn")
+            # `name` is the first parameter AFTER fn, and a corpus may pass it
+            # positionally: `@mcp.tool("corpus_overview")` reaches here as
+            # add_tool(fn, "corpus_overview"). Reading only the keyword recorded the
+            # FUNCTION's name instead, the check found nothing, and #111 survived its
+            # own fix.
+            declared = args[1] if len(args) > 1 else kwargs.get("name")
+            attempted.append(declared or getattr(fn, "__name__", "?"))
+            return original_add_tool(*args, **kwargs)
+
+        mcp.add_tool = _recording_add_tool
+        try:
+            register(mcp, fw)
+        finally:
+            mcp.add_tool = original_add_tool
+
+        # THREE WAYS A REGISTRATION CAN FAIL TO REACH THE SURFACE, all of them silent.
+        seen: dict[str, int] = {}
+        for name in attempted:
+            seen[name] = seen.get(name, 0) + 1
+
+        collided = sorted(n for n in seen if n in before)
+        reserved = sorted(n for n in seen if n in RESERVED_TOOL_NAMES and n not in before)
+        duplicated = sorted(n for n, count in seen.items() if count > 1)
+
+        if collided or reserved or duplicated:
+            parts = []
+            if collided:
+                parts.append(
+                    f"{', '.join(collided)} — already registered by this server, so the "
+                    f"SDK kept the built-in and DISCARDED the corpus's version")
+            if reserved:
+                parts.append(
+                    f"{', '.join(reserved)} — reserved by the MCP interface contract. "
+                    f"Not registered on THIS corpus (those tools are conditional), so it "
+                    f"would have started clean and served corpus semantics under a core "
+                    f"tool's name, then turned fatal the day the condition changed")
+            if duplicated:
+                parts.append(
+                    f"{', '.join(duplicated)} — registered more than once by this module, "
+                    f"so every copy after the first was discarded")
+            raise RuntimeError(
+                f"plugins.tools_module '{config.tools_module}' cannot register these "
+                f"names:\n  " + "\n  ".join(parts) + "\n"
+                f"Each is silent at runtime, which is why this refuses to start. Rename "
+                f"them (corpus-toolkit#111).")
+
         added = sorted(_sdk.tool_names(mcp) - before)
         if not added:
             raise RuntimeError(
