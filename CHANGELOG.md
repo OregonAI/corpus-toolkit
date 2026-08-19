@@ -19,6 +19,43 @@ it can break you.
 
 Nothing yet.
 
+## v1.26.1 — 2026-08-19
+
+### Fixed — **v1.25.0 and v1.26.0 cannot build a corpus image; take this one**
+
+**If you are pinned to v1.25.0 or v1.26.0, your corpus image build is failing right now.**
+Bump the pin. There is no config workaround, and rolling back to v1.24.1 also clears it.
+
+v1.25.0 deleted `CorpusFramework.ensure_index` (corpus-toolkit#75). `corpus-template`'s
+Dockerfile — and therefore every corpus built from it — bakes its FTS index at image build by
+calling exactly that:
+
+```dockerfile
+RUN python3 -c "... CorpusFramework(config_mod.load('_meta/corpus.yml')).ensure_index()" && ...
+```
+
+So step 7 of 9 fails with `AttributeError: 'CorpusFramework' object has no attribute
+'ensure_index'`, the image never builds, and a pull-based deploy loop re-detects the same drift
+forever. Measured on the deploy host: six consecutive ERF deploy attempts in one hour with
+`deployed=` never advancing, each rebuilding a 1 GB context, starving every other corpus behind
+it and contributing materially to the host reaching 100% disk.
+
+The method is restored as a real method delegating to the backend, not a deprecation — a corpus
+is entitled to ask its framework to build the index, and deprecating it would only move the same
+breakage to a later release. A backend with no FTS index (the API archetype) still raises, but
+with a message naming which backend and why.
+
+**How it passed every gate.** A search of `corpus_toolkit/` and `tests/` found no caller, and
+that was the whole of the evidence — the callers live in the eight repositories that pin this
+one. The release gate checks out `corpus-template` and runs `contract_smoke.py` against it, but
+**never runs its Dockerfile**, so the one artifact representing how a corpus actually starts was
+sitting in the job's working directory unexecuted. Tracked as corpus-toolkit#100.
+
+Worse, #75 added `assert not hasattr(f, "ensure_index")` — a test pinning the deletion, which
+made the regression read as deliberate to anyone reviewing the suite. That assertion is replaced
+by one exercising the call a corpus makes.
+
+
 ## v1.26.0 — 2026-08-19
 
 ### Every corpus rebuilds its FTS index on this bump — plan the rollout
