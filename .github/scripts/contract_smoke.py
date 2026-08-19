@@ -23,9 +23,18 @@ This does exactly that:
   4. build the MCP server the way `corpus-mcp-serve` does and CALL every mandatory core
      tool from docs/mcp-interface-contract.md through the SDK's own tool manager,
      asserting the ANSWER, not merely that a name is registered
+  5. push every tool's real answer through the SDK's own result conversion and assert the
+     payload a CLIENT receives is the payload the tool returned
 
 Step 4 is the point. A tool that is registered and raises on every call passes a
 `tools/list` check and fails a user.
+
+Step 5 is the other half of it, and it exists because step 4 alone was not enough: a tool
+that answers correctly and whose answer is then discarded at serialization passes step 4
+and still fails a user. v1.24.0 did precisely that — `get_document` returned three envelope
+fields and no document body, reported success, and shipped through this gate GREEN, because
+every call here goes through `_sdk.call_tool(..., convert_result=False)`
+(corpus-toolkit#61, #63).
 
   python3 .github/scripts/contract_smoke.py --template /path/to/corpus-template
   python3 .github/scripts/contract_smoke.py --template ... --keep   # leave the scratch corpus
@@ -331,6 +340,153 @@ def check_mcp_tools(dest: Path) -> None:
     say(f"  OK: {len(results)} tool(s) called, every answer checked")
 
 
+# --------------------------------------- serialization leg (corpus-toolkit#63)
+
+def check_result_marshalling(dest: Path) -> None:
+    """The SECOND assertion on the same tools: not what the tool RETURNED, but what a
+    CLIENT would RECEIVE.
+
+    Everything above this line — every call in `check_mcp_tools`, and every test in
+    `tests/` — goes through `_sdk.call_tool`, which passes `convert_result=False`. That is
+    deliberate and its reasoning holds: this gate asserts that an external graph neighbour
+    comes back `{citation, external: true}`, and asserting that through the SDK's
+    marshalling would test the SDK rather than the toolkit. The gap it left is that nothing
+    asserted the marshalling EITHER, and that gap is exactly what v1.24.0 shipped through:
+    a declared output schema dropped every document body on the way out, the call still
+    reported success, and THIS GATE PASSED — it builds a real corpus and calls real tools,
+    with conversion switched off (corpus-toolkit#61, #63).
+
+    So the leg is added rather than the flag flipped. Two assertions on one call: the first
+    says the toolkit computed the wrong answer, this one says the right answer did not
+    survive the trip, and a single merged assertion could say neither.
+
+    A SCHEMA CHECK CANNOT REPLACE THIS. v1.24.0 shipped with tests that measured
+    `additionalProperties` on the emitted schema — absent, so extras validate — and
+    concluded extras were safe. Wrong layer: extras clear validation and are then discarded
+    by the model that serializes. Only a payload going in one end and being compared at the
+    other can see it.
+    """
+    from corpus_toolkit import config as config_mod
+    from corpus_toolkit.mcp import _sdk
+    from corpus_toolkit.mcp.server import build_server
+
+    config = config_mod.load(dest / "_meta" / "corpus.yml")
+    mcp = build_server(config)
+    tools = _sdk.tools_by_name(mcp)
+
+    # The same calls the behaviour leg makes, plus the hybrid extension tool this corpus
+    # has by now (this step runs after `hybridize`) — the tools_module surface no test
+    # reached at all, and the one a corpus writes itself.
+    calls = [
+        ("corpus_overview", {}),
+        ("search_corpus", {"query": "correspondence"}),
+        ("get_document", {"doc_id": DOC_ID}),
+        ("resolve_citation", {"citation": "Schedule 166-300-0001"}),
+        ("graph_neighbors", {"doc_id": DOC_ID}),
+        ("authority_chain", {"doc_id": DOC_ID}),
+        ("list_datasets", {}),
+    ]
+    uncovered = sorted(set(tools) - {name for name, _ in calls})
+    if uncovered:
+        raise GateFailure(
+            f"tool(s) registered with no serialization coverage: {uncovered}. Add each to "
+            f"this step's call list; a tool whose result is never round-tripped can start "
+            f"returning an empty envelope and keep reporting success (corpus-toolkit#61).")
+
+    problems = []
+    for name, args in calls:
+        if name not in tools:
+            continue
+        raw = asyncio.run(_sdk.call_tool(mcp, name, args))
+        if name == "search_corpus" and not any(h.get("id") == DOC_ID for h in raw):
+            # Otherwise this tool's whole leg is `[] == []`: every assertion below holds
+            # for an empty answer. Step 5 asserts hits exist, but against the server it
+            # built BEFORE the hybrid flip — this step rebuilds, so it must ask again.
+            problems.append(f"search_corpus returned {len(raw)} hit(s), none of them "
+                            f"{DOC_ID} — the per-hit assertions below would pass over an "
+                            f"empty list and prove nothing")
+        try:
+            texts, structured = _sdk.serialized_result(tools[name], raw)
+        except Exception as e:                                   # noqa: BLE001
+            # A ValidationError here is bug 1 of #61 verbatim — a declared shape refusing a
+            # value the toolkit documents. Collect, so one rejecting tool does not hide the
+            # rest.
+            problems.append(f"{name}{args} could not be serialized at all: "
+                            f"{type(e).__name__}: {e}")
+            continue
+
+        # The content blocks: one per item for a list answer, one for an object. Decoded,
+        # because a block that is not the JSON its payload was is a block a client cannot
+        # parse.
+        expected_blocks = raw if isinstance(raw, list) else [raw]
+        try:
+            blocks = [json.loads(t) for t in texts]
+        except ValueError as e:
+            problems.append(f"{name}: a content block is not valid JSON ({e})")
+            blocks = None
+        if blocks is not None and blocks != json.loads(json.dumps(expected_blocks,
+                                                                 default=str)):
+            problems.append(
+                f"{name}{args}: the content blocks a client renders are not the answer "
+                f"the tool returned ({len(blocks)} block(s) for "
+                f"{len(expected_blocks)} item(s))")
+
+        # The structured half. None is legitimate ONLY when the tool declared no output
+        # schema — the shape a bare `-> dict` annotation produces on both majors, which is
+        # how the live hybrid corpora write their extension tools (corpus-toolkit#96). A
+        # tool that DECLARES a schema and then serializes nothing is #61 itself, so the
+        # exemption keys on the declaration and never on the result coming back empty.
+        declared = getattr(tools[name], "output_schema", None)
+        if structured is None:
+            if declared is None:
+                continue
+            problems.append(
+                f"{name}{args}: declares an output schema and serialized NO structured "
+                f"content — the half a schema-driven client parses is absent, with the "
+                f"call still reporting success")
+            continue
+        want = {"result": raw} if isinstance(raw, list) else raw
+        want = json.loads(json.dumps(want, default=str))
+        if structured != want:
+            lost = sorted(set(want) - set(structured))
+            problems.append(
+                f"{name}{args}: the structured content a client parses is not the answer "
+                f"the tool returned"
+                + (f"; keys DROPPED at serialization: {lost}" if lost else ""))
+
+    # Bug 1 of #61 directly: a corpus that declares no `authoritative_source` emits null
+    # there by design (response convention 1), and this gate's corpus declares one — so the
+    # null is asserted against each object tool's own converter rather than by rebuilding
+    # the corpus without a source.
+    for name, tool in sorted(tools.items()):
+        # Object-shaped tools only. Skipping by SHAPE rather than by the name
+        # `search_corpus`: feeding an object probe to a list-shaped tool raises a
+        # ValidationError that reads exactly like a rejected payload, so the first
+        # `query_dataset` a corpus adds to SMOKE_TOOLS would produce a bogus "rejected
+        # authoritative_source: null" here and the cheap fix would be to weaken this.
+        if _sdk.declares_list_result(tool) or getattr(tool, "output_schema", None) is None:
+            continue
+        payload = {"corpus": "smoke-corpus", "archetype": "hybrid",
+                   "authoritative_source": None, "detail": "tool-specific payload"}
+        try:
+            out = _sdk.structured_result(tool, payload)
+        except Exception as e:                                   # noqa: BLE001
+            problems.append(f"{name} rejected `authoritative_source: null`, the documented "
+                            f"value for a corpus declaring no source: "
+                            f"{type(e).__name__}: {e}")
+            continue
+        if out.get("authoritative_source", "missing") is not None or "detail" not in out:
+            problems.append(f"{name} did not round-trip a null source plus a tool-specific "
+                            f"key: {out!r}")
+
+    for p in problems:
+        say(f"  FAIL {p}")
+    if problems:
+        raise GateFailure(f"result marshalling: {len(problems)} violation(s)")
+    say(f"  OK: {len(calls)} tool result(s) round-tripped, blocks and structured content "
+        f"both intact")
+
+
 # ------------------------------------------------- hybrid leg (corpus-toolkit#38)
 
 SMOKE_TOOLS = """\
@@ -420,6 +576,11 @@ def main() -> int:
         # inner step rather than a matrix axis, so the gate stays one job per SDK major.
         ("hybrid: archetype flip + tools fixture", lambda: hybridize(dest)),
         ("hybrid: enforcement refuses/serves correctly", lambda: check_hybrid_enforcement(dest)),
+        # LAST, and on the hybrid corpus deliberately: by this point the scratch corpus
+        # serves the core tools AND a tools_module extension tool, so one pass covers both
+        # surfaces. Every step above asserts the answer a tool computed; this one asserts
+        # the answer a client receives (corpus-toolkit#63).
+        ("every tool result survives serialization", lambda: check_result_marshalling(dest)),
     ]
     try:
         for i, (label, fn) in enumerate(steps, 1):
