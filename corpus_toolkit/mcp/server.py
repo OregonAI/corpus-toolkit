@@ -22,23 +22,25 @@ import argparse
 
 import sys
 
-from typing import Any
-
 from corpus_toolkit.mcp import _sdk
 
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.mcp.framework import CorpusFramework
+from corpus_toolkit.mcp.responses import ResponseEnvelope
 
 
-# WHY OBJECT-SHAPED TOOLS RETURN `dict[str, Any]` AND NOT A TypedDict.
+# WHY OBJECT-SHAPED TOOLS ARE ANNOTATED `-> ResponseEnvelope` AND NOT A TypedDict, AND WHY
+# THEY STILL RETURN PLAIN DICTS.
 #
 # Response convention 1 (`corpus`, `archetype`, `authoritative_source` on every
-# object-shaped response) is NOT declared as a TypedDict here, and the reason is a live
-# incident rather than a preference: v1.24.0 declared one and took all four corpora down
-# (corpus-toolkit#15, #61). Do not re-apply that change without reading this.
+# object-shaped response) is declared, because it was invisible to field-level validation
+# while `dict[str, Any]` emitted `{"additionalProperties": true}` and no properties at all
+# (corpus-toolkit#15). It is declared as an OPEN pydantic model. Do not turn it into a
+# TypedDict, and do not close it: v1.24.0 did the first, which does the second, and took
+# all four live corpora down (corpus-toolkit#61).
 #
-# A TypedDict return makes the SDK build a pydantic model and push every response through
-# it. That does two things a shared response floor must never do:
+# The generated model from a TypedDict does two things a shared response floor must never
+# do:
 #
 #   1. `authoritative_source: str` REJECTS None — and None is the documented value for a
 #      corpus that declares no source (docs/mcp-interface-contract.md convention 1;
@@ -52,13 +54,19 @@ from corpus_toolkit.mcp.framework import CorpusFramework
 # The v1.24.0 reasoning measured `additionalProperties` on the emitted schema (absent, so
 # extras validate) and concluded extras were safe. That was the wrong layer: extras clear
 # validation and are then discarded by the model that does the serializing. A schema check
-# cannot see this — only a round-trip through `convert_result` can, which is what
-# tests/test_output_schemas.py now pins.
+# cannot see this — only a round-trip through `convert_result` can, which
+# tests/test_output_schemas.py and tests/test_result_marshalling.py both pin.
 #
-# `dict[str, Any]` emits `{"additionalProperties": true}` — a real output schema, weaker
-# than a field list but the strongest thing that does not own the payload. Declaring the
-# convention's fields to schema-driven validation without handing serialization to the
-# declaration is still open as corpus-toolkit#15.
+# WHAT IS DIFFERENT ABOUT `ResponseEnvelope`: `extra="allow"`. `dict[str, Any]` was never
+# "no model in the response path" — the SDK builds `RootModel[dict[str, Any]]` for it and
+# dumps every response through that (measured, both majors). The envelope model is the same
+# pass-through with three fields named on top, so the declaration describes the response
+# instead of becoming it. See corpus_toolkit/mcp/responses.py for the measurements.
+#
+# THE TOOL BODIES STILL RETURN `fw.<tool>()`'s DICT. The annotation is a declaration to the
+# SDK, not a constructor: `model_validate` takes the mapping. Returning model INSTANCES
+# would move `_sdk.call_tool(convert_result=False)` and the release gate off the toolkit's
+# own answer and onto the SDK's marshalling, which is the separation those two exist for.
 
 
 def build_server(config):
@@ -111,14 +119,14 @@ def build_server(config):
         return fw.search_corpus(query, doc_type or None, issuing_body or None, limit, mode)
 
     @mcp.tool()
-    def get_document(doc_id: str, part: str = "auto") -> dict[str, Any]:
+    def get_document(doc_id: str, part: str = "auto") -> ResponseEnvelope:
         """Fetch one document by id, with provenance metadata and the
         non-authoritative disclaimer. Oversized documents return an at-a-glance
         summary plus a section list — pass part='<heading>' to page in content."""
         return fw.get_document(doc_id, part)
 
     @mcp.tool()
-    def resolve_citation(citation: str) -> dict[str, Any]:
+    def resolve_citation(citation: str) -> ResponseEnvelope:
         """Map a citation string to in-corpus document id(s) via the corpus's
         registered citation schemes, or an explicit `unresolved` result with the
         schemes attempted. Never guesses. Citations belonging to a sibling
@@ -129,19 +137,19 @@ def build_server(config):
         return fw.resolve_citation(citation)
 
     @mcp.tool()
-    def graph_neighbors(doc_id: str) -> dict[str, Any]:
+    def graph_neighbors(doc_id: str) -> ResponseEnvelope:
         """All relationship edges of a document, grouped by type, one hop only."""
         return fw.graph_neighbors(doc_id)
 
     @mcp.tool()
-    def corpus_overview() -> dict[str, Any]:
+    def corpus_overview() -> ResponseEnvelope:
         """What this corpus contains and does not: doc counts by type, archetype,
         contract version, and the non-authoritative disclaimer. Call this first."""
         return fw.corpus_overview()
 
     if config.archetype in ("document", "hybrid"):
         @mcp.tool()
-        def authority_chain(doc_id: str, direction: str = "both", depth: int = 3) -> dict[str, Any]:
+        def authority_chain(doc_id: str, direction: str = "both", depth: int = 3) -> ResponseEnvelope:
             """Walk the authority graph: 'up' toward what authorizes this document,
             'down' toward what implements it, 'both' does both."""
             return fw.authority_chain(doc_id, direction, depth)
@@ -158,7 +166,7 @@ def build_server(config):
         if config.issuing_body_registry and callable(
                 getattr(fw.backend, "holdings_for", None)):
             @mcp.tool()
-            def issuing_body_profile(slug_or_query: str) -> dict[str, Any]:
+            def issuing_body_profile(slug_or_query: str) -> ResponseEnvelope:
                 """Context about an issuing body: registry identity, curated notes,
                 and what this corpus holds for it. Accepts a slug or name fragment."""
                 return fw.issuing_body_profile(slug_or_query)

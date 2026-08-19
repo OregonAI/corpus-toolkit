@@ -579,6 +579,39 @@ coverage without those counts, reports `attribution.complete: null`, because hal
 measurement is not a measurement and "did not check" is not "nothing is missing". Report the
 buckets if you can classify against the registry; omit them if you cannot.
 
+### Unreleased — object-shaped tools declare response convention 1
+
+**No action for a corpus using the built-in file backend, which is all eight live corpora.**
+Response bodies are unchanged; only the declared output schema moved, from
+`{"additionalProperties": true}` to the same thing plus `corpus`, `archetype` and
+`authoritative_source` as named, required properties with `authoritative_source` typed
+`string | null` (corpus-toolkit#15). Verified whole-payload equal for every registered tool
+on both SDK majors before shipping — this is the change that must not repeat v1.24.0, and
+`tests/test_result_marshalling.py` is what proves it did not.
+
+**One thing to check if your corpus supplies `plugins.retrieval_module`.** The three fields
+are now *required* by the declared schema, so a response missing any of them raises at
+serialization instead of going out quietly non-conforming. The toolkit builds them in
+`CorpusFramework._envelope()` on every path, so the only way to lose one is a backend record
+that overrides it: `get_document` merges the backend's record **over** the envelope, so a
+record carrying `corpus`, `archetype` or `authoritative_source` with a non-string value
+(`None` for the first two, a list, a number) now fails the call. A record that simply omits
+them is fine — the envelope supplies them.
+
+Grep your backend's `get()` for those three keys. Returning `authoritative_source` as a
+document's `source_url` string is the supported case and is what `FileBackend` does.
+
+**Why required rather than optional.** `authoritative_source: null` means this corpus
+declares no front door; an absent key means nobody answered. Those are opposite answers and
+the platform does not let them collapse — a default would have injected the first for a tool
+that gave neither.
+
+**Extension tools are unaffected and still declare nothing.** A `tools_module` tool
+annotated bare `-> dict` emits no output schema and no structured content on either major;
+that is corpus-toolkit#96. If you want yours to advertise the convention, annotate it
+`-> ResponseEnvelope` from `corpus_toolkit.mcp.responses` — the same open model the built-ins
+use — and keep returning a plain dict.
+
 ### Adopting any of these in a corpus repo
 
 1. Bump **both** pins (`uses:` and `toolkit-ref:`) — and the third, if the repo installs the

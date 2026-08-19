@@ -167,6 +167,30 @@ CALLS = {
 MANDATORY_CORE_TOOLS = {"corpus_overview", "search_corpus", "get_document",
                         "resolve_citation", "graph_neighbors"}
 
+# THE ERROR BRANCHES, round-tripped as their own table (corpus-toolkit#15 review).
+#
+# CALLS above is happy-path only, and that was a real hole rather than a tidy one: response
+# convention 1 applies to errors precisely BECAUSE "an error is the response an agent is most
+# likely to misread" (docs/mcp-interface-contract.md), and an error shape is where the
+# envelope and a handful of tool-specific keys are the WHOLE payload — so a declaration that
+# ate extras would leave an error response that is nothing but three fields and still reads
+# as a successful call. That is #61's shape with less to notice.
+#
+# `graph_neighbors('alpha')` in CALLS happens to hit `no_graph` already, because the fixture
+# writes no `_meta/graph.json`. Incidental coverage is not coverage: nothing said so, and a
+# fixture that later grew a graph would have removed it silently. Listed here deliberately.
+#
+# `get_document` on an unknown id is the branch corpus-toolkit#102 is about — the one place
+# a backend record is merged OVER the envelope with no re-assertion — so it is the branch
+# whose marshalling most wants pinning before that fix lands.
+ERROR_CALLS = {
+    "get_document": {"doc_id": "no-such-document"},
+    "resolve_citation": {"citation": "not a citation in any registered scheme"},
+    "graph_neighbors": {"doc_id": "no-such-document"},
+    "authority_chain": {"doc_id": "no-such-document"},
+    "issuing_body_profile": {"slug_or_query": "no-such-issuing-body"},
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolate_imports():
@@ -347,6 +371,48 @@ def test_every_tool_answer_reaches_the_client_intact(fixture, request):
             problems.append(
                 f"{name}{arguments}: the STRUCTURED content a client parses is not the "
                 f"answer the tool returned"
+                + (f"; keys dropped at serialization: {lost}" if lost else "")
+                + f"\n      returned: {json.dumps(want, sort_keys=True)[:400]}"
+                + f"\n      received: "
+                + json.dumps(structured, sort_keys=True, default=str)[:400])
+    assert not problems, "\n    " + "\n    ".join(problems)
+
+
+def test_every_error_branch_reaches_the_client_intact(document_server):
+    """The same whole-payload equality, on the shapes an agent is most likely to misread.
+
+    Errors carry the envelope BY CONTRACT (response convention 1, "errors included"), and
+    they are the responses with the least left over once the envelope is removed — so a
+    declaration that dropped extras would turn `no_graph` into three fields that say
+    nothing went wrong. Convention 5 is what is really at stake: `no_graph`, `not_in_graph`,
+    `unresolved` and `sibling_unavailable` exist to keep "could not check" apart from "is
+    not there", and every one of them travels in a key no shared schema declares.
+
+    Asserted per branch rather than pooled, so a failure names the tool AND the arguments
+    that produced it."""
+    tools = _tools(document_server)
+    problems = []
+    for name, arguments in ERROR_CALLS.items():
+        assert name in tools, f"fixture does not serve {name}; this table is not testing it"
+        raw = _call(document_server, name, arguments)
+        assert set(raw) - {"corpus", "archetype", "authoritative_source"}, (
+            f"{name}{arguments} returned only the envelope — the fixture is not reaching "
+            f"an error branch, so the assertions below prove nothing")
+        try:
+            texts, structured = _sdk.serialized_result(tools[name], raw)
+        except Exception as e:                 # noqa: BLE001
+            problems.append(f"{name}{arguments} could not be serialized at all: "
+                            f"{type(e).__name__}: {e}")
+            continue
+        if _decoded_blocks(texts, name) != _expected_blocks(raw):
+            problems.append(f"{name}{arguments}: the CONTENT BLOCKS a client renders are "
+                            f"not the error the tool returned")
+        want = _expected_structured(raw)
+        if structured != want:
+            lost = sorted(set(want) - set(structured))
+            problems.append(
+                f"{name}{arguments}: the STRUCTURED content a client parses is not the "
+                f"error the tool returned"
                 + (f"; keys dropped at serialization: {lost}" if lost else "")
                 + f"\n      returned: {json.dumps(want, sort_keys=True)[:400]}"
                 + f"\n      received: "
