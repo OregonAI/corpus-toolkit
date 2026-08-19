@@ -443,3 +443,129 @@ class TestConfiguredAuthorityRelations(GraphToolTestCase):
             self.framework(cfg)
         self.assertIn("unknown direction", str(e.exception))
 
+
+
+class TestReservedRelationNames(GraphToolTestCase):
+    """corpus-toolkit#105. A graph relation name becomes a response key verbatim.
+
+    `graph_neighbors` writes one key per edge-relation type found in the graph, after the
+    envelope, and nothing constrained those names. A corpus declaring a relation named
+    `corpus` overwrote that envelope field with a list of neighbour records — a hard
+    ValidationError at serialization since #103 types it `str`, so the tool stopped
+    answering for that document. `id` and `title` were overwritten with NO error at all,
+    because the envelope model constrains only its own three fields: a caller received a
+    list where it expected a document id.
+
+    SAME CLASS AS #102/#104, DIFFERENT REMEDY. Those merged a BACKEND's mapping over a
+    response and were fixed by re-asserting the framework's keys last — the backend had no
+    business setting them and ignoring it costs nothing. A graph relation is the corpus's
+    OWN declared data, so silently dropping it is data loss rather than enforcement. This
+    fails at parse and names what to rename.
+
+    No live corpus collides: the relation types in use across the platform are
+    `references_external`, `related`, `supersedes`, `implements` and `implemented_by`.
+    """
+
+    def _edges(self, rel):
+        return [{"from": "schedule-employment", "to": "schedule-other", "type": rel}]
+
+    def _rejects(self, rel):
+        """True iff `graph_neighbors` refuses, explicitly, and names the relation."""
+        f = self.framework(self.corpus(edges=self._edges(rel)))
+        out = f.graph_neighbors("schedule-employment")
+        return bool(out.get("error")) and rel in out["error"]
+
+    def test_only_the_tool_whose_keys_can_be_displaced_is_affected(self):
+        """BLAST RADIUS. The first version of this fix raised from the graph LOADER, which
+        every graph-consuming tool shares — so one misnamed relation took down
+        `corpus_overview` (the tool the server's own instructions say to call first),
+        `resolve_citation` and `authority_chain`, none of which can have a key displaced by
+        a relation name. A caller of `corpus_overview` got a crash about a file it never
+        asked about.
+
+        That also broke response convention 5, which says an error names the condition that
+        actually occurred — and it is the same shape as corpus-toolkit#4, where a corpus
+        data problem surfaced as an opaque tool error. Detection still happens once, at
+        parse; only the tool that would be WRONG declines to answer."""
+        f = self.framework(self.corpus(edges=self._edges("corpus")))
+
+        self.assertNotIn("error", f.corpus_overview())
+        self.assertNotIn("error", f.authority_chain("schedule-employment"))
+        self.assertEqual(f.resolve_citation("Schedule 166-300")["citation"],
+                         "Schedule 166-300")
+        self.assertTrue(f.graph_neighbors("schedule-employment")["error"])
+
+    def test_the_refusal_is_an_explicit_error_response_not_a_raise(self):
+        """Convention 5's shape: the envelope, an `error`, and a `note` saying what to do.
+        The same treatment `no_graph` and `not_in_graph` already get — a corpus data problem
+        is reported, never raised through a tool."""
+        f = self.framework(self.corpus(edges=self._edges("corpus")))
+
+        out = f.graph_neighbors("schedule-employment")
+
+        self.assertEqual(out["corpus"], "records-retention")   # envelope intact
+        self.assertIn("corpus", out["error"])
+        self.assertIn("graph.json", out["note"])
+
+    # Collected and asserted as a whole rather than looped through `subTest`: pytest
+    # reports a subTest failure under a parent line that still reads PASSED, and this
+    # suite has been bitten enough by greens that mean nothing. A failure here names
+    # exactly which relation slipped through.
+    def test_a_relation_named_for_an_envelope_field_is_rejected_at_parse(self):
+        names = ("corpus", "archetype", "authoritative_source")
+        self.assertEqual([n for n in names if not self._rejects(n)], [])
+
+    def test_a_relation_named_for_the_tools_own_field_is_rejected_too(self):
+        """`id` and `title` were the SILENT half — no ValidationError guards them, so the
+        response simply carried a list where a caller expected a string."""
+        names = ("id", "title")
+        self.assertEqual([n for n in names if not self._rejects(n)], [])
+
+    def test_the_error_names_the_reserved_set_and_the_file(self):
+        """A corpus author needs to know WHICH names are unavailable and WHERE to edit."""
+        out = self.framework(self.corpus(edges=self._edges("corpus"))).graph_neighbors(
+            "schedule-employment")
+
+        message = out["error"] + " " + out["note"]
+        for name in ("corpus", "archetype", "authoritative_source", "id", "title"):
+            self.assertIn(name, message)
+        self.assertIn("graph.json", message)
+
+    def test_every_relation_name_in_use_on_the_platform_still_parses(self):
+        """The check is protective, not a migration. These are the relation types actually
+        declared across the eight corpus graphs."""
+        live = ["references_external", "related", "supersedes",
+                "implements", "implemented_by"]
+        cfg = self.corpus(edges=[{"from": "schedule-employment",
+                                  "to": "schedule-other", "type": r} for r in live])
+
+        nodes, edges = self.framework(cfg).graph()
+
+        self.assertEqual(sorted(edges["schedule-employment"]), sorted(live))
+
+    def test_a_corpus_with_no_edges_is_unaffected(self):
+        self.assertEqual(self.framework(self.corpus(edges=[])).graph()[1], {})
+
+    def test_a_corpus_with_no_graph_at_all_is_unaffected(self):
+        # Separate test rather than a second call in the one above: `corpus()` reuses one
+        # repo root, so a `graph=False` build after a `graph=True` one inherits the first
+        # one's graph.json and the assertion passes for the wrong reason.
+        self.assertEqual(self.framework(self.corpus(graph=False)).graph(), ({}, {}))
+
+    def test_the_reserved_set_is_exactly_what_graph_neighbors_writes(self):
+        """The check and the tool must not drift apart.
+
+        The reserved names are only correct because they are the keys `graph_neighbors`
+        assembles BEFORE its relation loop. If that tool gains a field and this set does
+        not, the new field becomes displaceable again and nothing would say so."""
+        f = self.framework(self.corpus(edges=[]))
+
+        # An EDGELESS corpus's response is exactly the pre-loop assembly, so this is
+        # equality against the tool's real output rather than against a restatement of the
+        # implementation. The first version compared the reserved set to a hand-written
+        # `set(f._envelope()) | {"id", "title"}` and then only checked that it was a SUBSET
+        # of the response — so adding `doc_type` to graph_neighbors (a field
+        # `authority_chain` already emits) would have left it silently displaceable with
+        # both assertions still green. That is the exact drift this test claims to catch.
+        self.assertEqual(f._reserved_response_keys(),
+                         set(f.graph_neighbors("schedule-employment")))

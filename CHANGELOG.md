@@ -17,6 +17,46 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — a graph relation name can no longer displace a response key
+
+**Can affect you only if your `_meta/graph.json` declares a relation named `corpus`,
+`archetype`, `authoritative_source`, `id` or `title`.** None does today — the relation types
+in use across the platform are `references_external`, `related`, `supersedes`, `implements`
+and `implemented_by` — so this is protective rather than a migration.
+
+If one ever did, **`graph_neighbors` stops answering for that corpus** and returns an error
+naming the relation, the reserved set and the graph file. Only that tool:
+`corpus_overview`, `resolve_citation` and `authority_chain` share the graph loader but
+cannot have a key displaced by a relation name, so they keep working. **The failure is
+lazy** — the graph is parsed on the first graph-tool call, not at boot — so a collision is
+first observed in production, and no CI gate catches it. MIGRATION.md carries a one-line
+check to run before bumping.
+
+`graph_neighbors` writes one response key per edge-relation type, after the envelope, and
+nothing constrained those names. A relation named `corpus` overwrote that envelope field
+with a list of neighbour records — a hard `ValidationError` since the envelope types it
+`str`, so the tool stopped answering for that document. `id` and `title` were worse:
+overwritten with **no error at all**, because the envelope model constrains only its own
+three fields, so a caller received a list where it expected a document id.
+
+This is the third and last site of the class the two entries below close. `authority_chain`
+was audited and is safe — it prefixes every configured relation as `up_{name}`/`down_{name}`,
+so a colliding name cannot reach the response.
+
+**The remedy differs from the other two deliberately.** Those merged a *backend's* mapping
+over a response and were fixed by re-asserting the framework's keys last: the backend had no
+business setting them, so ignoring it costs nothing. A graph relation is the corpus's **own
+declared edge**, and silently dropping it would be data loss rather than enforcement — the
+author would never learn their relationship had stopped being served.
+
+Detection runs where the graph is parsed, so it costs once per corpus (measured at 0.2s for
+ERF's 75,905-node graph); only the reporting lives in the tool. An earlier draft raised from
+the loader instead, which took down `corpus_overview` — the tool the server's own
+instructions say to call first — along with `resolve_citation` and `authority_chain`, and
+reported a condition other than the one that occurred, which convention 5 forbids.
+
+Closes corpus-toolkit#105.
+
 ### Fixed — a backend can no longer displace the response envelope
 
 **Can break you only if your corpus supplies `plugins.retrieval_module` AND its `get()` or

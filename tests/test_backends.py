@@ -1346,3 +1346,37 @@ def test_big_doc_bytes_has_exactly_one_definition():
     src = Path(framework.__file__).read_text()
     assert not re.search(r"^BIG_DOC_BYTES\s*=", src, re.M), (
         "framework.py must not redefine BIG_DOC_BYTES — import it from backends")
+
+
+@pytest.mark.parametrize("reserved", ["corpus", "archetype", "authoritative_source",
+                                      "id", "title"])
+def test_no_graph_relation_can_displace_a_response_key_either(corpus, reserved):
+    """The sweep above, for the input it does NOT cover (corpus-toolkit#105).
+
+    It drives every enveloped tool through a clobbering BACKEND, which is why the third
+    site of this class went unnoticed: `graph_neighbors` writes one response key per graph
+    relation name, and graph data reaches the response by a path no backend stub touches.
+
+    So the guard is completed here rather than left implied by the other one's name. A
+    relation named for a reserved key is refused when the graph is parsed, and refusing is
+    the point: for a BACKEND mapping the framework quietly wins, because the backend had no
+    business setting those keys; a graph relation is the corpus's own declared edge, and
+    dropping it silently would be data loss."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    f = _sweep_corpus(corpus, "backend_mod:_StubBackend")
+    (corpus / "_meta" / "graph.json").write_text(json.dumps({
+        "nodes": [{"id": "ors-1.010", "title": "Definitions", "doc_type": "statute"},
+                  {"id": "ors-2.020", "title": "Fees", "doc_type": "statute"}],
+        "edges": [{"from": "ors-2.020", "to": "ors-1.010", "type": reserved}]}))
+    f._graph_cache = None                       # re-read the graph we just rewrote
+
+    out = f.graph_neighbors("ors-2.020")
+
+    assert reserved in out["error"]
+    assert "graph.json" in out["note"]
+    assert out["corpus"] == "test-corpus"       # refusing still carries the envelope
+    # ...and ONLY this tool refuses. Raising from the shared graph loader took down
+    # corpus_overview and resolve_citation too, neither of which can have a key displaced
+    # by a relation name.
+    assert "error" not in f.corpus_overview()

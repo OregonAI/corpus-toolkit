@@ -524,6 +524,40 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
+### Unreleased — five relation names are reserved in `_meta/graph.json` (corpus-toolkit#105)
+
+**Check your graph's relation types before bumping the pin. Nothing else will tell you.**
+
+`graph_neighbors` returns each edge type under its own response key, so a relation name
+becomes a response key verbatim. Five are now reserved: `corpus`, `archetype`,
+`authoritative_source` (convention 1's envelope) plus the tool's own `id` and `title`.
+
+```bash
+python3 -c "import json,sys; g=json.load(open('_meta/graph.json')); \
+  bad=sorted({e['type'] for e in g['edges']} & {'corpus','archetype','authoritative_source','id','title'}); \
+  print('COLLIDES:', bad) if bad else print('clear')"
+```
+
+**No corpus on the platform collides** — the types in use are `references_external`,
+`related`, `supersedes`, `implements` and `implemented_by` — so this is expected to be a
+no-op for everyone. It is worth thirty seconds anyway, because the failure is *lazy*: the
+graph is parsed on the first graph-tool call, not at boot, so a collision is first seen in
+production rather than at deploy. `corpus-validate-frontmatter`, your own
+`build_graph --check` and the toolkit's release gate all stay green, since the frontmatter
+schema's `relationships` block is closed over the five live names — only your graph builder
+can introduce a collision.
+
+**If you do collide**, `graph_neighbors` returns an explicit error naming the relation, the
+reserved set and the graph file, and you rename the relation and rebuild. **Only that tool
+is affected**: `corpus_overview`, `resolve_citation` and `authority_chain` share the graph
+loader but cannot have a key displaced by a relation name, so they keep answering.
+
+**Why an error rather than quietly ignoring the colliding relation.** The two entries below
+fix the same class for a *backend's* mapping by letting the framework's keys win silently —
+the backend had no business setting them. A graph relation is your own declared edge, and
+dropping it without a word would mean a relationship stopped being served and you never
+found out.
+
 ### Unreleased — a corpus's own tools can satisfy response convention 1 (corpus-toolkit#96)
 
 **Nothing breaks and nothing is required.** Extension tools registered through
@@ -779,3 +813,8 @@ use — and keep returning a plain dict.
 3. Re-run the full CI, not just the changed job. The gates that catch a bad bump —
    provenance, frontmatter, generated artifacts — are not the ones a pin change looks like
    it touches.
+4. If the bump crosses corpus-toolkit#105, run the reserved-relation check in that entry
+   against `_meta/graph.json`. It is the one thing here that **no** gate covers: the
+   frontmatter schema cannot see it, your `build_graph --check` cannot see it, and the
+   toolkit's own release gate cannot see it — so a collision is first observed in
+   production, on a graph-tool call.
