@@ -31,13 +31,25 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get update -q && sudo apt-get install -y poppler-utils
       - run: pip install ./.toolkit
+      # This step now FAILS the job when the run could not do its job: the issue cap
+      # truncated the report, or no in-scope source has a recorded baseline
+      # (corpus-toolkit#67, #68). Both used to conclude `success` with the explanation on
+      # stderr near the end of a multi-thousand-line log, where it went unread through two
+      # occurrences. Do not paper over it with `continue-on-error` — a green check is
+      # exactly the wrong answer. Seed the manifest (`--record-baseline`) or fix the group
+      # the breakdown names.
       - name: Detect drift and open issues
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: corpus-detect-changes --config _meta/corpus.yml --open-issues
+      # `if: always()` so STATUS.md still regenerates on a red drift step. The freshness
+      # report is independent of whether drift reporting was truncated, and losing it is
+      # not a useful consequence of a capped run.
       - name: Regenerate STATUS.md
+        if: always()
         run: corpus-generate-status --config _meta/corpus.yml --output STATUS.md
       - name: Commit STATUS.md if changed
+        if: always()
         run: |
           git config user.name "corpus-bot"
           git config user.email "actions@github.com"

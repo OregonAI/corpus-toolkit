@@ -446,6 +446,84 @@ If your corpus supplies its own `plugins.retrieval_module`, it keeps working unt
 `holdings_for` is optional. Implement it if you want that backend to serve
 `issuing_body_profile`, which before this release it could not do at any price.
 
+### Unreleased — REQUIRED action if your manifest has empty `sha256` values
+
+Two exit codes change in `corpus-detect-changes`, and a corpus whose baselines were never
+recorded will go **red** on its next scheduled run instead of green. That is the point: it
+was already inert, and now it says so (corpus-toolkit#67, #68).
+
+**Do not grep for it.** An unrecorded baseline has four spellings — `sha256: ""`,
+`sha256: ''`, `sha256:` and `sha256: ` — so `grep -c 'sha256: ""'` reports 1 on a file the
+tool counts as 4, and a corpus using single quotes reads 0, skips this section and goes red
+on the next cron. **The tool counts them itself**: every run now prints
+`N with no recorded baseline` in its summary and marks the affected groups in the per-group
+breakdown (`counties 2/2 [2 unseeded]`).
+
+**Seed before you bump the pin.** The seeding command is safe to run first and read after —
+it writes only into empty baselines, reports `0 baseline(s) recorded` if there are none, and
+commits nothing. From a checkout of the corpus, with the new toolkit installed:
+
+```bash
+corpus-detect-changes --config _meta/corpus.yml --record-baseline
+git diff _meta/                       # curated data — read the diff
+```
+
+Bare `--record-baseline` fills only sources with **no** recorded baseline; a recorded one is
+left alone and reported, because replacing it is accepting an upstream change you have not
+read. `--record-baseline=refresh` does that second thing when you mean it. Sources whose
+fetch failed are never written. Nothing is committed — open a PR with the manifest diff as
+usual. It refuses to run alongside `--open-issues`.
+
+Known affected, both tracked in their own repos: `oregon-counties` (3,447 sources, 27
+manifests) and `oregon-kpm` (789). `executive-regulatory-frameworks` has a complete baseline
+and needs none of this.
+
+**What else changes for the corpus tier:**
+
+- A **capped** run (more than 25 changed sources) now exits 1 and emits a workflow warning
+  annotation. Uncapped runs are unchanged. If your corpus caps regularly, read the new
+  per-group breakdown line before raising anything — a group at or near 100% has been a
+  template change or a broken fetch far more often than it has been real revisions.
+- If you call `detect-upstream-changes.yml`, take the new revision: its STATUS.md steps run
+  with `if: always()` so a red drift step no longer skips them. Do **not** add
+  `continue-on-error` to the drift step; that restores the green check this change exists to
+  remove.
+- The summary line gained a field (`N with no recorded baseline`) and a per-group breakdown
+  line. A corpus grepping the drift log in its own CI should expect both.
+- Three more runs now exit 1, all of them cases that used to be green while nothing was
+  checked or nothing was written: a run whose scope came out **empty** (a typo'd `--group`
+  checks 0 sources), a `--record-baseline` run that **refused** a rewrite it could not
+  account for, and the inert case above. `--github-output` gains `unseeded=N`, and no longer
+  reports `changed=true` on an inert run — every source "changed" against an empty baseline
+  is not a finding, and it should not trigger downstream steps.
+
+**Optional, and only if your sources embed a volatile token** (session id, CDN token,
+footer build version): declare it in `_meta/corpus.yml`.
+
+```yaml
+volatile_patterns:
+  - ";JSESSIONID_OARD=[^?'\" >]*"
+  - "OARD Application version v[0-9.]+"
+```
+
+Regexes over the **raw bytes**, applied on the HTML/XML path only, compiled at config load —
+an invalid or empty one fails the load by name rather than becoming a silent no-op. Declaring
+none changes nothing: hashes are byte-identical to v1.25.0.
+
+**Keep them narrow, and read the breadth line in the run output.** Every run reports how much
+each pattern removed, in bytes and as a share of what it fetched, and warns above 10%. A
+pattern wide enough to swallow the body — `<main>.*</main>` — deletes content before hashing,
+so two versions differing only inside it hash identically and those documents can never report
+drift again. The toolkit measures and says so rather than refusing: how much of your pages is
+genuinely volatile is your call, but it should be a call somebody made in a PR rather than a
+side effect nobody noticed.
+
+**Adding a pattern invalidates the baseline of every page it matches.** Do it in one PR:
+add the pattern, run `corpus-detect-changes --config _meta/corpus.yml --record-baseline=refresh`,
+review the manifest diff, commit both. Otherwise the next cron reports the whole group as
+drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
+are the ones to move here — the two hashers can disagree about the same bytes until they do.
+
 ### Adopting any of these in a corpus repo
 
 1. Bump **both** pins (`uses:` and `toolkit-ref:`) — and the third, if the repo installs the
