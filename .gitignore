@@ -5,3 +5,7 @@ _meta/.cache/
 
 # setuptools build artifacts (a stale copy of the package tree)
 build/
+
+# Agent worktrees created by the Claude Code harness. Real git worktrees sharing this
+# repo's object database, so committing them embeds a repo inside a repo.
+.claude/
