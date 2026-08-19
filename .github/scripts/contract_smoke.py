@@ -20,14 +20,24 @@ This does exactly that:
      verify rather than passing vacuously over an empty tree
   3. run the same CLIs the reusable workflows run — validate-frontmatter,
      verify-provenance, generate-index --check — against it
-  4. build the MCP server the way `corpus-mcp-serve` does and CALL every mandatory core
+  4. run the template's OWN Dockerfile build commands against the candidate toolkit,
+     extracted from its `RUN` instructions rather than copied (corpus-toolkit#100)
+  5. build the MCP server the way `corpus-mcp-serve` does and CALL every mandatory core
      tool from docs/mcp-interface-contract.md through the SDK's own tool manager,
      asserting the ANSWER, not merely that a name is registered
-  5. push every tool's real answer through the SDK's own result conversion and assert the
+  6. push every tool's real answer through the SDK's own result conversion and assert the
      payload a CLIENT receives is the payload the tool returned
 
-Step 4 is the point. A tool that is registered and raises on every call passes a
+The numbers above are the shape of the run, not the printed `[N/9]` labels -- the hybrid
+leg splits some of these into inner steps.
+
+Step 5 is the point. A tool that is registered and raises on every call passes a
 `tools/list` check and fails a user.
+
+Step 4 exists because the gate had the template checked out and reached past the one file
+that encodes how a corpus actually STARTS. corpus-toolkit#75 deleted a method the
+template's Dockerfile calls, this gate went green, and every corpus image build failed for
+two releases (corpus-toolkit#100).
 
 Step 5 is the other half of it, and it exists because step 4 alone was not enough: a tool
 that answers correctly and whose answer is then discarded at serialization passes step 4
@@ -519,6 +529,157 @@ def check_result_marshalling(dest: Path) -> None:
 
 # ------------------------------------------------- hybrid leg (corpus-toolkit#38)
 
+
+# ------------------------------------------------- the template's own build commands (#100)
+
+# Step shapes this gate recognises inside a Dockerfile `RUN`. NARROW ON PURPOSE.
+#
+# corpus-toolkit#75 deleted `CorpusFramework.ensure_index` after finding no caller in this
+# repo. corpus-template's Dockerfile calls it at image build, nothing in CI ran that file,
+# the gate went green, and every corpus image build failed until v1.26.1 -- while a
+# reconcile loop retried the failing build every ten minutes.
+#
+# So the gate runs those commands. It EXTRACTS them rather than copying them: a duplicate
+# in CI drifts from the Dockerfile and then asserts nothing, which is the same species of
+# bug. And it REFUSES a step it does not recognise rather than skipping it, because an
+# extractor that quietly matches nothing reproduces the exact green this exists to remove.
+_RUNNABLE_PREFIXES = ("python3 -c", "python -c", "corpus-")
+_CONTAINER_ONLY_PREFIXES = ("apt-get", "rm -rf /var/lib/apt", "pip install", "pip3 install")
+
+
+def _refuse_shell_tail(dockerfile: Path, step: str) -> None:
+    """Refuse a recognised step carrying shell control operators after its payload.
+
+    Recognition is by PREFIX, so without this anything appended to a known-good command ran
+    unexamined -- including a tail that makes the step always succeed:
+
+        python3 -c "...ensure_index()" || echo "WARNING: not warmed"
+
+    That prints `OK: 1 build command(s)` having asserted nothing, which is corpus-toolkit
+    #100's own defect rebuilt inside its fix. `oregon-counties` already ships exactly that
+    shape (deliberately non-fatal there), and corpus Dockerfiles derive from this template.
+
+    Quoted payloads are excised first: the template's `python3 -c` string legitimately
+    contains `;` separators, and only operators OUTSIDE the quotes are shell control.
+    """
+    outside = re.sub(r"'[^']*'|\"[^\"]*\"", "", step)
+    for op in ("||", "&", ";", "#", "`", "$("):
+        if op in outside:
+            raise GateFailure(
+                f"{dockerfile}: build step {step!r} contains {op!r} outside its quoted "
+                f"payload. This gate refuses shell control operators in an extracted step, "
+                f"because a tail like `|| echo WARNING` makes it always succeed and the "
+                f"gate then reports OK having asserted nothing. Split the step, or move it "
+                f"out of the RUN.")
+
+
+def dockerfile_build_commands(dockerfile: Path) -> tuple[list[str], list[str]]:
+    """(commands to run, steps deliberately skipped) from a Dockerfile's RUN instructions.
+
+    Raises GateFailure on a step it does not recognise, and on a Dockerfile that yields no
+    runnable step at all -- finding nothing and reporting success is the defect, not a
+    quiet pass.
+    """
+    text = dockerfile.read_text(encoding="utf-8")
+
+    # STRIP COMMENTS FIRST, because that is the order Docker uses. Joining first lets a
+    # comment line ending in `\` glue the next instruction into the comment, and the whole
+    # RUN disappears -- silently, because the OTHER RUN still yields a command so the
+    # emptiness guard below never fires. These Dockerfiles carry long comment blocks with
+    # embedded shell examples directly above the toolkit RUN, and a comment INSIDE a
+    # continued RUN is legal Docker and truncated the chain the same way.
+    text = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+
+    # Join line continuations THE WAY A SHELL DOES: remove `\<newline>` entirely, and do
+    # not touch the whitespace around it. Replacing it with a space instead put a leading
+    # space inside the `python3 -c` payload, which is an IndentationError -- the command
+    # then failed for a reason unrelated to the toolkit, on every run.
+    joined = re.sub(r"\\\n", "", text)
+
+    run_steps: list[str] = []
+    for line in joined.splitlines():
+        stripped = line.strip()
+        # Any whitespace after the instruction, not a literal space: `RUN\tpython3 ...` is
+        # legal Docker, and requiring a space made this blind to the step rather than
+        # refusing it. A step the gate cannot SEE is worse than one it refuses.
+        m = re.match(r"(?i)RUN\s+(.*)", stripped)
+        if not m:
+            continue
+        body = m.group(1).strip()
+        # `&&` inside the quoted `python3 -c` payload would break this split. The template
+        # uses `;` inside those strings, and an unrecognised fragment fails loudly below,
+        # so a future payload containing `&&` surfaces as a refusal rather than a misparse.
+        run_steps.extend(part.strip() for part in body.split("&&") if part.strip())
+
+    to_run, skipped = [], []
+    for step in run_steps:
+        if step.startswith(_CONTAINER_ONLY_PREFIXES):
+            skipped.append(step)
+        elif step.startswith(_RUNNABLE_PREFIXES):
+            _refuse_shell_tail(dockerfile, step)
+            to_run.append(step)
+        else:
+            raise GateFailure(
+                f"{dockerfile}: unrecognised build step {step!r}. This gate runs the "
+                f"template's toolkit-facing build commands and refuses steps it does not "
+                f"understand, because skipping one silently is how corpus-toolkit#75 "
+                f"shipped. Teach it this shape, or move the step out of the RUN.")
+
+    if not to_run:
+        raise GateFailure(
+            f"{dockerfile}: found no toolkit-facing build command to run. The template is "
+            f"expected to exercise the toolkit at image build; a gate that extracts "
+            f"nothing and passes is corpus-toolkit#100 all over again.")
+    return to_run, skipped
+
+
+def check_template_build_commands(dest: Path, template: Path) -> None:
+    """Run corpus-template's own build-time commands against the candidate toolkit.
+
+    At `cwd = dest` -- the instantiated scratch corpus -- because that is what the
+    Dockerfile's WORKDIR is at image build: the corpus root, with `_meta/corpus.yml`
+    beside it.
+
+    Reads the INSTANTIATED Dockerfile from `dest`, not the raw one from `template`. The raw
+    copy still carries `{{CORPUS_ID}}` placeholders, so a RUN that ever referenced one would
+    execute the literal brace text while running in a directory where it is filled.
+    """
+    # A shell `python3` is not necessarily this interpreter. In the GitHub job they
+    # coincide; run locally from a venv it is the SYSTEM python, which on a machine with a
+    # released corpus-toolkit installed imports THAT one -- and the acceptance test for
+    # #100 ("delete ensure_index, the gate goes red") would then pass green against the
+    # wrong toolkit, which is worse than not running it.
+    probe = subprocess.run(
+        "python3 -c \"import corpus_toolkit,sys;print(corpus_toolkit.__file__)\"",
+        shell=True, capture_output=True, text=True, timeout=60)
+    import corpus_toolkit as _ct
+    if probe.returncode != 0 or Path(probe.stdout.strip()).resolve() != Path(_ct.__file__).resolve():
+        raise GateFailure(
+            f"the shell's `python3` does not import the toolkit under test.\n"
+            f"    shell python3 -> {probe.stdout.strip() or probe.stderr.strip()}\n"
+            f"    this gate     -> {_ct.__file__}\n"
+            f"  The template's build commands would run against the wrong toolkit, so a "
+            f"deleted method would not be caught. Run the gate with the candidate toolkit "
+            f"on the same interpreter `python3` resolves to.")
+
+    to_run, skipped = dockerfile_build_commands(dest / "Dockerfile")
+    for step in skipped:
+        say(f"  skipped (container-only): {step}")
+    for step in to_run:
+        say(f"  running: {step}")
+        # Bounded: `_RUNNABLE_PREFIXES` admits any `corpus-*` console script, and one that
+        # blocks (a server, a network fetch) would hang the gate until the job's cap,
+        # losing every step after it.
+        proc = subprocess.run(step, shell=True, cwd=dest, capture_output=True, text=True,
+                              timeout=300)
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout).strip().splitlines()[-6:]
+            raise GateFailure(
+                f"the template's own build command failed against this toolkit:\n"
+                f"    {step}\n  " + "\n  ".join(tail))
+    say(f"  OK: {len(to_run)} build command(s) from the template's Dockerfile")
+
+
 SMOKE_TOOLS = """\
 from corpus_toolkit.mcp.responses import ResponseEnvelope
 
@@ -615,6 +776,12 @@ def main() -> int:
         ("instantiate the template", lambda: instantiate(args.template, dest)),
         ("write a real document + snapshot", lambda: write_document(dest)),
         ("make it a git repo", lambda: git_init(dest)),
+        # BEFORE the hybrid flip, on the pristine document corpus, and early because
+        # "can a corpus built from this template start at all" is the most
+        # fundamental thing here -- and the one that broke every image for two
+        # releases (corpus-toolkit#100).
+        ("the template's own Dockerfile build commands",
+         lambda: check_template_build_commands(dest, args.template)),
         ("toolkit CLI gates", lambda: run_cli_gates(dest)),
         ("mandatory MCP contract tools", lambda: check_mcp_tools(dest)),
         # The hybrid leg reuses the SAME scratch corpus: flip the archetype, add the
