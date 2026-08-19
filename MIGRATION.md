@@ -446,6 +446,61 @@ If your corpus supplies its own `plugins.retrieval_module`, it keeps working unt
 `holdings_for` is optional. Implement it if you want that backend to serve
 `issuing_body_profile`, which before this release it could not do at any price.
 
+### Unreleased — `issuing_body_profile`'s counts, and one optional declaration
+
+**Every corpus rebuilds its FTS cache once.** The index schema version goes to 3 because
+`issuing_body_slug` now holds a resolved slug rather than a path-derived one — same column,
+different values, which no content-key check can notice.
+
+**Rebuild it deliberately; it does not always happen on its own where you think.** A corpus
+that BAKES its index into the image (ERF's Dockerfile pre-builds it, ~70s at 76k documents)
+needs a fresh image: `./scripts/deploy.sh <corpus> <ref> --rebuild-image`, which
+`platform-deploy/scripts/deploy.sh` documents as "needed after any toolkit release that
+changes the FTS cache schema" — this release is one. A MOUNTED corpus rebuilds out of band
+in `deploy_mounted()`, which stops the service for roughly 8 minutes while it warms. Only a
+plain local run rebuilds silently on first use. After deploying, check the document count:
+`deploy.sh` aborts below `MIN_DOCS`, and that abort is the thing standing between you and an
+empty index served green.
+
+**Nothing else is required, and a corpus that changes nothing keeps its current counts.**
+
+**If your documents carry the registry slug in frontmatter, declare which key** — this is
+the fix for corpus-toolkit#71 and it is opt-in per corpus:
+
+```yaml
+plugins:
+  issuing_body_registry: "_meta/catalog/agencies.yml"
+  issuing_body_slug_field: "agency"      # NEW: the key carrying the registry slug
+```
+
+Expect the reported numbers to jump when you do — `executive-regulatory-frameworks`,
+measured 2026-08-18: documents counted for a registry body go from 960 of 75,905 (1.3%) to
+37,913 (49.95%), and `department-of-environmental-quality` from 53 documents to 1,929. That
+is correct and it is also a number people may have quoted, so land the declaration in its
+own PR with the measurement in the body rather than folding it into a routine pin bump.
+
+**No count goes down**, in that PR or this bump: a declared value only wins where it names a
+registry entry, so a typo cannot displace a path-derived slug that CI has already validated.
+
+**Expect `attribution.complete: false` afterwards if you use sentinel values.** ERF's other
+37,992 documents (50.05%) carry `agency: statewide` (37,991) or `agency: external` (1),
+which the registry does not contain. The toolkit cannot tell a deliberate sentinel from a
+typo, so it reports them as counted for no body rather than assuming they are fine — honest,
+and noisy until corpus-toolkit#94 adds the sentinel declaration. `external` on ERF is one
+document and wants a decision either way.
+
+Declare the key that holds a **registry slug**, not the free-text `issuing_body` descriptor
+— on ERF that field is a sub-unit name ("DAS Enterprise Information Strategy and Policy
+Division") and matches no registry entry.
+
+**If your corpus supplies `plugins.retrieval_module`**, its `holdings_for(slug)` may now
+return `{"counts": {content_mode: n}, "coverage": {"documents": n, "in_registry": n,
+"no_registry_entry": n, "unattributed": n, "basis": str}}`. The old bare
+`{content_mode: n}` still works and is not deprecated — a backend returning it, or returning
+coverage without those counts, reports `attribution.complete: null`, because half a
+measurement is not a measurement and "did not check" is not "nothing is missing". Report the
+buckets if you can classify against the registry; omit them if you cannot.
+
 ### Adopting any of these in a corpus repo
 
 1. Bump **both** pins (`uses:` and `toolkit-ref:`) — and the third, if the repo installs the

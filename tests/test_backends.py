@@ -256,11 +256,21 @@ def test_holdings_is_a_capability_a_backend_can_lack(corpus):
 
 
 def test_file_backend_counts_holdings_through_the_seam(corpus):
-    """The query issuing_body_profile used to run itself, now behind the interface."""
+    """The query issuing_body_profile used to run itself, now behind the interface.
+
+    The answer carries its own denominator (corpus-toolkit#71): a slug with nothing held
+    reports empty COUNTS, and separately how much of the corpus carries any issuing-body
+    attribution at all. Without that, "nothing for this body" and "nothing I can see for
+    any body" are the same response."""
     f = fw(corpus)
 
-    assert f.backend.holdings_for("nobody-has-this-slug") == {}
-    assert isinstance(f.backend.holdings_for(""), dict)
+    empty = f.backend.holdings_for("nobody-has-this-slug")
+    assert empty["counts"] == {}
+    assert empty["coverage"]["documents"] > 0
+    # This fixture declares no registry, so "does this slug name a body?" has no answer
+    # here and the three buckets are OMITTED rather than guessed at zero.
+    assert "in_registry" not in empty["coverage"]
+    assert isinstance(f.backend.holdings_for("")["counts"], dict)
 
 
 # ---------- G1: per-doc_type heading selection ----------
@@ -487,7 +497,11 @@ def test_stale_schema_forces_a_rebuild_even_when_content_is_unchanged(tmp_path):
     assert fw.backend.index_status()[0] is False
     con = fw.backend.ensure_index()          # must rebuild rather than reuse
     assert con.execute("SELECT COUNT(*) FROM docs WHERE body_chars > 0").fetchone()[0] == 1
-    assert con.execute("SELECT v FROM meta WHERE k='schema'").fetchone()[0] == "2"
+    # Against the module's own constant, not a literal: this asserts "the rebuild stamped
+    # the current schema", and a literal makes every bump look like a test failure.
+    from corpus_toolkit.mcp.backends import SCHEMA_VERSION
+
+    assert con.execute("SELECT v FROM meta WHERE k='schema'").fetchone()[0] == str(SCHEMA_VERSION)
 
 
 def test_empty_body_health_warning_still_fires(tmp_path):

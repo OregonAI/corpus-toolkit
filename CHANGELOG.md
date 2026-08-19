@@ -61,6 +61,62 @@ promise that every document sits under that URL — the reading that kept a seve
 corpus from declaring anything at all. A corpus asserting on either string in its own CI
 should expect it to have changed. (corpus-toolkit#70)
 
+### Fixed — `issuing_body_profile` counted 1% of a corpus and said nothing about the other 99%
+
+**The number moves, a lot. That is the point of this note.** `in_repo` was counted from an
+index column populated only for documents under a `scoped: true` content root. Measured on
+`executive-regulatory-frameworks` on 2026-08-18: 960 of 75,905 documents, **1.3%**. Its
+Department of Environmental Quality reported **53** documents against the **1,929** that
+actually carry it — a **97% under-report, ~36×**, and the same order for every large agency,
+because an agency's OAR rules are filed under their chapter and no agency directory can
+contain them. Nothing about the response said so: the call succeeded and the field was
+populated, so a caller comparing agencies got a ranking of *who has a policy directory*.
+
+Two changes, and a corpus needs the first to see the second.
+
+- **A corpus may declare `plugins.issuing_body_slug_field`** — the frontmatter key carrying
+  its registry slugs (`agency` on ERF, present on 100% of documents). It wins **where its
+  value names a registry entry**; otherwise the path-derived scope slug, which CI already
+  validates, keeps the document. That order is deliberate: nothing checks the frontmatter
+  field (corpus-toolkit#94), and letting an unchecked value override a checked one means a
+  single typo silently REMOVES a correctly-filed document from a count that was previously
+  right. **No count can go down because of this release**, and a corpus that declares
+  nothing reports exactly the counts it reported before. The path mechanism is not
+  deprecated: a corpus genuinely organised by issuing body is served correctly by it.
+- **Every success now carries `attribution`**, saying what the count could see — as three
+  buckets, not a boolean, because "has a slug" and "is counted for somebody" are different
+  questions. `documents_matched_to_a_registry_entry` are the only ones any per-body count
+  can include; `documents_naming_no_registry_entry` and `documents_with_no_issuing_body`
+  are counted for nobody. `complete: true` means the first bucket is everything; `false`
+  means the count is a **lower bound**, with the numbers; `null` means nobody measured — an
+  old-shape backend, coverage reported without its counts, or an empty index — which is
+  unknown, not none. `in_repo` for a body with nothing held says which nothing it means:
+  the old "no documents ingested for this issuing body yet" is now reserved for a corpus
+  where everything reaches a count.
+
+**Expect `complete: false` on ERF, and that is the honest answer.** 37,992 of its 75,905
+documents (50.05%) carry `agency: statewide` (37,991) or `agency: external` (1) — values the
+registry does not contain. From the toolkit those are indistinguishable from a typo, so they
+are reported as counted-for-nobody rather than assumed deliberate. corpus-toolkit#94 adds the
+sentinel declaration that lets a corpus say which values mean "no issuing body", after which
+ERF reports complete.
+
+**Contract stays v1** — additive fields, `in_repo`'s own shape unchanged,
+`docs/mcp-interface-contract.md` updated in the same change. **The FTS schema version is
+bumped to 3**, so every corpus rebuilds its `_meta/.cache` index once; a baked image needs
+`deploy.sh … --rebuild-image` (see MIGRATION), because without the rebuild the old values
+keep being served from a cache nothing else would invalidate.
+
+`RetrievalBackend.holdings_for(slug)` now returns `{"counts": ..., "coverage": ...}`. A
+corpus-supplied backend still returning v1.25.0's bare `{content_mode: count}` keeps
+working unchanged and reports coverage `null`. (corpus-toolkit#71)
+
+Known gap, tracked as corpus-toolkit#94: nothing checks that a declared slug value names a
+registry entry. It can no longer shrink a count — an unregistered value never overrides a
+validated path — but for a document no directory attributes, a typo still lands in
+`documents_naming_no_registry_entry` and is counted for no body. Live on ERF today at one
+document (`agency: external`), alongside 37,991 deliberate `statewide`.
+
 ## v1.25.0 — 2026-08-11
 
 ### One behaviour change on the serve path, then fixes

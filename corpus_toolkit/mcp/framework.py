@@ -57,6 +57,24 @@ from corpus_toolkit.repo import (
 # was always live; dropping the shadow changes no behaviour, it only stops the name
 # meaning two things. See corpus-toolkit#52.
 
+# What `issuing_body_profile` puts in `in_repo` when it counted nothing, keyed by whether
+# attribution coverage is complete (True), known to be partial (False) or unmeasured (None).
+#
+# THREE STRINGS BECAUSE THERE ARE THREE ANSWERS. "Nothing ingested for this body" is a
+# claim about the corpus, and it is only true when every document in it is counted for some
+# registry body. Where some are counted for none, or where nothing measured — an old-shape
+# backend, a half-reported coverage, an empty index — the honest answer is "nothing I could
+# attribute": the same distinction as `no_graph` vs `not_in_graph` (CONTEXT.md).
+_NO_HOLDINGS = {
+    True: "no documents ingested for this issuing body yet",
+    False: ("no documents attributed to this issuing body — but this corpus holds "
+            "documents that are counted for no body at all, so this is not the same as "
+            "none ingested; see `attribution`"),
+    None: ("no documents attributed to this issuing body — attribution coverage was not "
+           "measured here, so none-ingested cannot be told apart from none-attributable; "
+           "see `attribution`"),
+}
+
 # ---------- citation-scheme registry (populated by a corpus's citation_module) ----------
 
 _SCHEMES: list[tuple[str, "re.Pattern", str | None, object | None, str | None]] = []
@@ -764,12 +782,96 @@ class CorpusFramework:
         # table via ensure_index(), which is why the tool could not exist for any other
         # backend and why three separate guards were needed to keep that from surfacing as
         # a crash (corpus-toolkit#75).
-        docs = self.backend.holdings_for(slug)
+        docs, attribution = self._holdings(self.backend.holdings_for(slug))
         return {
             **self._envelope(),
             "slug": slug,
             "registry": entries[slug],
             "curated": curated.get(slug, {}),
-            "in_repo": docs or "no documents ingested for this issuing body yet",
+            "in_repo": docs or _NO_HOLDINGS[attribution["complete"]],
+            # WHAT THE COUNT COULD SEE. `in_repo` is a count of documents attributed to
+            # this body, and attribution is per-document: a corpus can hold documents
+            # attributed to nobody, and those are counted for nobody. Serving the bare
+            # number is how a 97% under-report read as a confident answer for as long as
+            # it did (corpus-toolkit#71) — the number was populated, the call succeeded,
+            # and nothing said it was a lower bound.
+            "attribution": attribution,
             "disclaimer": self.disclaimer,
         }
+
+    # The counts `_holdings` needs before it will call coverage measured. Every one, as an
+    # int: a backend that reports some of them has measured some of the question, and a
+    # partial measurement served as a complete one is the failure this whole block exists
+    # to stop (corpus-toolkit#71).
+    _COVERAGE_COUNTS = ("documents", "in_registry", "no_registry_entry", "unattributed")
+
+    def _holdings(self, raw: dict) -> tuple[dict, dict]:
+        """Split a backend's holdings answer into (counts, attribution).
+
+        Accepts BOTH shapes `RetrievalBackend.holdings_for` has had: the current
+        `{"counts": ..., "coverage": ...}` and v1.25.0's bare `{content_mode: count}`.
+
+        `complete` has three values and they are not interchangeable. TRUE means every
+        document in the corpus is counted for some registry body, so this count is the
+        whole answer. FALSE means some are counted for none — they name a body the registry
+        does not contain, or carry no attribution at all — so this count is a floor. NULL
+        means nobody measured: a backend on the old shape, a backend that reported coverage
+        without the counts, or an index holding nothing at all. Unknown is not none, and a
+        half-measurement is not a measurement; collapsing those is the one thing CONTEXT.md
+        says a new mechanism may not do.
+        """
+        counts = raw.get("counts") if isinstance(raw.get("counts"), dict) else raw
+        coverage = raw.get("coverage") if isinstance(raw.get("coverage"), dict) else None
+        basis = (coverage or {}).get("basis") or "unknown"
+
+        if coverage is None or not all(
+                isinstance(coverage.get(k), int) for k in self._COVERAGE_COUNTS):
+            missing = "reports no attribution coverage" if coverage is None else (
+                "reported attribution coverage without "
+                + ", ".join(k for k in self._COVERAGE_COUNTS
+                            if not isinstance(coverage.get(k), int)))
+            return counts, {
+                "complete": None,
+                "basis": basis,
+                "note": (f"this corpus's backend ({self.backend.name}) {missing}, so "
+                         "whether it holds documents this count could not see is "
+                         "UNKNOWN — not none"),
+            }
+
+        total = coverage["documents"]
+        matched, unmatched = coverage["in_registry"], coverage["no_registry_entry"]
+        unattributed = coverage["unattributed"]
+        out = {
+            "complete": None if total == 0 else (unmatched == 0 and unattributed == 0),
+            "basis": basis,
+            "documents_in_corpus": total,
+            "documents_matched_to_a_registry_entry": matched,
+            "documents_naming_no_registry_entry": unmatched,
+            "documents_with_no_issuing_body": unattributed,
+        }
+        if total == 0:
+            # An empty index is not a corpus where every document is attributed. It is a
+            # corpus that answers nothing about anything, and platform-deploy's MIN_DOCS
+            # abort exists because an empty index otherwise serves green.
+            out["note"] = ("this corpus's index holds NO documents, so this is not a count "
+                           "of zero for this body — it is no measurement at all; check "
+                           "corpus_overview and the server's health before reading it")
+        elif out["complete"]:
+            out["note"] = (f"every one of this corpus's {total} documents is attributed to "
+                           "a body in its issuing-body registry, so this count is complete")
+        else:
+            gaps = []
+            if unmatched:
+                gaps.append(f"{unmatched} {'names' if unmatched == 1 else 'name'} a value "
+                            "the registry does not contain (a deliberate sentinel such as "
+                            "`statewide`, or a typo — nothing checks, corpus-toolkit#94)")
+            if unattributed:
+                gaps.append(f"{unattributed} "
+                            f"{'carries' if unattributed == 1 else 'carry'} no "
+                            "issuing-body attribution at all")
+            out["note"] = (
+                f"{matched} of this corpus's {total} documents ({matched / total:.0%}) are "
+                f"attributed to a registry body; " + " and ".join(gaps) +
+                ". Those are counted for NO body, so every per-body count here is a "
+                "LOWER BOUND, not a total")
+        return counts, out
