@@ -42,6 +42,35 @@ backend is narrower than before, not gone.
 Closes corpus-toolkit#102 and #104. A third site of the same class, where the mapping comes
 from graph data rather than a backend, is corpus-toolkit#105 and is not fixed here.
 
+### Fixed — `corpus.*` string fields are type-checked at load
+
+**Can break you if your `corpus.yml` has one of these wrong** — and if it does, it is
+already broken at runtime. `id`, `name`, `jurisdiction` and `authoritative_source` must now
+be strings, and a bad one is a `ValueError` naming the field instead of a failure later.
+All ten corpus configs on the platform load unchanged; this was verified against each.
+
+`authoritative_source` was stripped without a type check, so a non-string raised
+`AttributeError: 'list' object has no attribute 'strip'` — naming neither the file nor the
+key, and pre-empting the URL validator downstream whose whole job is to say something useful
+about this field.
+
+`id`, `name` and `jurisdiction` had no check at all, so a non-string was accepted in
+silence. `id: 90210` loaded as an int; unquoted `id: no` loaded as boolean `False`, because
+PyYAML resolves `no`/`off`/`false` and `yes`/`on`/`true` — in any capitalisation — as
+booleans. Since the `ResponseEnvelope` entry above types `corpus` as `str` and `config.id`
+fills that slot on all six object-shaped tools, that made a single unquoted `id: no` a
+`ValidationError` on **every tool call** — at runtime, on a corpus whose config had loaded
+cleanly. The error names the trap and tells you to quote **the word you already wrote**:
+`corpus.id` is also the MCP server name and how siblings cross-reference this corpus, so
+advice that changed the value would quietly rename it.
+
+The `corpus:` block itself is checked too. Present-but-not-a-mapping — an empty block, or
+one mis-indented so its fields land elsewhere — used to raise `AttributeError: 'NoneType'
+object has no attribute 'get'`, the same shape as the reported bug and a far more common
+authoring mistake. An absent `corpus:` key keeps its existing default.
+
+Closes corpus-toolkit#89.
+
 ### Fixed — `get_document` cites the document, not the corpus front door, for every backend
 
 **Can change what your responses say only if your corpus supplies
