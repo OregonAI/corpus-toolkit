@@ -332,6 +332,24 @@ class TestResponseConvention1(GraphToolTestCase):
         out = self.framework(cfg).get_document("schedule-employment")
         self.assertEqual(out["authoritative_source"], "https://sos.oregon.gov/166-300")
 
+    def test_a_document_with_no_source_url_of_its_own_falls_back_to_the_corpus_url(self):
+        """The other half of that override, and the half the front-door reading rests on
+        (corpus-toolkit#70). The corpus-level URL is documented as the entry point rather
+        than a per-answer citation *because* the per-answer answer comes from the
+        document — which only holds if a document that carries no `source_url` still gets
+        somewhere to go. The backend puts its empty `source_url` in the slot; the
+        framework has to notice it is empty and fall back, and an empty string here would
+        read as "there is nowhere to verify this", which is a different claim."""
+        cfg = self.corpus(authoritative_source=self.SOURCE)
+        doc = DOC.format(id="schedule-unsourced", title="Unsourced Schedule", num="166-400")
+        (cfg.parent.parent / "schedules" / "schedule-unsourced.md").write_text(
+            doc.replace("source_url: https://sos.oregon.gov/166-400\n", 'source_url: ""\n'))
+
+        out = self.framework(cfg).get_document("schedule-unsourced")
+
+        self.assertEqual(out["source_url"], "")
+        self.assertEqual(out["authoritative_source"], self.SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

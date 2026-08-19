@@ -56,7 +56,15 @@ class CorpusConfig:
     # URL of the CORPUS-LEVEL authoritative source — the ORS/OAR landing page, the SoS
     # Archives schedules page, the legislature's bill site. Required by
     # docs/mcp-interface-contract.md response convention 1 and emitted on every MCP
-    # response. Optional here rather than required because four corpora already ship
+    # response.
+    #
+    # One URL, and single by design (corpus-toolkit#70): it is the corpus's FRONT DOOR,
+    # where a reader starts for this corpus's official text, not a per-answer citation —
+    # `get_document` answers per document from that document's own `source_url` and falls
+    # back here only when it has none. So a corpus spanning publishers declares its best
+    # single entry point rather than a list, and `str | None` is the settled type.
+    #
+    # Optional here rather than required because four corpora already ship
     # without one and a hard load failure would take their servers down on a pin bump;
     # `corpus-validate-frontmatter` reports the omission instead, and corpus_overview
     # says so on the response.
