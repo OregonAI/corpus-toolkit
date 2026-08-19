@@ -34,13 +34,42 @@ non-string was a hard `ValidationError` at serialization. `corpus_overview` also
 backend replacing `disclaimer`, which had let an upstream's terms of use displace the
 NON-AUTHORITATIVE warning that response convention 4 names that tool as carrying.
 
-`get_document`'s **success** branch is deliberately unchanged: a record's
+`get_document`'s **success** branch is not touched by this change: a record's
 `authoritative_source` still wins, because a document's own `source_url` is the more precise
-answer. See MIGRATION.md — the check to keep on your backend is narrower than before, not
-gone.
+answer. It is changed by the next entry. See MIGRATION.md — the check to keep on your
+backend is narrower than before, not gone.
 
 Closes corpus-toolkit#102 and #104. A third site of the same class, where the mapping comes
 from graph data rather than a backend, is corpus-toolkit#105 and is not fixed here.
+
+### Fixed — `get_document` cites the document, not the corpus front door, for every backend
+
+**Can change what your responses say only if your corpus supplies
+`plugins.retrieval_module`.** If your backend's `get()` returns a `source_url` and no
+`authoritative_source`, that slot changes from the corpus front door to the document's own
+URL. That is the fix. Nothing breaks, but a response's `authoritative_source` may now differ
+from what the same call returned before, so a downstream asserting on it should re-check.
+`FileBackend` corpora are unaffected — provably, because both keys come from one column.
+
+The fallback tested the ASSEMBLED RESPONSE's slot rather than the record's `source_url`, and
+`_envelope()` has already put the front door there. So for any corpus declaring a front door
+the test could never be true and the fallback could never fire. A backend honouring the
+documented `get()` contract — "Record metadata + body", which nowhere requires
+`authoritative_source` — had the front door stamped over a per-document URL sitting in the
+same payload: a wrong answer rather than a missing one, with nothing erroring. It bit hardest
+on the `api` and `hybrid` archetypes, the ones that ship a `retrieval_module`.
+
+Resolution is now by precedence, read from the record: its own `authoritative_source`, then
+its `source_url` **if that is a string**, then the corpus front door (which may be `null`).
+The type check is why a non-string `source_url` — a list of mirrors, say, which the protocol
+has never forbidden — stays a harmless extra key instead of becoming a `ValidationError`.
+
+`RetrievalBackend.get()`'s contract is unchanged and `authoritative_source` stays optional on
+a record. But `source_url` is now load-bearing on the success path, and the protocol
+docstring says so: it should be where a reader verifies the official text, not the endpoint
+the record was fetched from.
+
+Closes corpus-toolkit#90.
 
 ### Added — object-shaped tools declare response convention 1, openly
 

@@ -595,15 +595,52 @@ class CorpusFramework:
             # to offer and must not overwrite a declared `null`.
             return {**rec, **self._envelope(),
                     "did_you_mean": [{"id": s["id"], "title": s["title"]} for s in sug]}
-        # Envelope FIRST so the record wins: a document's own `authoritative_source`
-        # (its source_url) is the more precise answer to "where is the official text",
-        # and the corpus-level URL is only the fallback — for a backend that emits none,
-        # or a document whose source_url is empty.
         out = {**self._envelope(), **rec,
                "corpus": self.config.id, "archetype": self.config.archetype,
                "disclaimer": self.disclaimer}
-        if not out.get("authoritative_source"):
-            out["authoritative_source"] = self.config.authoritative_source
+        # PRECEDENCE, MOST PRECISE FIRST (corpus-toolkit#90): the record's own
+        # `authoritative_source`, then the record's `source_url`, then the corpus front
+        # door. Empty and absent are both "not supplied" at every step.
+        #
+        # RESOLVED FROM `rec`, NOT FROM `out`. That is the whole bug. The old code tested
+        # `out.get("authoritative_source")`, but `**self._envelope()` has ALREADY put the
+        # front door in that slot, so for any corpus declaring one the test could never be
+        # true and the fallback could never fire — it fired only for a corpus that declared
+        # no front door at all. Reading the assembled response to decide what the record
+        # offered is the mistake; the record is the only thing that knows.
+        #
+        # FileBackend fills both keys from one column, so it could never expose this: the
+        # built-in path was correct by accident of one backend's implementation rather than
+        # because the framework enforced it. A corpus supplying `plugins.retrieval_module`
+        # and honouring the documented `get()` contract ("Record metadata + body", which
+        # nowhere requires `authoritative_source`) got the front door stamped over a
+        # per-document URL sitting in the same payload — a wrong answer, not a missing one,
+        # with nothing erroring.
+        #
+        # Enforced HERE rather than by widening `RetrievalBackend.get()`'s contract: pushing
+        # a shared response-floor rule out to every corpus that writes a backend is the
+        # arrangement this fallback exists to avoid.
+        # STEP 2 IS TYPE-CHECKED AND STEP 1 IS NOT, deliberately.
+        #
+        # `authoritative_source` is declared `str | None`, and the protocol never types
+        # `source_url` — a proxy backend may reasonably hold a list of mirrors there. If
+        # this promoted such a value unchecked, a key that used to ride along harmlessly as
+        # an undeclared extra (while the slot took the front door) would become a hard
+        # ValidationError on every `get_document` for that corpus. That is the class the
+        # preceding commit closed for the not-found branch and `corpus_overview`, and it
+        # would have been reopened here by the fix for it.
+        #
+        # Step 1 keeps failing loudly on a non-string because the two are different acts. A
+        # backend setting `authoritative_source` is ASSERTING "this is where the official
+        # text lives", and a malformed assertion should surface at the point of the mistake
+        # — MIGRATION.md has told backend authors so since #103. Step 2 is the framework
+        # INFERRING from a key the backend never offered for this purpose, and an inference
+        # has no standing to blow up the call: it declines and falls through.
+        source_url = rec.get("source_url")
+        out["authoritative_source"] = (rec.get("authoritative_source")
+                                       or (source_url if isinstance(source_url, str)
+                                           else None)
+                                       or self.config.authoritative_source)
         return out
 
     # ---------- cross-corpus resolution ----------

@@ -297,15 +297,36 @@ the hook and registering nothing is likewise an error rather than a no-op.
    the response describes was published somewhere else.
 
    Per-answer precision is a different field, and it already exists.
-   `get_document` returns the document's own `source_url` in this slot —
-   `FileBackend` puts it on the record, and the corpus URL is the fallback for
-   a record that carries none. So on the built-in document path, where a
-   caller is reading text it intends to verify, the front door is not cited
-   over a document URL that exists. **A corpus supplying its own
-   `plugins.retrieval_module` does not get this for free**: the fallback tests
-   the response slot rather than `source_url`, so a backend that returns a
-   `source_url` and no `authoritative_source` — which the documented backend
-   contract permits — has the front door stamped over it (corpus-toolkit#90).
+   `get_document` resolves this slot by precedence, most precise first, and
+   **every backend gets it, including a corpus supplying its own
+   `plugins.retrieval_module`** (corpus-toolkit#90):
+
+   1. the record's own `authoritative_source`, if the backend supplied a
+      non-empty one — a backend that knows a canonical URL distinct from where
+      it fetched the record says so, and is believed;
+   2. otherwise the record's `source_url`, if non-empty;
+   3. otherwise the corpus front door, which may be `null`.
+
+   Empty and absent are both "not supplied" at every step. So on the document
+   path, where a caller is reading text it intends to verify, the front door is
+   never cited over a document URL that exists.
+
+   The framework resolves this from the RECORD, not from the assembled
+   response. That distinction is the whole of corpus-toolkit#90: the fallback
+   used to test the response slot, which `_envelope()` has already filled with
+   the front door, so for any corpus declaring one it could never fire.
+   `FileBackend` sets `source_url` and `authoritative_source` from the same
+   column and so could not expose it — the built-in path was correct by
+   accident of one backend's implementation rather than because the framework
+   enforced it, and a corpus honouring the documented `get()` contract (which
+   nowhere requires `authoritative_source`) had the front door stamped over a
+   per-document URL sitting in the same payload.
+
+   **This asks nothing of a backend.** `RetrievalBackend.get()`'s contract is
+   unchanged and `authoritative_source` stays optional on a record; that
+   optionality is precisely why the rule lives in the framework. Pushing a
+   shared response-floor rule out to every corpus that writes a backend is the
+   arrangement this fallback exists to avoid.
 
    What is left carrying the corpus URL is `corpus_overview`,
    `resolve_citation`, the graph tools, `issuing_body_profile` and the error
