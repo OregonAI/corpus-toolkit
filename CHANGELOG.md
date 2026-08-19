@@ -15,6 +15,23 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## Unreleased
+
+### Fixed — release-note guidance to pass `--rebuild-image` is corrected
+
+Docs only; no code change. Five places across this file and `MIGRATION.md` told a maintainer
+with a baked-image corpus to run `deploy.sh <corpus> <ref> --rebuild-image` after an FTS
+schema bump. The flag is guarded on a corpus being **mounted**, `platform-deploy` mounts
+none, and an ordinary deploy builds the image anyway — so the index is re-baked without it.
+Verified on the v1.27.0 pin wave: ERF's image was rebuilt by the ordinary deploy, no flag
+passed.
+
+The rebuild itself is real and still required; only the flag was unnecessary. The old
+guidance is annotated rather than deleted, so anyone who followed it and saw a "did nothing"
+notice can find out why. It becomes correct again the day a corpus is mounted.
+
+Closes corpus-toolkit#114.
+
 ## v1.27.0 — 2026-08-19
 
 ### Fixed — a graph relation name can no longer displace a response key
@@ -351,6 +368,14 @@ help has said `--rebuild-image` is "needed after any toolkit release that change
 cache schema" — this is such a release, and until now that flag appeared nowhere in the
 toolkit's docs.
 
+> **CORRECTION (corpus-toolkit#114).** `--rebuild-image` is guarded on a corpus being
+> MOUNTED, and none is — `deploy.sh` declares an empty mounted set and prints a notice if
+> the flag is passed anyway. An ordinary `deploy.sh <corpus> <ref>` builds the image every
+> time, so a baked corpus's index is re-baked without it. Verified on the v1.27.0 wave: ERF
+> was rebuilt by the ordinary deploy, no flag. The table row above is right that the rebuild
+> happens at image build; only the flag is unnecessary. It becomes necessary again the day a
+> corpus is mounted.
+
 Rebuilding under live traffic is unlocked and uses a fixed temp filename, so a concurrent
 warm and a live rebuild collide (`disk I/O error`). Rebuild deliberately rather than
 letting the first request do it.
@@ -529,6 +554,10 @@ ERF reports complete.
 bumped to 3**, so every corpus rebuilds its `_meta/.cache` index once; a baked image needs
 `deploy.sh … --rebuild-image` (see MIGRATION), because without the rebuild the old values
 keep being served from a cache nothing else would invalidate.
+
+> **CORRECTION (corpus-toolkit#114):** the rebuild is real, but `--rebuild-image` is not
+> needed for it — an ordinary deploy builds the image. See the v1.26.0 correction earlier in
+> this entry, and the annotations in `MIGRATION.md` under corpus-toolkit#114.
 
 `RetrievalBackend.holdings_for(slug)` now returns `{"counts": ..., "coverage": ...}`. A
 corpus-supplied backend still returning v1.25.0's bare `{content_mode: count}` keeps
