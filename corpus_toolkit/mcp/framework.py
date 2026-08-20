@@ -993,13 +993,26 @@ class CorpusFramework:
             curated = (yaml.safe_load(self.config.issuing_body_profiles.read_text()) or {}).get(
                 "profiles", {})
 
-        slug = slug_or_query
+        # STRIPPED ONCE, AND THE STRIPPED VALUE IS WHAT IS USED. `"  slug  "` otherwise
+        # missed the exact-match branch, fell into the substring fallback, matched nothing,
+        # and was reported as a slug the registry does not contain -- about one it does.
+        slug = str(slug_or_query).strip()
+        if not slug:
+            # AN EMPTY QUERY IS A MISSING ARGUMENT, not a wildcard and not a name fragment.
+            # The fallback below is a substring match, and `"" in name` is true for EVERY
+            # entry -- so on a registry holding one entry that was exactly one hit, the
+            # uniqueness test passed, and this served a full profile for an agency nobody
+            # named. Inverted with corpus size: silent on a small registry, and only loud on
+            # a large one because everything matched (corpus-toolkit#122).
+            return {**self._envelope(),
+                    "error": ("no issuing body given. An empty query is not a wildcard — "
+                              "pass a registry slug, or a fragment of a body's name.")}
         if slug not in entries:
-            q = slug_or_query.lower()
+            q = slug.lower()
             hits = [s for s, o in entries.items() if q in o.get("name", "").lower()]
             if len(hits) != 1:
                 return {**self._envelope(),
-                        "error": f"no unique issuing body match for {slug_or_query!r}",
+                        "error": f"no unique issuing body match for {slug!r}",
                         "candidates": [{"slug": s, "name": entries[s].get("name")} for s in hits[:8]]}
             slug = hits[0]
 
