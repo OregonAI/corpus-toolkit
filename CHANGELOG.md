@@ -17,6 +17,50 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — two silent wrong-writes in `--record-baseline`
+
+**Can affect any corpus that runs `corpus-detect-changes --record-baseline`.** Both wrote or
+skipped the wrong thing and reported success; neither raised, and the two verification
+guards that exist to catch exactly this passed both.
+
+**A `sha256:` written above `id:` got a duplicate key inserted (corpus-toolkit#119).** The
+rewrite planner associates a `sha256:` with its entry by scanning forward from `id:`, so one
+above it was never claimed and a second was inserted below:
+
+```yaml
+sources:
+  - sha256: ""                        # stale, and now shadowed
+    id: "a"
+    sha256: "9239087f81db…"           # inserted
+```
+
+Both guards accept it: PyYAML resolves duplicate keys last-wins, so the re-parse check reads
+back the *inserted* value and matches, and the line diff sees one added line carrying a
+wanted value — the shape it is designed to allow. The run reported `1 baseline(s) recorded`,
+exited 0, and left a stale key in a file a human reviews. On the next run the manifest parses
+to the new value, so the source reads as current and nothing ever surfaces it.
+
+The planner now also scans backwards from `id:` to the entry's start, **at the entry's own
+key column** — the same rule the forward scan uses, so an `attachments:` list carrying
+per-file digests above the entry's `id:` is not claimed.
+
+**Duplicate ids across two group files sharing a `group:` name were not detected
+(corpus-toolkit#120).** `occurrences` was built per file while `fetched`/`in_scope` are keyed
+`(group, id)`, so two files declaring the same group collided in the hash map while looking
+unique to the duplicate guard. One entry's hash was written into the other, no
+`REFUSED to record` line, exit 0 — the wrong-entry write the planner refuses by name,
+arriving one level up where the guard did not look.
+
+`occurrences` is now built across all files on the same key. Two files under *different*
+groups may still share an id — directory mode defaults `group` to the file stem — and are
+untouched. The refusal names **every** file involved: an operator told "duplicate id in this
+group file" about a cross-file collision searches the wrong one and finds a single entry that
+looks fine.
+
+No manifest on the platform is affected today; every live entry writes `id:` first and no two
+group files share a `group:`. Nothing enforced either.
+
+
 ### Added — `documents_by_agency(slug)`: a corpus answers for one agency registry slug
 
 **Additive.** A new tool, registered on any corpus whose retrieval backend implements
