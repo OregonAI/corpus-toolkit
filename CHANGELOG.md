@@ -17,6 +17,85 @@ it can break you.
 
 ## Unreleased
 
+### Added — a JSON source can declare which paths it watches
+
+**Opt-in; nothing changes unless a source adds `watch`.** Verified across the platform: 1,116
+sources in 8 manifests, 3 of them `format: json`, none declaring `watch` — so no committed
+`sha256` moves.
+
+`content_hash` normalised only the html/xml branch; `json` fell through to a raw-byte hash of
+the whole document. For a Socrata-backed corpus that is a permanent false-positive generator:
+the manifest watches a metadata document to avoid row-level noise, and gets counter-level
+noise instead. `oregon-budget`'s three JSON sources produced six distinct hashes across two
+consecutive weekly runs in a week nothing upstream changed.
+
+```yaml
+    format: json
+    watch: [rowsUpdatedAt, "columns[].name", "columns[].dataTypeName"]
+```
+
+The hash covers only those paths, canonicalised, so upstream re-serialising is not a change.
+An **allowlist** rather than a list of keys to ignore: a new vendor counter is inert by
+construction, where a blocklist makes each one a fresh false positive until somebody extends
+it.
+
+A declared path the document does not contain is an **error** (`WATCH PATH MISSING`), not an
+empty value and not a fetch failure — two documents both lacking it would otherwise hash
+equal and read as unchanged, which is the corpus reporting stability exactly when upstream
+removed the field. It is reported on stderr with a run annotation, counted separately from
+fetch failures, kept out of the `SYSTEMIC` access threshold, and **exits non-zero** whether
+or not `--strict` is set: the bytes arrived, so this is not upstream being briefly
+unreachable, and the source stays uncompared on every run until somebody looks.
+
+The per-group breakdown now marks a group where sources were not compared —
+`blocked 0/2 [2 not compared]`, which used to render as `blocked 0/2` and read exactly like
+a group compared in full and found stable. **This covers failed fetches too**, so it is
+visible on runs that have nothing to do with `watch`.
+
+A body that will not parse as json is `WATCH BODY UNREADABLE`, distinct again: a 200 carrying
+an error page is a fact about the response, not about the `watch` list.
+
+A `watch` list is checked before the first request — after the `--group` filter, so a typo
+in one group does not abort another group's cron. A `watch` source must be json — `format: json`/`geojson`, or a
+url ending `.json` when no format is declared — checked there too. Anything else is refused
+by name: the body would not parse, and the run would report that as an unreadable response
+rather than as the declaration it is. A bare string
+(`watch: rowsUpdatedAt`) is iterated character by character, so an authoring typo used to
+surface as `watched path 'r' is not present` — an upstream schema change that never
+happened. A valueless `watch:` and an empty `watch: []` are refused for the same reason:
+each reverts the source to a hash that reports what it was declared not to. So are
+`columns[]name` (a dot short of a projection), `columns[ ].name`, and any segment that is
+only `[]` — each was otherwise reported as a path the document does not contain, a typo read
+as an upstream schema change. Whitespace around a path or around a segment is trimmed rather
+than refused, so `columns[] . name` works. One grammar, checked before the crawl and again at the hash by the same
+parser.
+
+`not compared` means one thing on every line that says it — the totals line, the per-group
+breakdown and the `--record-baseline` tally all count a source that was in scope and never
+compared to a baseline, whatever the reason, with the reasons broken out on the totals line.
+
+A document that is a top-level JSON array — Socrata's `/resource/{id}.json`, the sibling of
+the endpoint this feature is for — reports that a watch path addresses keys and points at
+`url`, rather than reporting a schema change.
+
+Bodies are decoded `utf-8-sig`: a BOM is routine from IIS/.NET-backed endpoints and must not
+make a source permanently uncomparable.
+
+**`--record-baseline` no longer breaks when a source key holds a block sequence above
+`sha256:`.** The rewrite planner treated any nested list item as the start of a new source,
+so the `sha256:` line was orphaned, a second one was inserted, the re-parse check failed and
+the entire group file was refused — nothing written, including sources that verified.
+
+This is **pre-existing, not new with `watch`**: `oregon-records-retention` ships
+`references_out:` as a block sequence in 76 of its sources today, and is saved only by
+writing `sha256:` above it. Reordering those two keys was enough to hit it. `watch` would
+have made it routine.
+
+See MIGRATION.md — adopting it re-baselines that source, so land it on its own PR.
+
+Closes corpus-toolkit#72.
+
+
 ### Fixed — a `tools_module` tool colliding with a built-in refuses to start
 
 **Can break you only if your `tools_module` registers a tool named for a built-in** — and if

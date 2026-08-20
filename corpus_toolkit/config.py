@@ -344,6 +344,60 @@ class MissingSourceManifest(RuntimeError):
     """A configured source_manifest_path that is not on disk."""
 
 
+def _validated_watch(raw, sid):
+    """Check a source's `watch` list (corpus-toolkit#72).
+
+    NOT called from `load()`, unlike `_validated_volatile_patterns` — a manifest is not the
+    corpus config, and validating every group on load made one group's typo abort every
+    other group's cron. `changes.main()` calls `validate_watch_declarations` on the sources
+    this run will fetch, after the `--group` filter and before the first request. Callers
+    that reach a manifest another way (`status.py`, `--check-robots`, a corpus's own script)
+    do NOT validate — they also never read `watch`, and the hash validates again regardless.
+
+    The grammar itself lives in `corpus_toolkit.repo.validate_watch`, which the hash also
+    calls — one parser, because while these were two implementations they disagreed and a
+    path the door accepted was reported mid-crawl as an upstream schema change. This adds
+    the source id, and the one rule the hash cannot express: at the manifest, a `watch:` key
+    with no value is an authoring accident rather than a caller passing None.
+
+    Checked before the crawl rather than only at the hash because the answer does not depend
+    on the response: after a 3,447-source crawl is the wrong moment to learn a key was
+    mistyped.
+    """
+    from corpus_toolkit.repo import validate_watch
+
+    if raw is None:
+        # A PRESENT KEY WITH NO VALUE, since this is only called when `watch` is in the
+        # source. `watch:` with nothing under it -- a mis-indented list, or one deleted a
+        # line at a time -- parses to None, and the source silently reverted to hashing the
+        # whole document: the exact `viewCount` false-positive stream #72 removes, emitted
+        # from a manifest that visibly declares `watch`, with nothing said anywhere. One
+        # character away, `watch: []` is a hard error; the same accident must not get
+        # opposite treatment, and the silent branch is the wrong one to keep.
+        raise ValueError(
+            f"source {sid!r}: `watch` is declared with no value. A `watch:` key with "
+            f"nothing under it hashes the whole document, so the source would go on "
+            f"reporting the vendor counters `watch` exists to ignore. Remove the key to "
+            f"hash raw bytes deliberately, or give it a list of paths.")
+    return validate_watch(raw, where=f"source {sid!r}")
+
+
+def validate_watch_declarations(sources):
+    """Validate `watch` on every source in `sources`, in place. Returns the same list.
+
+    SEPARATE FROM `iter_manifest_sources` and applied AFTER the caller's `--group` filter.
+    Validating on yield made one group's typo abort every OTHER group's cron with an
+    uncaught traceback -- `--group` is the per-cadence knob, and `--check-robots`, which is
+    documented as reporting and never blocking, blocked. The fail-before-the-first-request
+    property is what matters, and filtering first keeps it: every source this run will
+    actually fetch is checked before any of them is.
+    """
+    for s in sources:
+        if isinstance(s, dict) and "watch" in s:
+            s["watch"] = _validated_watch(s["watch"], s.get("id", "<no id>"))
+    return sources
+
+
 def iter_manifest_sources(config: "CorpusConfig"):
     """Yield every source dict ({id, url, sha256, ...}) across all manifest
     groups, in group order. Each dict is annotated with `_group` (the group

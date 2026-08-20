@@ -15,6 +15,9 @@ directory of group files — see `corpus_toolkit.config.load_source_manifest_gro
       url: https://...
       sha256: <content_hash of the source as of the last review>
       format: html   # optional; inferred from the URL's extension otherwise
+      watch:         # optional, json sources only (corpus-toolkit#72): hash ONLY these
+        - rowsUpdatedAt          # paths, so vendor counters that move on their own are
+        - columns[].name         # inert by construction. Absent = hash the whole document.
 
 THE BASELINE IS WRITTEN BY THIS TOOL, under `--record-baseline` (corpus-toolkit#68).
 It used to be written by nothing at all: the docstring said "recorded at last
@@ -33,9 +36,13 @@ upstream change.
 Exit codes: 0 on a run that could actually detect drift. 1 when a fetch fails under
 `--strict`, when failures are systemic (>20%), when the issue cap truncated the report
 (a capped run is not a clean run), when no in-scope source has a baseline at all, when
-the scope came out empty so nothing was checked, and when `--record-baseline` refused a
-rewrite it could not account for. The common thread: a run that could not do the thing
-it reports on must not report success. A changed source is still a signal, not an error.
+the scope came out empty so nothing was checked, when `--record-baseline` refused a
+rewrite it could not account for, and — regardless of `--strict` — when a source declaring
+`watch` returned a document missing a declared path or one that will not parse as json.
+Those two are unconditional because the bytes ARRIVED: this is not upstream being briefly
+unreachable, and the source stays uncompared on every run until somebody looks. The common
+thread: a run that could not do the thing it reports on must not report success. A changed
+source is still a signal, not an error.
 """
 import argparse
 import copy
@@ -51,8 +58,10 @@ import urllib.request
 import yaml
 
 from corpus_toolkit import config as config_mod
-from corpus_toolkit.config import iter_manifest_sources
-from corpus_toolkit.repo import content_hash
+from corpus_toolkit.config import (iter_manifest_sources,
+                                   validate_watch_declarations)
+from corpus_toolkit.repo import (WatchedDocumentUnreadable, WatchedPathMissing,
+                                 content_hash)
 
 USER_AGENT = "corpus-toolkit-change-detector"
 
@@ -70,6 +79,26 @@ def _format_for(url: str, declared: str | None) -> str:
     ext = path.rsplit(".", 1)[-1] if "." in path.rsplit("/", 1)[-1] else "html"
     return ext if ext in ("pdf", "xls", "xlsx", "docx", "xml") else "html"
 
+
+# AN ALLOWLIST, for the same reason the feature itself is one: a `watch` list needs a json
+# body, and enumerating the formats that are NOT json makes every format nobody thought of
+# a silent acceptance. That is not hypothetical -- the first version of this check was a
+# blocklist exempting `_format_for`'s `html` result, and since `_format_for` returns `html`
+# for EVERY extension it does not recognise, the exemption written to protect Socrata
+# `.json` urls also swallowed `.html`, `.csv` and `.aspx`. `.xml` and `.pdf` were refused
+# and a real HTML page was not, with nothing declared in either case.
+_WATCH_COMPATIBLE_FORMATS = frozenset({"json", "geojson"})
+
+
+def _url_extension(url: str) -> str:
+    """The url's filename extension, lowercased, or "" if it has none.
+
+    Same derivation as `_format_for` (query string dropped, dot required in the last path
+    segment), kept beside it so the two cannot drift.
+    """
+    path = url.lower().split("?")[0]
+    tail = path.rsplit("/", 1)[-1]
+    return tail.rsplit(".", 1)[-1] if "." in tail else ""
 
 ISSUE_LABEL = "source-change"
 
@@ -284,8 +313,23 @@ def _plan_sha_edits(lines: list[str], wanted: set[str]) -> dict[str, list]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if not line[:1].isspace() or stripped.startswith("- "):
-            cur = None                      # a new sequence entry, or a top-level key
+        if not line[:1].isspace():
+            cur = None                      # a top-level key ends the entry
+        elif stripped.startswith("- "):
+            # A `- ` INSIDE the entry is not a new entry. This reset was unconditional,
+            # which was safe only while no source key held a block sequence -- `watch:`
+            # (corpus-toolkit#72) is the first, and with it written above `sha256:` the sha
+            # line was never associated with its id: a second `sha256:` was inserted after
+            # `id:`, the re-parse check saw the old trailing value win, and the whole group
+            # file was refused, taking every other source in it down too. That is the
+            # adoption path MIGRATION.md prescribes, broken by the feature it adopts.
+            #
+            # Compared against the entry's own key column, so a sibling `- id:` (marker to
+            # the LEFT of that column) still ends it -- writing a's hash into b's line is
+            # the wrong-entry write this function refuses by name.
+            marker = len(line) - len(line.lstrip())
+            if cur is None or marker < plan[cur][2]:
+                cur = None
         m = _ID_RE.match(line)
         if m:
             sid = _scalar(m.group("value"))
@@ -294,7 +338,14 @@ def _plan_sha_edits(lines: list[str], wanted: set[str]) -> dict[str, list]:
                 plan[cur] = [i, None, len(m.group("lead"))]
             continue
         m = _SHA_RE.match(line)
-        if m and cur is not None and plan[cur][1] is None:
+        # AT THE ENTRY'S OWN KEY COLUMN, exactly. Relaxing the `- ` reset above so a nested
+        # block sequence no longer ends the entry also let the first `sha256:` INSIDE that
+        # sequence be claimed as the entry's own -- an `attachments:` list with per-file
+        # digests had the source's hash written into the attachment, the re-parse check
+        # failed, and the group file was refused with nothing written. The entry's own keys
+        # are at `plan[cur][2]`; anything deeper belongs to something else.
+        if (m and cur is not None and plan[cur][1] is None
+                and len(m.group("lead")) == plan[cur][2]):
             plan[cur][1] = i
     return plan
 
@@ -330,7 +381,8 @@ def _rewrite_sha256(text: str, updates: dict[str, str]) -> tuple[str, list[str]]
     return "".join(lines), sorted(set(updates) - set(plan))
 
 
-def _record_baselines(config, fetched: dict, in_scope: set, mode: str) -> dict:
+def _record_baselines(config, fetched: dict, in_scope: set, mode: str,
+                      uncompared: dict | None = None) -> dict:
     """Write freshly computed hashes into the manifest group files. Returns a tally.
 
     THE MANIFEST IS CURATED DATA a human reviews in a PR, and every rule here follows from
@@ -353,6 +405,19 @@ def _record_baselines(config, fetched: dict, in_scope: set, mode: str) -> dict:
     """
     tally = {"written": 0, "already_current": 0, "left_alone": 0, "failed_fetch": 0,
              "files": [], "left_alone_ids": [], "refused": []}
+    # The SAME SET the totals line and the group breakdown count, passed in rather than
+    # re-derived. Deriving it from `fetched` was wrong for duplicate ids: `fetched` is keyed
+    # (group, id), so a successful sibling entry populated the key and the failing entry
+    # looked fetched -- and copying an entry, editing the url and forgetting the id is
+    # exactly how a duplicate arises.
+    # A COUNT PER KEY, not a membership test. `fetched` is keyed (group, id), so for a
+    # duplicated id a successful sibling entry populated the key and the failing entry
+    # looked fetched -- and copying an entry, editing the url and forgetting the id is
+    # exactly how a duplicate arises. A membership test then over-counted the reverse case,
+    # where both entries failed and the totals line counted two. The count is built where
+    # the outcomes are known, per entry, and consumed once per key here.
+    uncompared = uncompared or {}
+    counted_uncompared: set = set()
     for path, group in config_mod.load_source_manifest_group_files(config):
         gname = group.get("group") or "manifest"
         sources = [s for s in (group.get("sources") or []) if isinstance(s, dict)]
@@ -366,6 +431,15 @@ def _record_baselines(config, fetched: dict, in_scope: set, mode: str) -> dict:
             key = (gname, sid)
             if key not in in_scope:
                 continue
+            if uncompared.get(key) and key not in counted_uncompared:
+                # BEFORE the duplicate-id branch. A source that was both duplicated and
+                # never compared was counted by the totals line and the group breakdown but
+                # not here -- one of the two combinations where "one definition of `not
+                # compared`" was false. Counting it first costs nothing: the duplicate
+                # branch below still refuses, and both facts are true of the same source.
+                # Once per key, since a duplicated id reaches this line twice.
+                counted_uncompared.add(key)
+                tally["failed_fetch"] += uncompared[key]
             if occurrences[sid] > 1:
                 if sid not in [r[1] for r in tally["refused"]]:
                     tally["refused"].append(
@@ -376,8 +450,12 @@ def _record_baselines(config, fetched: dict, in_scope: set, mode: str) -> dict:
                                     "and re-run."))
                 continue
             new = fetched.get(key)
-            if new is None:
-                tally["failed_fetch"] += 1
+            if new is None:  # already counted above
+                # No hash was computed for this source, so nothing may be written: "could
+                # not check" is not "unchanged". Deliberately does NOT distinguish WHY --
+                # a failed fetch, an unreadable body and a missing `watch` path are the same
+                # decision here -- so the caller's wording names no reason at all. It named
+                # two, and the third one then read as one of those two.
                 continue
             old = str(s.get("sha256") or "").strip()
             if old == new:
@@ -468,7 +546,12 @@ def _print_group_breakdown(per_group: dict) -> None:
     for name in sorted(per_group, key=lambda g: (-per_group[g]["changed"], g)):
         st = per_group[name]
         unseeded = f" [{st['unseeded']} unseeded]" if st["unseeded"] else ""
-        parts.append(f"{name} {st['changed']}/{st['total']}{unseeded}")
+        # `socrata 0/2` reads identically whether both sources were compared and found
+        # stable or NEITHER was compared at all. This is the line that makes a bulk fault
+        # self-evident (#67); it must not present the second case as the first.
+        uncompared = (f" [{st.get('uncompared', 0)} not compared]"
+                      if st.get("uncompared") else "")
+        parts.append(f"{name} {st['changed']}/{st['total']}{unseeded}{uncompared}")
     print("drift by group (changed/checked): " + ", ".join(parts))
 
 
@@ -523,15 +606,47 @@ def main():
     patterns = config.volatile_patterns
     pattern_hits = [0] * len(patterns)
     pattern_bytes = [0] * len(patterns)
-    n_normalizable = normalizable_bytes = 0
-    changed, failed = [], []
+    n_normalizable = normalizable_bytes = n_normalizable_in_scope = 0
+    changed, failed, watch_failed, unreadable = [], [], [], []
+    # (group, id) -> how many ENTRIES with that key were not compared. Per entry, because
+    # only the fetch loop knows which of two duplicate entries succeeded.
+    uncompared_counts: dict[tuple[str, str], int] = {}
     per_group: dict[str, dict] = {}
     fetched: dict[tuple[str, str], str] = {}
     in_scope: set[tuple[str, str]] = set()
     n_total = n_unseeded = 0
-    for s in iter_manifest_sources(config):
-        if args.group and s.get("_group") not in args.group:
-            continue
+    # FILTER FIRST, THEN VALIDATE, THEN FETCH. A mistyped `watch` must stop the run before
+    # the first request rather than however many minutes into the crawl the bad source
+    # happens to sit -- but only for groups this run was told to check. Validating on yield
+    # let one group's typo abort every other group's cron, and `--check-robots` with it.
+    manifest_sources = [s for s in iter_manifest_sources(config)
+                        if not args.group or s.get("_group") in args.group]
+    validate_watch_declarations(manifest_sources)
+    for s in manifest_sources:
+        # A `watch:` block on a source whose body a watch list cannot read. `content_hash`
+        # takes the watch branch BEFORE the format branch, so `json.loads` met the markup
+        # and every run reported `WATCH BODY UNREADABLE ... a fact about the response` --
+        # the opposite of what happened, from a manifest that says what the source is.
+        #
+        # A declared `format:` is believed; otherwise the url's extension decides. Both are
+        # declarations. `format: JSON` and `geojson` are accepted, so the check does not
+        # turn on the literal string `json`. A url with no extension (a REST endpoint) must
+        # declare `format: json` -- the message says so, and guessing on its behalf is how
+        # the blocklist version went wrong.
+        if s.get("watch"):
+            declared = str(s.get("format") or "").strip()
+            seen = declared.lower() or _url_extension(s.get("url", ""))
+            if seen not in _WATCH_COMPATIBLE_FORMATS:
+                shown = (f"`format: {declared}`" if declared
+                         else (f"a url ending {seen!r}" if seen
+                               else "a url with no extension"))
+                raise ValueError(
+                    f"source {s.get('id')!r}: `watch` is declared alongside {shown}. A "
+                    f"watch list selects paths out of a json document; on anything else "
+                    f"the body will not parse, and the run would report that as an "
+                    f"unreadable response rather than as this declaration. Drop the "
+                    f"`watch` list, or add `format: json` if that is what upstream serves.")
+    for s in manifest_sources:
         n_total += 1
         # `or ""`, not a plain get: `sha256:` with no value parses to None, and the
         # CHANGED line's `old[:12]` then dies mid-crawl — on a manifest shape that is
@@ -540,16 +655,31 @@ def main():
         sid, url = s["id"], s["url"]
         old = str(s.get("sha256") or "").strip()
         gname = s.get("_group", "manifest")
-        stats = per_group.setdefault(gname, {"changed": 0, "total": 0, "unseeded": 0})
+        stats = per_group.setdefault(gname, {"changed": 0, "total": 0, "unseeded": 0,
+                                             "uncompared": 0})
         stats["total"] += 1
         in_scope.add((gname, sid))
         if not old:
             n_unseeded += 1
             stats["unseeded"] += 1
         fmt = _format_for(url, s.get("format"))
+        # Counted BEFORE the fetch, so the pattern report can tell "no HTML/XML source was
+        # ever in scope" (a fact about the manifest) from "every one of them failed" (a fact
+        # about our access). Reporting the second as the first sent an operator to audit a
+        # `volatile_patterns:` entry when the finding was that the crawler is blocked.
+        if fmt in ("html", "xml") and not s.get("watch"):
+            n_normalizable_in_scope += 1
         try:
             raw = fetch(url)
-            if fmt in ("html", "xml"):
+            # `and not s.get("watch")`: a watch source takes the digest branch in
+            # `content_hash`, so no pattern was ever applied to its bytes -- but they were
+            # added to `normalizable_bytes` anyway, and that is the DENOMINATOR of the >10%
+            # breadth warning. Measured: a pattern stripping 39.7% of the one page it
+            # processed reported `3.83% of 12544` once a 12 KB watched json body joined the
+            # total, demoting the warning to a NOTE. The wider the json body, the safer a
+            # content-deleting pattern looks. `format:` need not even say json -- an
+            # unrecognised `.json` extension resolves to "html" in `_format_for`.
+            if fmt in ("html", "xml") and not s.get("watch"):
                 n_normalizable += 1
                 normalizable_bytes += len(raw)
                 for i, pat in enumerate(patterns):
@@ -562,9 +692,41 @@ def main():
                     if removed:
                         pattern_hits[i] += 1
                         pattern_bytes[i] += removed
-            new = content_hash(raw, fmt, patterns)
+            new = content_hash(raw, fmt, patterns, watch=s.get("watch"))
+        except WatchedDocumentUnreadable as e:
+            # Caught BEFORE its parent. A 200 carrying an error page and a watched field
+            # disappearing are different findings with different remedies, and calling the
+            # first one the second sends the operator to audit a `watch` list that is fine.
+            unreadable.append(sid)
+            stats["uncompared"] += 1
+            uncompared_counts[(gname, sid)] = uncompared_counts.get((gname, sid), 0) + 1
+            print(f"WATCH BODY UNREADABLE {sid}: {url} ({e})", file=sys.stderr)
+            continue
+        except WatchedPathMissing as e:
+            # NOT A FETCH FAILURE, and kept out of `failed` for that reason. The bytes
+            # arrived; the document does not have the shape this source declared it
+            # watches. Counting it as a failed fetch put it under "a fact about our access,
+            # not about upstream" -- the exact inverse of what it is -- and fed it into the
+            # >20% SYSTEMIC threshold, so a schema change upstream could raise the one
+            # alarm that means "our crawler is blocked" (corpus-toolkit#72).
+            #
+            # stderr, not stdout, and annotated: this is the most actionable thing the run
+            # can find. A watched field disappearing is precisely what a `watch` list is
+            # for, and the first version whispered it into a 3,900-line log and exited 0.
+            watch_failed.append(sid)
+            stats["uncompared"] += 1
+            uncompared_counts[(gname, sid)] = uncompared_counts.get((gname, sid), 0) + 1
+            print(f"WATCH PATH MISSING {sid}: {url} ({e})", file=sys.stderr)
+            continue
         except Exception as e:
             failed.append(sid)
+            # Counted here for the same reason as the two above: this source was NOT
+            # compared, and without the marker the group line renders `blocked 0/2`,
+            # indistinguishable from a group compared in full and found stable. That is the
+            # case corpus-toolkit#67 added this line to expose -- ERF's DEQ group sat at
+            # 52/52 off a broken fetch -- so it predates `watch` and is fixed alongside it.
+            stats["uncompared"] += 1
+            uncompared_counts[(gname, sid)] = uncompared_counts.get((gname, sid), 0) + 1
             print(f"FETCH FAILED {sid}: {url} ({e})")
             continue
         fetched[(gname, sid)] = new
@@ -578,7 +740,8 @@ def main():
 
     recorded = None
     if args.record_baseline:
-        recorded = _record_baselines(config, fetched, in_scope, args.record_baseline)
+        recorded = _record_baselines(config, fetched, in_scope, args.record_baseline,
+                                     uncompared=uncompared_counts)
 
     # A run with no baseline at all cannot detect drift: every source compares unequal to
     # `''`, so 100% "changed" is a fact about the manifest, not about upstream. Measured,
@@ -615,14 +778,28 @@ def main():
     # printed the changed count alone, which read as "these were filed" even when every
     # single filing had failed. The unseeded count is here for the same reason: it is the
     # difference between drift that means something and drift that cannot.
-    print(f"\n{len(changed)} changed, {len(failed)} fetch failure(s), "
+    # `not compared` is on this line and not only in the detail below it because this is
+    # the line an operator reads: "of 3 checked" while one of the three was never compared
+    # to anything is the same could-not-check-as-checked the rest of this file refuses.
+    # ONE DEFINITION, used on every line that says it: a source that was in scope and never
+    # compared to a baseline. Three adjacent lines carried three different sets -- this one
+    # counted watch misses only, the group breakdown counted fetch failures too, and the
+    # baseline tally used a third -- so an operator read `1 not compared` and counted 2 on
+    # the next line, with no way to tell which was wrong except by reading the source.
+    not_compared = len(failed) + len(watch_failed) + len(unreadable)
+    why = ", ".join(filter(None, [
+        f"{len(failed)} fetch failed" if failed else "",
+        f"{len(watch_failed)} watched path missing" if watch_failed else "",
+        f"{len(unreadable)} body not parseable as json" if unreadable else ""]))
+    uncompared = f"{not_compared} not compared ({why}), " if not_compared else ""
+    print(f"\n{len(changed)} changed, {len(failed)} fetch failure(s), {uncompared}"
           f"{n_unseeded} with no recorded baseline, of {n_total} checked.")
     _print_group_breakdown(per_group)
     if recorded is not None:
         print(f"{recorded['written']} baseline(s) recorded, "
               f"{recorded['already_current']} already current, "
               f"{recorded['left_alone']} left alone, "
-              f"{recorded['failed_fetch']} skipped (fetch failed).")
+              f"{recorded['failed_fetch']} skipped (not compared).")
         if recorded["files"]:
             print("manifest file(s) rewritten in the working tree — review the diff "
                   "before committing: "
@@ -651,11 +828,26 @@ def main():
               f"`corpus-detect-changes --config {args.config} --record-baseline`.",
               file=sys.stderr)
     for pat, hits, removed in zip(patterns, pattern_hits, pattern_bytes):
-        if not n_normalizable:
-            break
         shown = pat.pattern.decode("utf-8", "replace")
         share = removed / normalizable_bytes if normalizable_bytes else 0.0
-        if not hits:
+        if not n_normalizable:
+            # ZERO SOURCES MEASURED IS ITSELF THE FINDING, and this used to `break` and say
+            # nothing. `content_hash` permits `volatile_patterns` alongside json sources on
+            # the grounds that "a pattern that matches nothing anywhere is already named in
+            # the drift report, per run" -- so the report going silent is that argument's
+            # own premise failing. Reachable now that watch sources are (rightly) out of the
+            # denominator: a corpus with no non-watch HTML source left hits it.
+            if n_normalizable_in_scope:
+                print(f"NOTE: volatile pattern {shown!r} was measured against no source "
+                      f"this run — all {n_normalizable_in_scope} HTML/XML source(s) in "
+                      f"scope could not be fetched. This says nothing about the pattern; "
+                      f"the finding is the failed fetches.", file=sys.stderr)
+            else:
+                print(f"NOTE: volatile pattern {shown!r} was measured against NO source "
+                      f"this run — nothing in scope reaches the HTML/XML path, so this "
+                      f"says nothing about whether the pattern works. It is configured "
+                      f"and untested.", file=sys.stderr)
+        elif not hits:
             # A declared pattern that matches nothing is indistinguishable from the empty
             # built-in list it replaced — configured, and doing nothing (corpus-toolkit#66).
             print(f"NOTE: volatile pattern {shown!r} matched none of the "
@@ -724,6 +916,29 @@ def main():
             print("EVERY issue creation failed — drift is being detected and NOT "
                   "reported. This is the silent-reporting failure of corpus-toolkit#53.",
                   file=sys.stderr)
+    if unreadable:
+        print(f"{len(unreadable)} source(s) declaring `watch` returned a body that is not "
+              f"parseable json, so they were NOT compared: "
+              + ", ".join(unreadable[:20]) + ("…" if len(unreadable) > 20 else "")
+              + ". This is a fact about the response — an error page served with a 200, or "
+                "a block — not about the `watch` list.", file=sys.stderr)
+        _annotate("Watched sources returned unreadable bodies",
+                  f"{len(unreadable)} source(s) were not compared because the response is "
+                  f"not parseable json: " + ", ".join(unreadable[:20]))
+    if watch_failed:
+        # Its own line, above the fetch failures, because the remedy is different: a fetch
+        # failure is chased with the network, this is chased with the source's `watch` list
+        # against what upstream now serves.
+        print(f"{len(watch_failed)} source(s) declared a `watch` path the document does "
+              f"not contain, so they were NOT compared: "
+              + ", ".join(watch_failed[:20]) + ("…" if len(watch_failed) > 20 else "")
+              + ". Either upstream changed shape — worth knowing, and the reason this is "
+                "reported rather than hashed as empty — or the path is wrong.",
+              file=sys.stderr)
+        _annotate("Watched paths missing",
+                  f"{len(watch_failed)} source(s) were not compared because a declared "
+                  f"`watch` path is absent from the fetched document: "
+                  + ", ".join(watch_failed[:20]))
     if failed:
         print("failed sources (a fact about our access, not about upstream): "
               + ", ".join(failed[:20]) + ("…" if len(failed) > 20 else ""))
@@ -746,7 +961,12 @@ def main():
     # CI is the documented remedy for #68 reporting success having done nothing. Drift
     # itself is still a signal, not an error.
     refused_write = bool(recorded and recorded["refused"])
-    sys.exit(1 if (failed and args.strict) or systemic or capped or inert
+    # `watch_failed` is unconditional, unlike `failed`, which needs --strict. Upstream being
+    # briefly unreachable is ordinary; a source that was fetched successfully and still
+    # could not be compared is not, and it stays uncompared on every subsequent run until
+    # somebody looks. Could-not-check is never reported as nothing-to-report (CONTEXT.md).
+    sys.exit(1 if (failed and args.strict) or watch_failed or unreadable
+             or systemic or capped or inert
              or nothing_checked or refused_write else 0)
 
 
