@@ -309,12 +309,21 @@ def _plan_sha_edits(lines: list[str], wanted: set[str]) -> dict[str, list]:
     """
     plan: dict[str, list] = {}
     cur = None
+    # `sha256:` lines seen since the current entry began, as (index, lead length). An entry
+    # may write `sha256:` ABOVE `id:`, and scanning forward from the id line alone never
+    # claimed those -- `_rewrite_sha256` then concluded the entry had none and INSERTED a
+    # second one, which both verification guards accept: PyYAML resolves duplicate keys
+    # last-wins so the re-parse reads back the inserted value, and the line diff sees one
+    # added line carrying a wanted value. The run reported success and left a stale key in a
+    # curated file (corpus-toolkit#119).
+    pending: list[tuple[int, int]] = []
     for i, line in enumerate(lines):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         if not line[:1].isspace():
             cur = None                      # a top-level key ends the entry
+            pending = []
         elif stripped.startswith("- "):
             # A `- ` INSIDE the entry is not a new entry. This reset was unconditional,
             # which was safe only while no source key held a block sequence -- `watch:`
@@ -330,12 +339,25 @@ def _plan_sha_edits(lines: list[str], wanted: set[str]) -> dict[str, list]:
             marker = len(line) - len(line.lstrip())
             if cur is None or marker < plan[cur][2]:
                 cur = None
+                # A NEW ENTRY STARTS HERE, so anything seen above belongs to the previous
+                # one. Keeping it would let a `sha256:` from the entry before be claimed by
+                # this one -- the wrong-entry write, from the other direction.
+                pending = []
         m = _ID_RE.match(line)
         if m:
             sid = _scalar(m.group("value"))
             cur = sid if sid in wanted and sid not in plan else None
             if cur is not None:
-                plan[cur] = [i, None, len(m.group("lead"))]
+                col = len(m.group("lead"))
+                plan[cur] = [i, None, col]
+                # AT THE ENTRY'S OWN KEY COLUMN, exactly as the forward scan requires.
+                # Without the column test this claims the first `sha256:` above `id:` at any
+                # depth, so an entry whose `attachments:` list carries per-file digests above
+                # its own id gets the source's hash written into the attachment.
+                for idx, lead in pending:
+                    if lead == col:
+                        plan[cur][1] = idx
+                        break
             continue
         m = _SHA_RE.match(line)
         # AT THE ENTRY'S OWN KEY COLUMN, exactly. Relaxing the `- ` reset above so a nested
@@ -344,9 +366,14 @@ def _plan_sha_edits(lines: list[str], wanted: set[str]) -> dict[str, list]:
         # digests had the source's hash written into the attachment, the re-parse check
         # failed, and the group file was refused with nothing written. The entry's own keys
         # are at `plan[cur][2]`; anything deeper belongs to something else.
-        if (m and cur is not None and plan[cur][1] is None
-                and len(m.group("lead")) == plan[cur][2]):
-            plan[cur][1] = i
+        if m:
+            if (cur is not None and plan[cur][1] is None
+                    and len(m.group("lead")) == plan[cur][2]):
+                plan[cur][1] = i
+            elif cur is None:
+                # Above an `id:` we have not reached yet. Recorded with its column so the
+                # id line can claim it only if it is that entry's own key.
+                pending.append((i, len(m.group("lead"))))
     return plan
 
 
@@ -418,13 +445,31 @@ def _record_baselines(config, fetched: dict, in_scope: set, mode: str,
     # the outcomes are known, per entry, and consumed once per key here.
     uncompared = uncompared or {}
     counted_uncompared: set = set()
-    for path, group in config_mod.load_source_manifest_group_files(config):
+    # ACROSS ALL FILES, KEYED `(group, id)` -- the space `fetched` and `in_scope` already
+    # use. Built per FILE, two files declaring the same `group:` collided in the hash map
+    # while looking unique to the duplicate guard below, so one entry's hash was written
+    # into the other: silently, no refusal, exit 0. That is the wrong-entry write
+    # `_plan_sha_edits` refuses by name, one level up where the guard did not look
+    # (corpus-toolkit#120).
+    #
+    # Two files under DIFFERENT groups may legitimately share an id -- directory mode
+    # defaults `group` to the file stem -- and they key differently, so they are untouched.
+    group_files = list(config_mod.load_source_manifest_group_files(config))
+    occurrences: dict[tuple[str, str], int] = {}
+    where: dict[tuple[str, str], list] = {}
+    for path, group in group_files:
+        gname = group.get("group") or "manifest"
+        for s in (group.get("sources") or []):
+            if not isinstance(s, dict):
+                continue
+            key = (gname, str(s.get("id", "")))
+            occurrences[key] = occurrences.get(key, 0) + 1
+            if path not in where.setdefault(key, []):
+                where[key].append(path)
+
+    for path, group in group_files:
         gname = group.get("group") or "manifest"
         sources = [s for s in (group.get("sources") or []) if isinstance(s, dict)]
-        occurrences: dict[str, int] = {}
-        for s in sources:
-            sid = str(s.get("id", ""))
-            occurrences[sid] = occurrences.get(sid, 0) + 1
         updates: dict[str, str] = {}
         for s in sources:
             sid = str(s.get("id", ""))
@@ -440,14 +485,23 @@ def _record_baselines(config, fetched: dict, in_scope: set, mode: str,
                 # Once per key, since a duplicated id reaches this line twice.
                 counted_uncompared.add(key)
                 tally["failed_fetch"] += uncompared[key]
-            if occurrences[sid] > 1:
+            if occurrences[key] > 1:
                 if sid not in [r[1] for r in tally["refused"]]:
+                    files = where.get(key) or [path]
+                    # NAMES EVERY FILE INVOLVED. The message was written for the within-file
+                    # case and says "in this group file"; an operator told that about a
+                    # CROSS-file collision searches the wrong one and finds a single entry
+                    # that looks fine.
+                    scope = (f"duplicate id in this group file"
+                             if len(files) == 1 else
+                             f"duplicate id across {len(files)} group files that share the "
+                             f"group name {gname!r} ("
+                             + ", ".join(str(f.name) for f in files) + ")")
                     tally["refused"].append(
-                        (path, sid, "duplicate id in this group file — cannot tell which "
-                                    "entry the fetched hash belongs to. No baseline was "
-                                    "written for this id; the other sources in this file "
-                                    "were written normally. Give the entries distinct ids "
-                                    "and re-run."))
+                        (path, sid, f"{scope} — cannot tell which entry the fetched hash "
+                                    "belongs to. No baseline was written for this id; the "
+                                    "other sources in these files were written normally. "
+                                    "Give the entries distinct ids and re-run."))
                 continue
             new = fetched.get(key)
             if new is None:  # already counted above

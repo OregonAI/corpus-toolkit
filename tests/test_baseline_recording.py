@@ -520,5 +520,116 @@ class WatchDoesNotBreakBaselineRecordingTest(_CorpusFixture):
                       "b was not recorded — the sibling boundary was lost")
 
 
+class ShaAboveIdTest(_CorpusFixture):
+    """`sha256:` written ABOVE `id:` gets a duplicate key inserted (corpus-toolkit#119).
+
+    `_plan_sha_edits` associates a `sha256:` with its entry by scanning FORWARD from the
+    entry's `id:` line, so one written above it is never claimed — `cur` is still None when
+    the sha line goes by — and `_rewrite_sha256` concludes the entry has none and inserts a
+    fresh one after `id:`.
+
+    BOTH VERIFICATION GUARDS PASS IT, which is why it is silent. PyYAML resolves duplicate
+    keys last-wins, so the INSERTED value is what the re-parse check reads back and
+    `actual == expected` holds; the line diff sees one added line carrying a value in
+    `updates`, which is the shape it is designed to allow. The run reports
+    `1 baseline(s) recorded` and exits 0, leaving a stale `sha256: ""` above a live one in a
+    file a human reviews — and on the next run the manifest parses to the new value, so the
+    source reads as current and the stale key is never noticed.
+    """
+
+    def test_a_sha_above_id_is_claimed_not_duplicated(self):
+        path = self.write_manifest(
+            'sources:\n'
+            '  - sha256: ""\n'
+            '    id: "a"\n'
+            '    url: https://example.gov/a\n'
+            '    format: html\n')
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        text = path.read_text()
+        self.assertEqual(text.count("sha256:"), 1,
+                         f"a duplicate sha256 key was inserted:\n{text}")
+        self.assertIn(HASH_A, text)
+        self.assertIn("1 baseline(s) recorded", out)
+
+    def test_a_nested_sha_above_id_is_still_not_claimed(self):
+        """The backward scan needs the same key-column rule the forward one has. Without it
+        it claims the FIRST `sha256:` above `id:` whatever its depth — so an entry whose
+        `attachments:` list carries per-file digests above its own `id:` has the source's
+        hash written into the attachment. That is the wrong-entry write this function
+        refuses by name, reached from the other direction."""
+        path = self.write_manifest(
+            'sources:\n'
+            '  - attachments:\n'
+            '      - url: https://example.gov/appendix.pdf\n'
+            '        sha256: "aaaaaaaaaaaa"\n'
+            '    id: "a"\n'
+            '    url: https://example.gov/a\n'
+            '    format: html\n')
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        text = path.read_text()
+        self.assertIn("aaaaaaaaaaaa", text, "the attachment's own digest was overwritten")
+        self.assertIn(HASH_A, text)
+        self.assertIn("1 baseline(s) recorded", out, f"{out}{err}")
+        self.assertLess(text.index("aaaaaaaaaaaa"), text.index(HASH_A))
+
+
+class CrossFileDuplicateIdTest(_CorpusFixture):
+    """Duplicate ids across two group files sharing a `group:` name (corpus-toolkit#120).
+
+    `occurrences` is built PER FILE while `fetched`/`in_scope` are keyed `(group, id)`, so
+    two files declaring the same group collide in the hash map while looking unique to the
+    duplicate guard. One entry's hash is then written into the other, silently, exit 0 — the
+    wrong-entry write `_plan_sha_edits` refuses by name, arriving one level up where the
+    guard does not look.
+    """
+
+    manifest = "_meta/sources"
+
+    def _two_files(self):
+        for name, n in (("a", 1), ("b", 2)):
+            self.write_manifest(
+                f'group: shared\nsources:\n  - id: "d"\n'
+                f'    url: https://example.gov/{"a" if n == 1 else "b"}\n'
+                f'    format: html\n    sha256: ""\n',
+                name=f"{name}.yml", subdir="sources")
+
+    def test_neither_file_is_written_and_both_are_named(self):
+        self._two_files()
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        a = (self.root / "_meta" / "sources" / "a.yml").read_text()
+        b = (self.root / "_meta" / "sources" / "b.yml").read_text()
+        self.assertNotIn(HASH_A, a + b, "a hash was written despite an ambiguous id")
+        self.assertNotIn(HASH_B, a + b)
+        self.assertIn("REFUSED", err, f"{out}{err}")
+        self.assertIn("a.yml", err, "the refusal did not name both colliding files")
+        self.assertIn("b.yml", err, "the refusal did not name both colliding files")
+        self.assertNotEqual(code, 0)
+
+    def test_the_same_id_in_two_DIFFERENT_groups_is_not_a_collision(self):
+        """Directory mode defaults `group` to the file stem, so two files may legitimately
+        carry the same id under different groups — and they key differently. Refusing those
+        would break every corpus using directory mode."""
+        for name in ("a", "b"):
+            self.write_manifest(
+                f'sources:\n  - id: "d"\n'
+                f'    url: https://example.gov/{"a" if name == "a" else "b"}\n'
+                f'    format: html\n    sha256: ""\n',
+                name=f"{name}.yml", subdir="sources")
+
+        code, out, err = self.run_cli("--record-baseline")
+
+        a = (self.root / "_meta" / "sources" / "a.yml").read_text()
+        b = (self.root / "_meta" / "sources" / "b.yml").read_text()
+        self.assertIn(HASH_A, a)
+        self.assertIn(HASH_B, b)
+        self.assertIn("2 baseline(s) recorded", out, f"{out}{err}")
+
+
 if __name__ == "__main__":
     unittest.main()
