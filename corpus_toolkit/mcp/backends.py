@@ -306,15 +306,17 @@ class RetrievalBackend(Protocol):
         measurement. Where no sentinels are declared the key may be omitted and is taken as
         zero, so a three-bucket backend keeps working unchanged.
 
-        REPORT ONLY WHAT YOU MEASURED. A backend that cannot classify against a registry
-        omits the three counts (keeping `documents`/`basis`), and one that returns a bare
-        `{content_mode: count}` mapping — the shape this method had in v1.25.0 — is still
-        honoured. Both are reported as coverage UNKNOWN rather than complete: unknown and
+        REPORT ONLY WHAT YOU MEASURED, AND ALL OF IT. A backend that cannot classify
+        against a registry omits `in_registry`/`no_registry_entry` — the only two that need
+        one — and keeps `documents`, `unattributed` and (where the corpus declares
+        sentinels) `declared_no_body`. Those are answerable without a registry, and omitting
+        them discarded the fact that decides whether a per-slug answer is a FLOOR
+        (corpus-toolkit#46). A backend returning a bare `{content_mode: count}` mapping —
+        the shape this method had in v1.25.0 — is still honoured. Both are reported as coverage UNKNOWN rather than complete: unknown and
         none are opposite answers (CONTEXT.md; response convention 5), and a partial
         measurement is not a complete one.
 
-        OPTIONAL, and the only optional member of this protocol; see
-        REQUIRED_BACKEND_METHODS. A backend that cannot answer it simply omits it, and
+        OPTIONAL; see REQUIRED_BACKEND_METHODS. A backend that cannot answer it simply omits it, and
         `issuing_body_profile` is not registered for that corpus.
 
         It exists so the question stops being asked BEHIND the seam. `issuing_body_profile`
@@ -337,6 +339,34 @@ class RetrievalBackend(Protocol):
 # `holdings_for` is deliberately NOT here: adding a required method would break every
 # corpus-supplied backend already in service on the next pin bump, for a tool most of them
 # do not serve. It is a capability, checked where it is used.
+    def documents_for_slug(self, slug: str, limit: int = 50, offset: int = 0) -> dict:
+        """This corpus's documents for one issuing-body slug (corpus-toolkit#46):
+
+            {"documents": [{id, title, citation, doc_type, content_mode, path}, ...],
+             "total": int,          # matches for this slug, BEFORE limit/offset
+             "coverage": {...}}     # exactly `holdings_for`'s coverage block
+
+        `total` is the match count, not the page size, and `documents` must be ORDERED
+        stably — a caller paginating with `offset` against an unordered scan sees some
+        documents twice and never sees others.
+
+        The coverage block is `holdings_for`'s, not a second measure: a list of documents
+        and a count of documents are the same claim about the same corpus, and two measures
+        would let a caller read one as complete and the other as a floor.
+
+        OPTIONAL, like `holdings_for`. A backend that cannot answer omits it and
+        `documents_by_agency` is not registered — but a backend that implements it with a
+        DIFFERENT shape passes that gate and fails on every call, so the framework checks
+        the shape and names the backend rather than raising KeyError.
+
+        Unlike `issuing_body_profile`, the tool over this does NOT additionally require a
+        registry: "which of my documents carry this slug" needs none. It exists so an
+        aggregating client can assemble a per-agency profile by ASKING each corpus rather
+        than duplicating each corpus's per-consumer agency crosswalk.
+        """
+        ...
+
+
 REQUIRED_BACKEND_METHODS = ("search", "get", "exists", "overview", "health")
 
 
@@ -763,8 +793,15 @@ class FileBackend:
                               capture_output=True, text=True).stdout.strip()
         return {"documents_by_type": by_type, "content_mode": by_mode, "commit": head}
 
-    def holdings_for(self, slug: str) -> dict:
+    def holdings_for(self, slug: str, con=None) -> dict:
         """Counts for one slug, plus how much of the corpus this count could see.
+
+        `con` lets a caller that already opened the index share it. `ensure_index()` returns
+        a FRESH connection each call after re-checking `repo_state`, so `documents_for_slug`
+        calling this without it read its documents and their coverage through two
+        independent index reads -- and a rebuild landing between them would attach coverage
+        measured against one corpus to documents listed from another. Optional and
+        keyword-defaulted, so a backend implementing the protocol without it is unaffected.
 
         `issuing_body_slug` is the RESOLVED slug — the corpus's declared
         `plugins.issuing_body_slug_field` where its value names a registry entry, else the
@@ -792,10 +829,13 @@ class FileBackend:
             unattributed       no value at all. Counted for no body
 
         The LAST TWO are why a per-body count can be a lower bound, and the tool says so.
-        With no registry to read, `in_registry` is unanswerable, so the buckets are OMITTED
-        rather than guessed and the tool reports coverage as unknown.
+        With no registry to read, `in_registry` and `no_registry_entry` are unanswerable and
+        are OMITTED rather than guessed; `documents`, `unattributed` and `declared_no_body`
+        are still reported, because they are still measured. `complete` is then False or
+        None, never True: documents carrying no slug prove a floor without a registry, but a
+        mistyped slug is invisible without one (corpus-toolkit#46).
         """
-        con = self.ensure_index()
+        con = con or self.ensure_index()
         counts = dict(con.execute(
             "SELECT content_mode, COUNT(*) FROM docs WHERE issuing_body_slug = ? "
             "GROUP BY content_mode", (slug,)).fetchall())
@@ -896,7 +936,9 @@ class FileBackend:
         cols = ("id", "title", "citation", "doc_type", "content_mode", "path")
         return {"documents": [dict(zip(cols, r)) for r in rows],
                 "total": total,
-                "coverage": self.holdings_for(slug)["coverage"]}
+                # SAME CONNECTION as the two queries above, so the documents and the
+                # coverage attached to them describe one index read rather than two.
+                "coverage": self.holdings_for(slug, con=con)["coverage"]}
 
     def health(self) -> dict:
         """A file corpus is reachable iff its index holds anything.

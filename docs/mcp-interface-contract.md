@@ -297,8 +297,16 @@ and skips others.
 | empty | `null` | nobody measured. **Not** the same as none |
 
 `slug_in_registry` answers a different question and is deliberately separate:
-`null` means the corpus declares no registry, so whether the slug names a real
-agency **was not checked here** — not that it is absent.
+`null` means the slug **was not checked here** — either the corpus declares no
+registry, or it declares one that could not be read — not that the slug is
+absent. Those two are distinguished in `attribution.note`, because a broken
+registry path is a fault and "no registry" is a choice.
+
+A declared no-body sentinel (`plugins.issuing_body_slug_sentinels`) is refused
+by name rather than answered: those documents are the ones the corpus attributes
+to **no** body, deliberately, so they are not any agency's holdings. `limit` is
+clamped to 200 and `offset` to ≥ 0, and the response echoes the values actually
+served.
 
 Registered when the retrieval backend implements `documents_for_slug(slug,
 limit, offset)`. **Unlike `issuing_body_profile` it does not additionally
@@ -343,9 +351,11 @@ or not this corpus happens to serve it:
     corpus_overview authority_chain     issuing_body_profile
     documents_by_agency
 
-`authority_chain`, `issuing_body_profile` and `documents_by_agency` are
-conditional — on archetype, and on the backend implementing `holdings_for` or
-`documents_for_slug` — and are reserved anyway. A corpus
+`authority_chain` and `issuing_body_profile` are conditional on archetype;
+`issuing_body_profile` and `documents_by_agency` are conditional on the backend
+implementing `holdings_for` / `documents_for_slug`. `documents_by_agency` has no
+archetype condition — an `api` corpus registers it too. All three are reserved
+anyway. A corpus
 that claimed a conditional name would start clean, serve corpus semantics under
 a core tool's name, and turn fatal the day the condition changed with no edit to
 its tools module.

@@ -165,6 +165,20 @@ def write_document(dest: Path) -> None:
     (snapshots / f"{DOC_ID}.txt").write_text(SNAPSHOT_TEXT, encoding="utf-8")
     digest = hash_snapshot(DOC_ID, "html", snapshots)
 
+    # DECLARE THE SLUG FIELD. Without it the smoke document resolves to no issuing-body
+    # slug — it sits under an unscoped root and its `issuing_body` is free text — so
+    # `documents_by_agency` had nothing to find and its round-trip compared `[] == []`,
+    # asserting nothing about the documents list, the one field serialization could drop
+    # (corpus-toolkit#46). Every live corpus that answers this tool declares the field; the
+    # gate's corpus should look like one.
+    cy = dest / "_meta" / "corpus.yml"
+    text = cy.read_text(encoding="utf-8")
+    if "plugins:" not in text:
+        raise GateFailure("the template's corpus.yml has no `plugins:` block to extend")
+    cy.write_text(text.replace(
+        "plugins:", 'plugins:\n  issuing_body_slug_field: "issuing_body_slug"', 1),
+        encoding="utf-8")
+
     body_lines = "\n".join(ln for ln in SNAPSHOT_TEXT.splitlines())
     (dest / "documents" / f"{DOC_ID}.md").write_text(f"""\
 ---
@@ -177,6 +191,7 @@ doc_type: schedule
 citation: "Schedule 166-300-0001"
 authority_level: administrative_rule
 issuing_body: "Secretary of State Archives Division"
+issuing_body_slug: "secretary-of-state-archives-division"
 legal_authority: []
 source_url: "https://sos.oregon.gov/archives/records/Pages/166-300-0001.aspx"
 source_format: html
@@ -399,13 +414,19 @@ def check_result_marshalling(dest: Path) -> None:
         # it here is what this step's own uncovered-tool check caught during development —
         # which is the check doing its job, and the reason it exists.
         ("join_lookup", {"document_id": DOC_ID}),
-        # corpus-toolkit#46. Registered on any corpus whose backend can answer, which the
-        # template's file backend can — so it needs covering here even though the template
-        # declares no issuing-body registry. That is the case worth exercising: it round-
-        # trips the `slug_in_registry: null` and `attribution.complete` branches a corpus
-        # with no registry actually serves.
-        ("documents_by_agency", {"slug": "department-of-administrative-services"}),
+        # corpus-toolkit#46. The slug is read from the indexed document rather than
+        # hardcoded, because a slug this corpus does not hold makes the whole leg `[] == []`
+        # — the documents list is the one field serialization could drop, and an empty one
+        # round-trips whatever the code does. That is the vacuity the `search_corpus`
+        # special-case below guards against, and the first version of this line had it.
+        ("documents_by_agency", {"slug": _smoke_slug(dest)}),
     ]
+    for name, args in calls:
+        if name == "documents_by_agency" and not args.get("slug"):
+            raise GateFailure(
+                "the smoke corpus resolved no issuing-body slug, so documents_by_agency "
+                "would round-trip an empty document list and assert nothing about the one "
+                "field serialization could drop.")
     uncovered = sorted(set(tools) - {name for name, _ in calls})
     if uncovered:
         raise GateFailure(
@@ -418,6 +439,15 @@ def check_result_marshalling(dest: Path) -> None:
         if name not in tools:
             continue
         raw = asyncio.run(_sdk.call_tool(mcp, name, args))
+        if name == "documents_by_agency" and not raw.get("documents"):
+            # NOT ENOUGH TO ASK FOR A REAL SLUG. Giving the smoke corpus a slug removed one
+            # way this leg could be empty; it did not make the leg assert anything, and a
+            # mutation returning `documents: []` still passed the gate. `documents` is the
+            # only field here serialization could drop, so an empty one round-trips whatever
+            # the code does — the same `[] == []` the search_corpus check below exists for.
+            problems.append(f"documents_by_agency returned {len(raw.get('documents', []))} "
+                            f"document(s) for {args['slug']!r}, so its per-document "
+                            f"assertions would pass over an empty list")
         if name == "search_corpus" and not any(h.get("id") == DOC_ID for h in raw):
             # Otherwise this tool's whole leg is `[] == []`: every assertion below holds
             # for an empty answer. Step 5 asserts hits exist, but against the server it
@@ -577,6 +607,23 @@ def _refuse_shell_tail(dockerfile: Path, step: str) -> None:
                 f"because a tail like `|| echo WARNING` makes it always succeed and the "
                 f"gate then reports OK having asserted nothing. Split the step, or move it "
                 f"out of the RUN.")
+
+
+def _smoke_slug(root) -> str:
+    """The issuing-body slug the smoke corpus actually resolved, read from its own index.
+
+    Hardcoding one is how this step's `documents_by_agency` leg came to assert nothing: the
+    template's single document lives under an unscoped root and carries a free-text
+    `issuing_body`, so any guessed slug matches zero documents and the round-trip compares
+    `[] == []`.
+    """
+    from corpus_toolkit.config import load as load_config
+    from corpus_toolkit.mcp.backends import FileBackend
+
+    con = FileBackend(load_config(root / "_meta" / "corpus.yml")).ensure_index()
+    row = con.execute("SELECT issuing_body_slug FROM docs "
+                      "WHERE issuing_body_slug != '' LIMIT 1").fetchone()
+    return row[0] if row else ""
 
 
 def dockerfile_build_commands(dockerfile: Path) -> tuple[list[str], list[str]]:

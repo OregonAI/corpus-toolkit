@@ -46,8 +46,19 @@ defect this platform files bugs about:
 | empty | `true` | this corpus genuinely holds nothing for that slug |
 | empty | `null` | nobody measured. **Not** the same as none |
 
-`slug_in_registry` is `null`, never `false`, where the corpus declares no registry: "not
-checked here" is not "no such agency".
+`slug_in_registry` is `null`, never `false`, where the slug was not checked: "not checked
+here" is not "no such agency". A registry that is *declared but unreadable* is reported as
+the fault it is, not as "this corpus declares no registry".
+
+A declared no-body sentinel is refused by name rather than answered — those documents belong
+to no body by the corpus's own assertion, so they are not any agency's holdings, and serving
+them under one would rebuild the conflation corpus-toolkit#94 closed. An empty slug is
+refused too: it matched the `''` written for every unattributed document, so one response
+returned them as an agency's *and* counted them as belonging to none.
+
+`limit` is clamped to 200 and `offset` to ≥ 0, and the response echoes the values actually
+served — SQLite reads a negative LIMIT as unbounded, so `limit=-1` returned every match in
+one response while the response still said `limit: -1`.
 
 **Not gated on a registry**, unlike `issuing_body_profile`. That tool reports registry
 identity and needs one; this reports which documents carry a slug and does not. The
@@ -60,8 +71,18 @@ registry. Only `in_registry`/`no_registry_entry` need one to tell apart, and omi
 four discarded the fact that decides whether a per-slug answer is a floor. `complete` is
 `false` or `null` there, never `true`: documents carrying no slug prove a floor without a
 registry, but a mistyped slug is invisible without one, so completeness is unknown rather
-than yes. This branch is unreachable from `issuing_body_profile`, which requires a registry,
-so no existing answer changes.
+than yes.
+
+That path is selected on the **corpus's config**, not on which keys a backend happened to
+send. Selecting on the report shape alone — the first version — fired for a corpus that
+*does* have a registry whose backend reported a partial measurement: the half-measurement
+was served as a measurement, the diagnostic naming what was missing disappeared, and the
+note asserted a config fact the code had never looked at. `issuing_body_profile` reaches
+`_holdings` through the same door, so that did change existing answers. It no longer does.
+
+A backend reporting registry buckets for a corpus that declares no readable registry is a
+**disagreement**, reported as unknown and named as such, rather than resolved in the
+backend's favour.
 
 Closes corpus-toolkit#46's toolkit slice.
 
