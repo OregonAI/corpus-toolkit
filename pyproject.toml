@@ -37,7 +37,11 @@ mcp = ["mcp[cli]>=1.28,<3"]
 # installs `.[mcp,test]`, which does not bring numpy. So ~280 lines of the semantic arm,
 # including the convert-once optimisation whose whole selftest exists to prove it is
 # behaviour-preserving, had no automated check at all.
-test = ["pytest", "numpy"]
+test = ["pytest", "numpy",
+        # 3.10 ONLY. `tomllib` is 3.11+, and the release gate reads pyproject.toml to
+        # check that every extra the template depends on is declared
+        # (corpus-toolkit#116). Same parser, pre-stdlib name.
+        "tomli; python_version < '3.11'"]
 # THE SEMANTIC ARM'S ONLY RUNTIME DEPENDENCY, and it is deliberately just numpy.
 #
 # corpus_toolkit/semantic/ imports numpy lazily, inside functions, so a corpus that never
