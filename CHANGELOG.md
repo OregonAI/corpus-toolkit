@@ -17,6 +17,55 @@ it can break you.
 
 ## Unreleased
 
+### Added — `documents_by_agency(slug)`: a corpus answers for one agency registry slug
+
+**Additive.** A new tool, registered on any corpus whose retrieval backend implements
+`documents_for_slug(slug, limit, offset)` — which `FileBackend` now does, so every
+file-backed corpus serves it on the pin bump with no config change.
+
+```
+documents_by_agency("department-of-geology-and-mineral-industries")
+→ {slug, slug_in_registry, documents: [...], total, returned, limit, offset, attribution}
+```
+
+It exists so `corpus-gateway` can assemble `agency_profile(slug)` by **asking** each corpus
+instead of duplicating each corpus's agency crosswalk. The crosswalks are per-consumer by
+design — *"the table lives in the consumer, correctness belongs to the registry"* — so a
+gateway that copied them would re-centralise what was deliberately distributed and go stale
+silently whenever one changed. No crosswalk loader was added to the toolkit: the mapping is
+applied at ingest by the corpus that owns it (`oregon-kpm` 785/785 documents, `oregon-audits`
+223/242, measured 2026-08-19) and the toolkit reads the resolved slug it already indexes.
+
+**Four answers that must not collapse into each other**, because conflating any pair is the
+defect this platform files bugs about:
+
+| `documents` | `attribution.complete` | means |
+|---|---|---|
+| non-empty | `true` | the whole answer |
+| non-empty | `false` | a **floor** — documents here are attributed to nobody |
+| empty | `true` | this corpus genuinely holds nothing for that slug |
+| empty | `null` | nobody measured. **Not** the same as none |
+
+`slug_in_registry` is `null`, never `false`, where the corpus declares no registry: "not
+checked here" is not "no such agency".
+
+**Not gated on a registry**, unlike `issuing_body_profile`. That tool reports registry
+identity and needs one; this reports which documents carry a slug and does not. The
+difference is load-bearing — `oregon-kpm` has its registry commented out and `oregon-audits`
+declares none, so mirroring that gate would leave the tool unregistered on two of the three
+corpora a cross-corpus agency profile has to ask.
+
+`holdings_for` now also reports `unattributed` and `declared_no_body` for a corpus with no
+registry. Only `in_registry`/`no_registry_entry` need one to tell apart, and omitting all
+four discarded the fact that decides whether a per-slug answer is a floor. `complete` is
+`false` or `null` there, never `true`: documents carrying no slug prove a floor without a
+registry, but a mistyped slug is invisible without one, so completeness is unknown rather
+than yes. This branch is unreachable from `issuing_body_profile`, which requires a registry,
+so no existing answer changes.
+
+Closes corpus-toolkit#46's toolkit slice.
+
+
 ### Added — a JSON source can declare which paths it watches
 
 **Opt-in; nothing changes unless a source adds `watch`.** Verified across the platform: 1,116

@@ -1018,6 +1018,53 @@ class CorpusFramework:
             "disclaimer": self.disclaimer,
         }
 
+    def documents_by_agency(self, slug: str, limit: int = 50, offset: int = 0) -> dict:
+        """This corpus's documents for one registry slug (corpus-toolkit#46).
+
+        Exists so `corpus-gateway` can assemble `agency_profile(slug)` by ASKING each
+        corpus rather than duplicating every corpus's agency crosswalk. The crosswalks are
+        per-consumer by design -- "the table lives in the consumer, correctness belongs to
+        the registry" -- so a gateway that copied them would re-centralise what was
+        deliberately distributed, and would go stale silently every time one changed.
+
+        FOUR ANSWERS THAT MUST NOT COLLAPSE INTO EACH OTHER, because conflating any pair is
+        the defect this platform files bugs about:
+
+          * documents, and `attribution.complete` true -- the whole answer;
+          * documents, and `complete` false -- a FLOOR: this corpus holds documents it
+            attributed to nobody, so the agency may have more here;
+          * none, and `complete` true -- this corpus genuinely holds nothing for it;
+          * none, and `complete` null -- nobody measured. NOT the same as none.
+
+        `slug_in_registry` answers a DIFFERENT question and is deliberately separate: a
+        corpus with no registry cannot check whether the slug names a real agency, and says
+        so with null rather than guessing. Requiring a registry to serve this tool at all
+        would leave it unregistered on oregon-kpm and oregon-audits, which declare none and
+        are two of the three corpora `agency_profile` needs.
+        """
+        raw = self.backend.documents_for_slug(slug, limit=limit, offset=offset)
+        _counts, attribution = self._holdings(raw)
+        known = self.config.issuing_body_slugs
+        return self.with_envelope({
+            "slug": slug,
+            # NULL, NOT FALSE, where there is no registry to ask. False means "checked, and
+            # the registry does not contain it" -- a typo, or an agency that does not
+            # exist. Null means the question was not asked. Reporting the second as the
+            # first tells a caller its slug is wrong on every corpus that has no registry.
+            "slug_in_registry": None if known is None else slug in known,
+            "documents": raw["documents"],
+            "total": raw["total"],
+            "returned": len(raw["documents"]),
+            "limit": limit,
+            "offset": offset,
+            # WHAT THE ANSWER COULD SEE. Same measure `issuing_body_profile` serves, from
+            # the same backend coverage block, because a list of documents and a count of
+            # documents are the same claim about the same corpus -- two measures would let
+            # a caller read one as complete and the other as a floor.
+            "attribution": attribution,
+            "disclaimer": self.disclaimer,
+        })
+
     # The counts `_holdings` needs before it will call coverage measured. Every one, as an
     # int: a backend that reports some of them has measured some of the question, and a
     # partial measurement served as a complete one is the failure this whole block exists
@@ -1058,6 +1105,42 @@ class CorpusFramework:
         required = self._COVERAGE_COUNTS
         if self.config.issuing_body_slug_sentinels:
             required = required + ("declared_no_body",)
+
+        # NO REGISTRY IS A DIFFERENT SHAPE, NOT A MISSING MEASUREMENT. Only `in_registry`
+        # and `no_registry_entry` need a registry to tell apart; whether a document carries
+        # a slug at all does not. A backend reporting `documents` + `unattributed` without
+        # the registry pair has measured the one fact that decides whether a per-slug answer
+        # is a FLOOR, and reporting that as unknown discards it.
+        #
+        # FALSE IS PROVABLE HERE, TRUE IS NOT. Documents carrying no slug at all cannot
+        # appear under any slug, so a non-zero count makes the answer a floor with or
+        # without a registry. But zero does NOT make it complete: a mistyped slug is
+        # invisible without a registry to check against, which is precisely what
+        # `no_registry_entry` exists to surface. So this reports False or None, never True.
+        registry_pair = ("in_registry", "no_registry_entry")
+        if (coverage is not None
+                and all(isinstance(coverage.get(k), int)
+                        for k in ("documents", "unattributed") + tuple(
+                            k for k in required if k not in registry_pair
+                            and k not in ("documents", "unattributed")))
+                and not any(isinstance(coverage.get(k), int) for k in registry_pair)):
+            unattributed = coverage["unattributed"]
+            _d = coverage.get("declared_no_body")
+            return counts, {
+                "complete": False if unattributed else None,
+                "basis": basis,
+                "documents_in_corpus": coverage["documents"],
+                "documents_with_no_issuing_body": unattributed,
+                "documents_declared_no_issuing_body": _d if isinstance(_d, int) else 0,
+                "note": ("this corpus declares no issuing-body registry, so whether a slug "
+                         "names a real body was NOT checked here"
+                         + (f"; {unattributed} document(s) carry no slug at all and can "
+                            f"appear under none, so this answer is a floor"
+                            if unattributed else
+                            "; every document carries a slug, but a mistyped one would be "
+                            "invisible without a registry, so whether this answer is "
+                            "complete is UNKNOWN — not yes")),
+            }
 
         if coverage is None or not all(
                 isinstance(coverage.get(k), int) for k in required):

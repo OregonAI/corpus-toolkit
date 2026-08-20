@@ -268,6 +268,46 @@ corpus without a graph answers the first row above.
   agencies. The contract was stale, not the implementation, so this is a
   documentation correction and stays contract v1.*
 
+### `documents_by_agency(slug, limit?, offset?)`
+
+This corpus's documents for one agency registry slug, with an explicit statement
+of how much of the corpus that answer could see.
+
+Exists so an aggregating client — `corpus-gateway` — can assemble a per-agency
+profile by **asking** each corpus rather than duplicating each corpus's agency
+crosswalk. The crosswalks are per-consumer by design ("the table lives in the
+consumer, correctness belongs to the registry"), so a client that copied them
+would re-centralise what was deliberately distributed and go stale silently
+every time one changed.
+
+    {slug, slug_in_registry, documents: [{id, title, citation, doc_type,
+     content_mode, path}], total, returned, limit, offset, attribution}
+
+`total` is the number of matches, not the page size, and documents are ordered
+by `id` — paging by `offset` against an unordered scan repeats some documents
+and skips others.
+
+**Four answers that must not collapse into each other:**
+
+| `documents` | `attribution.complete` | means |
+|---|---|---|
+| non-empty | `true` | the whole answer |
+| non-empty | `false` | a **floor** — this corpus holds documents attributed to nobody |
+| empty | `true` | this corpus genuinely holds nothing for that slug |
+| empty | `null` | nobody measured. **Not** the same as none |
+
+`slug_in_registry` answers a different question and is deliberately separate:
+`null` means the corpus declares no registry, so whether the slug names a real
+agency **was not checked here** — not that it is absent.
+
+Registered when the retrieval backend implements `documents_for_slug(slug,
+limit, offset)`. **Unlike `issuing_body_profile` it does not additionally
+require a registry**, because "which of my documents carry this slug" needs
+none. That difference is load-bearing rather than stylistic: `oregon-kpm` has
+its registry commented out and `oregon-audits` declares none, so requiring one
+would leave this tool unregistered on two of the three corpora a cross-corpus
+agency profile has to ask.
+
 ## API-corpus extensions
 
 - `list_datasets()` — datasets/entities with descriptions and freshness.
@@ -301,9 +341,11 @@ or not this corpus happens to serve it:
 
     search_corpus   get_document        resolve_citation   graph_neighbors
     corpus_overview authority_chain     issuing_body_profile
+    documents_by_agency
 
-`authority_chain` and `issuing_body_profile` are conditional — on archetype, and
-on the backend implementing `holdings_for` — and are reserved anyway. A corpus
+`authority_chain`, `issuing_body_profile` and `documents_by_agency` are
+conditional — on archetype, and on the backend implementing `holdings_for` or
+`documents_for_slug` — and are reserved anyway. A corpus
 that claimed a conditional name would start clean, serve corpus semantics under
 a core tool's name, and turn fatal the day the condition changed with no edit to
 its tools module.

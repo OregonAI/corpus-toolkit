@@ -399,6 +399,12 @@ def check_result_marshalling(dest: Path) -> None:
         # it here is what this step's own uncovered-tool check caught during development —
         # which is the check doing its job, and the reason it exists.
         ("join_lookup", {"document_id": DOC_ID}),
+        # corpus-toolkit#46. Registered on any corpus whose backend can answer, which the
+        # template's file backend can — so it needs covering here even though the template
+        # declares no issuing-body registry. That is the case worth exercising: it round-
+        # trips the `slug_in_registry: null` and `attribution.complete` branches a corpus
+        # with no registry actually serves.
+        ("documents_by_agency", {"slug": "department-of-administrative-services"}),
     ]
     uncovered = sorted(set(tools) - {name for name, _ in calls})
     if uncovered:

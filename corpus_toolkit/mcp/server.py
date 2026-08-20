@@ -78,6 +78,10 @@ from corpus_toolkit.mcp.responses import ResponseEnvelope
 RESERVED_TOOL_NAMES = frozenset({
     "search_corpus", "get_document", "resolve_citation", "graph_neighbors",
     "corpus_overview", "authority_chain", "issuing_body_profile",
+    # CONDITIONAL like the two above, and reserved for the same reason: keying the check on
+    # what is present would let a corpus claim the name today and turn fatal the day the
+    # condition changed, with no edit to its tools module (corpus-toolkit#111).
+    "documents_by_agency",
 })
 
 
@@ -187,6 +191,28 @@ def build_server(config):
                   f"backend ({fw.backend.name}) implements no holdings_for(slug), so the "
                   f"tool would raise on every call. Implement it to serve this tool.",
                   file=sys.stderr)
+
+    # NOT gated on a registry, unlike `issuing_body_profile` directly above.
+    #
+    # That tool needs one because it reports registry IDENTITY — name, statutory basis,
+    # curated notes. This one answers "which of my documents carry this slug", which needs
+    # no registry at all; whether the slug names a real body is a separate question it
+    # reports as UNKNOWN where it cannot check (corpus-toolkit#46).
+    #
+    # The difference is load-bearing, not stylistic. oregon-kpm has its registry commented
+    # out and oregon-audits states it has none — two of the three corpora `agency_profile`
+    # must ask — so mirroring the gate above would leave this tool unregistered on exactly
+    # the corpora it exists to serve, shipping the issue's letter and none of its purpose.
+    #
+    # Gated on the capability all the same: registering a tool that raises on every call is
+    # the configuration the release gate did not cover (corpus-toolkit#38).
+    if callable(getattr(fw.backend, "documents_for_slug", None)):
+        @mcp.tool()
+        def documents_by_agency(slug: str, limit: int = 50,
+                                offset: int = 0) -> ResponseEnvelope:
+            """This corpus's documents for one agency registry slug, with an explicit
+            statement of how much of the corpus that answer could see."""
+            return fw.documents_by_agency(slug, limit=limit, offset=offset)
 
     # Corpus-specific tools, registered LAST so they see a fully-built server. The seam
     # exists because the built-in seven are a closed set: a hybrid corpus needs tools keyed

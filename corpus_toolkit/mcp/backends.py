@@ -825,9 +825,26 @@ class FileBackend:
         ).fetchall()
         total = sum(n for _, n in rows)
         known = self.config.issuing_body_slugs
-        if known is None:
-            return {"counts": counts, "coverage": {"documents": total, "basis": basis}}
         sentinels = self.config.issuing_body_slug_sentinels
+        if known is None:
+            # REPORT WHAT WAS MEASURED, AND THIS MEASURED MORE THAN IT SAID. Only
+            # `in_registry` and `no_registry_entry` need a registry to tell apart; whether
+            # a document carries a slug AT ALL, and whether that slug is a declared
+            # sentinel, are answerable from the index and the config alone. Omitting all
+            # four dropped a fact this method held, and the caller then had to treat "some
+            # of my documents are attributed to nobody" -- the thing that makes a per-slug
+            # answer a floor -- as unknown.
+            #
+            # It matters on exactly the corpora `agency_profile` needs: oregon-kpm and
+            # oregon-audits declare no registry, so without this every `documents_by_agency`
+            # answer there is coverage-unknown and a caller can conclude nothing from it
+            # (corpus-toolkit#46).
+            unattributed = sum(n for value, n in rows if not value)
+            declared = sum(n for value, n in rows if value and value in sentinels)
+            return {"counts": counts,
+                    "coverage": {"documents": total, "basis": basis,
+                                 "unattributed": unattributed,
+                                 "declared_no_body": declared}}
         buckets = {"in_registry": 0, "declared_no_body": 0,
                    "no_registry_entry": 0, "unattributed": 0}
         for value, n in rows:
@@ -837,6 +854,49 @@ class FileBackend:
             buckets[key] += n
         return {"counts": counts,
                 "coverage": {"documents": total, "basis": basis, **buckets}}
+
+    def documents_for_slug(self, slug: str, limit: int = 50, offset: int = 0) -> dict:
+        """This corpus's documents for one registry slug (corpus-toolkit#46).
+
+            {"documents": [{id, title, citation, doc_type, content_mode, path}, ...],
+             "total": int,                  # matches for this slug, before limit/offset
+             "coverage": {...}}             # exactly `holdings_for`'s coverage block
+
+        THE SAME COVERAGE BLOCK, deliberately. A list of documents and a count of documents
+        are the same claim about the same corpus, so answering them with two different
+        measures would let a caller read one as complete and the other as a floor. It is
+        `holdings_for`'s, delegated rather than re-derived.
+
+        `issuing_body_slug` is the RESOLVED slug, which is what makes this answerable at
+        all: the crosswalk that maps a corpus's local agency identity onto the registry is
+        owned by that corpus and applied at ingest -- oregon-kpm materialises it into
+        frontmatter as `agency_registry_slug` on 785 of 785 documents, oregon-audits on 223
+        of 242 (measured 2026-08-19). The toolkit reads a resolved slug; it never learns to
+        read a crosswalk, and `corpus-gateway` never has to duplicate one.
+
+        ORDERED BY id, and that is a contract, not an accident: a caller paginating with
+        `offset` against an unordered scan silently sees documents twice and misses others.
+
+        OPTIONAL, like `holdings_for`, and gated the same way -- a backend that cannot
+        answer omits it and `documents_by_agency` is not registered. Unlike
+        `issuing_body_profile` it does NOT additionally require a registry: this question is
+        "which of my documents carry this slug", which needs no registry to answer. Whether
+        the slug names a real agency is a separate question, and a corpus with no registry
+        reports it as UNKNOWN rather than guessing -- the two corpora `agency_profile` needs
+        (oregon-kpm, oregon-audits) declare no registry, so requiring one would leave this
+        tool unregistered on exactly the corpora it exists to serve.
+        """
+        con = self.ensure_index()
+        total = con.execute("SELECT COUNT(*) FROM docs WHERE issuing_body_slug = ?",
+                            (slug,)).fetchone()[0]
+        rows = con.execute(
+            "SELECT id, title, citation, doc_type, content_mode, path FROM docs "
+            "WHERE issuing_body_slug = ? ORDER BY id LIMIT ? OFFSET ?",
+            (slug, limit, offset)).fetchall()
+        cols = ("id", "title", "citation", "doc_type", "content_mode", "path")
+        return {"documents": [dict(zip(cols, r)) for r in rows],
+                "total": total,
+                "coverage": self.holdings_for(slug)["coverage"]}
 
     def health(self) -> dict:
         """A file corpus is reachable iff its index holds anything.

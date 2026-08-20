@@ -174,6 +174,7 @@ CALLS = {
     "graph_neighbors": {"doc_id": "alpha"},
     "authority_chain": {"doc_id": "alpha"},
     "issuing_body_profile": {"slug_or_query": "archives-division"},
+    "documents_by_agency": {"slug": "archives-division"},
     "list_datasets": {},
     "query_dataset": {"key": "budget", "limit": 2},
     "join_lookup": {"document_id": "alpha"},
