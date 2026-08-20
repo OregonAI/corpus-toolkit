@@ -637,3 +637,148 @@ def test_documents_and_their_coverage_come_from_one_index_read(tmp_path):
     assert len(calls) == 1, (
         f"documents and coverage were read through {len(calls)} separate index "
         f"connections, so a rebuild between them goes unnoticed")
+
+
+# ---------- found in the third review ----------
+
+def test_a_sentinel_refusal_does_not_claim_the_slug_was_checked(tmp_path):
+    """The refusal hardcoded `slug_in_registry: False` — contradicting the comment three
+    lines above it, this method's own docstring, the contract and the CHANGELOG, all of
+    which say null-never-false where nothing was checked.
+
+    And it fires on exactly the corpora this tool targets: oregon-kpm and oregon-audits
+    declare no registry, so a gateway asking about a sentinel there was told "checked, and
+    the registry does not contain it" by a corpus with nothing to check against."""
+    root = _corpus(tmp_path, {"reports/s-1.md": _report(1, "statewide")},
+                   config_yaml=SENTINEL_NO_REGISTRY)
+
+    got = _fw(root).documents_by_agency("statewide")
+
+    assert "sentinel" in got["error"].lower()
+    assert got["slug_in_registry"] is None, (
+        "a corpus with no registry reported the slug as checked and absent")
+
+
+def test_a_padded_slug_is_not_reported_as_a_slug_the_registry_lacks(tmp_path):
+    """The empty-slug guard strips for its emptiness test and nothing strips for the lookup,
+    so `"  dogami  "` reached the backend verbatim: zero documents, and
+    `slug_in_registry: False` — "a typo, or an agency that does not exist" — about a slug
+    the registry does contain."""
+    root = _corpus_with_registry(tmp_path, {"reports/a-1.md": _report(1, DOGAMI)})
+
+    got = _fw(root).documents_by_agency(f"  {DOGAMI}  ")
+
+    assert got["slug_in_registry"] is True
+    assert [d["id"] for d in got["documents"]] == ["appr-1"]
+
+
+def test_a_page_is_capped_however_large_a_limit_is_asked_for(tmp_path):
+    """The cap was asserted NOWHERE: deleting `min(..., _MAX_DOCUMENTS_PER_PAGE)` — the only
+    reason that constant exists — passed the whole suite, because the largest fixture held 5
+    documents and `10**9 >= 5`. The regression it guards is 1,929 ERF documents in one MCP
+    response, and it would have shipped green."""
+    from corpus_toolkit.mcp.framework import _MAX_DOCUMENTS_PER_PAGE
+
+    n = _MAX_DOCUMENTS_PER_PAGE + 5
+    root = _corpus(tmp_path, {f"reports/f{i:04d}.md": _report(i, DOGAMI)
+                              for i in range(1, n + 1)})
+
+    got = _fw(root).documents_by_agency(DOGAMI, limit=10**9)
+
+    assert got["total"] == n
+    assert got["limit"] == _MAX_DOCUMENTS_PER_PAGE
+    assert got["returned"] == _MAX_DOCUMENTS_PER_PAGE, "the page cap did not apply"
+
+
+def test_a_backend_config_disagreement_is_reported_as_itself(tmp_path):
+    """The sub-clause routing a four-bucket backend on a registry-less corpus to the
+    DISAGREEMENT path could be deleted and the suite stayed green: the previous test asserted
+    only `complete is not True` and `"registry" in note`, which the registry-less path's own
+    note also satisfies. Two paths, one indistinguishable assertion.
+
+    They are different findings. The registry-less path says "this corpus has no registry, so
+    the slug was not checked"; this says "your backend counted against a registry this corpus
+    does not have" — a fault to fix, not a property to report."""
+    root = _corpus(tmp_path, {"reports/a-1.md": _report(1, DOGAMI)},
+                   config_yaml=CONFIG.rstrip()
+                   + '\n      retrieval_module: "four_bucket:FourBucket"\n')
+    (root / "four_bucket.py").write_text(textwrap.dedent('''
+        class FourBucket:
+            name = "four-bucket"
+            def __init__(self, config, semantic=None): self.config = config
+            def search(self, *a, **kw): return []
+            def get(self, *a, **kw): return None
+            def exists(self, *a, **kw): return False
+            def overview(self, *a, **kw): return {}
+            def health(self, *a, **kw): return {"reachable": True, "documents": 10}
+            def holdings_for(self, slug, **kw):
+                return {"counts": {}, "coverage": {
+                    "documents": 10, "in_registry": 10, "no_registry_entry": 0,
+                    "unattributed": 0, "basis": "hardcoded"}}
+            def documents_for_slug(self, slug, limit=50, offset=0):
+                return {"documents": [], "total": 0,
+                        "coverage": self.holdings_for(slug)["coverage"]}
+        '''))
+
+    att = _fw(root).documents_by_agency(DOGAMI)["attribution"]
+
+    assert att["complete"] is None
+    assert "disagree" in att["note"], f"reported as a property, not as a fault: {att}"
+    assert "documents_in_corpus" not in att, (
+        "a disagreement was answered with counts measured against nothing known")
+
+
+def test_a_backend_returning_the_right_keys_with_wrong_types_names_the_backend(tmp_path):
+    """The shape check tested key PRESENCE only, so `{"documents": 5, "total": 0}` passed it
+    and died on `len(5)` — a TypeError naming no backend, which is the unattributable failure
+    the check exists to replace."""
+    root = _corpus(tmp_path, {"reports/a-1.md": _report(1, DOGAMI)},
+                   config_yaml=CONFIG.rstrip() +
+                   '\n      retrieval_module: "wrong_types:WrongTypes"\n')
+    (root / "wrong_types.py").write_text(textwrap.dedent('''
+        class WrongTypes:
+            name = "wrong-types"
+            def __init__(self, config, semantic=None): self.config = config
+            def search(self, *a, **kw): return []
+            def get(self, *a, **kw): return None
+            def exists(self, *a, **kw): return False
+            def overview(self, *a, **kw): return {}
+            def health(self, *a, **kw): return {"reachable": True, "documents": 1}
+            def documents_for_slug(self, slug, limit=50, offset=0):
+                return {"documents": 5, "total": "many"}
+        '''))
+
+    with pytest.raises(Exception) as e:
+        _fw(root).documents_by_agency(DOGAMI)
+
+    assert "wrong-types" in str(e.value)
+    assert "documents" in str(e.value) and "total" in str(e.value)
+
+
+def test_a_subclass_overriding_holdings_for_still_works(tmp_path):
+    """`holdings_for` gained a `con` parameter, and every backend already in service was
+    written against the signature without it. Such a backend inherits `documents_for_slug`,
+    which passes `con=`, and died on every call with `unexpected keyword argument 'con'`.
+
+    Declaring `con` on the protocol fixes the next author; it does nothing for the ones
+    already deployed. Sharing the connection is an optimisation and a race fix — it is not
+    worth breaking a live corpus over, so the caller degrades to a second read rather than
+    demanding the parameter. Every fake backend in this file writes `**kw`, which hid this
+    entirely."""
+    root = _corpus(tmp_path, {"reports/a-1.md": _report(1, DOGAMI)},
+                   config_yaml=CONFIG.rstrip() +
+                   '\n      retrieval_module: "sub_backend:SubBackend"\n')
+    (root / "sub_backend.py").write_text(textwrap.dedent('''
+        from corpus_toolkit.mcp.backends import FileBackend
+
+        class SubBackend(FileBackend):
+            """The signature the protocol declared BEFORE `con` existed — which is what any
+            custom backend already in service was written against."""
+            name = "sub"
+            def holdings_for(self, slug):
+                return super().holdings_for(slug)
+        '''))
+
+    got = _fw(root).documents_by_agency(DOGAMI)
+
+    assert [d["id"] for d in got["documents"]] == ["appr-1"]

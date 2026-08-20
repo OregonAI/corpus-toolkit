@@ -421,6 +421,17 @@ def check_result_marshalling(dest: Path) -> None:
         # special-case below guards against, and the first version of this line had it.
         ("documents_by_agency", {"slug": _smoke_slug(dest)}),
     ]
+    # PRESENT, NOT MERELY COVERED. The loop below skips any tool that is not registered, and
+    # `documents_by_agency` is not in MANDATORY_CORE_TOOLS — so if its registration gate
+    # inverts, or `FileBackend.documents_for_slug` is lost, the whole leg is skipped and the
+    # gate goes green having asserted nothing. The `uncovered` check catches only the
+    # opposite direction. The gate's corpus is always file-backed, so its absence is a fault.
+    if "documents_by_agency" not in tools:
+        raise GateFailure(
+            "documents_by_agency is not registered on a file-backed corpus. Either the "
+            "capability gate in server.py inverted or FileBackend lost documents_for_slug; "
+            "either way the tool every corpus-gateway agency lookup depends on is gone, and "
+            "the calls below would have skipped it silently.")
     for name, args in calls:
         if name == "documents_by_agency" and not args.get("slug"):
             raise GateFailure(

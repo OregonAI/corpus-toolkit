@@ -1056,15 +1056,26 @@ class CorpusFramework:
         # `backends.py` clamps; this did not.
         limit = max(1, min(int(limit), _MAX_DOCUMENTS_PER_PAGE))
         offset = max(0, int(offset))
+        # STRIPPED ONCE, AND THE STRIPPED VALUE IS WHAT IS USED. The empty-slug guard below
+        # stripped for its emptiness test only, so a padded slug reached the backend
+        # verbatim: zero documents and `slug_in_registry: false` -- "a typo, or an agency
+        # that does not exist" -- about a slug the registry does contain.
+        slug = str(slug).strip()
         # A SENTINEL IS NOT AN AGENCY. It is this corpus positively asserting "these
         # documents belong to NO body" (corpus-toolkit#94), so returning them as that
         # body's holdings hands back, on ERF, 37,991 documents as `statewide`'s complete
         # collection. `slug_in_registry: false` would be wrong too -- its own comment
         # defines that as "a typo, or an agency that does not exist", and this is neither.
         if slug in self.config.issuing_body_slug_sentinels:
+            known = self.config.issuing_body_slugs
             return self.with_envelope({
                 "slug": slug,
-                "slug_in_registry": False,
+                # NULL WHERE NOTHING WAS CHECKED, like every other path. Hardcoding False
+                # here contradicted the comment above it, this method's docstring, the
+                # contract and the CHANGELOG -- and did so on exactly the registry-less
+                # corpora this tool exists for, telling a gateway "checked, and the registry
+                # does not contain it" from a corpus with nothing to check against.
+                "slug_in_registry": None if known is None else slug in known,
                 "error": (f"{slug!r} is a declared no-body sentinel for this corpus "
                           f"(plugins.issuing_body_slug_sentinels), not an agency slug. The "
                           f"documents carrying it are the ones this corpus attributes to NO "
@@ -1077,7 +1088,7 @@ class CorpusFramework:
         # An empty slug matched the `''` written for every unattributed document, so the
         # same response returned them as an agency's AND counted them under
         # `documents_with_no_issuing_body`. One response, two contradictory claims.
-        if not str(slug).strip():
+        if not slug:
             return self.with_envelope({
                 "slug": slug,
                 "slug_in_registry": None,
@@ -1095,14 +1106,21 @@ class CorpusFramework:
         # the registered-landmine outcome the gate was added for (corpus-toolkit#38), one
         # layer in. `_holdings` is defensive about the coverage block throughout and this
         # was not about the rest.
-        missing = [k for k in ("documents", "total")
-                   if not isinstance(raw, dict) or k not in raw]
-        if missing:
+        # TYPES, NOT ONLY PRESENCE. Checking that the keys exist let `{"documents": 5}`
+        # through, which then died on `len(5)` -- a TypeError naming no backend, i.e. the
+        # unattributable failure this check exists to replace, reached by a shorter route.
+        wanted = {"documents": (list, tuple), "total": int}
+        bad = [k for k, t in wanted.items()
+               if not isinstance(raw, dict) or not isinstance(raw.get(k), t)
+               or isinstance(raw.get(k), bool)]
+        if bad:
             raise TypeError(
-                f"backend {self.backend.name!r} implements documents_for_slug but returned "
-                f"no {', '.join(missing)} — the declared shape is "
-                f"{{documents: [...], total: int, coverage: {{...}}}}. See "
-                f"RetrievalBackend.documents_for_slug.")
+                f"backend {self.backend.name!r} implements documents_for_slug but its "
+                f"result is not the declared shape: "
+                + "; ".join(f"{k} is {type(raw.get(k)).__name__ if isinstance(raw, dict) else type(raw).__name__}"
+                            for k in bad)
+                + ". The declared shape is {documents: [...], total: int, "
+                  "coverage: {...}}. See RetrievalBackend.documents_for_slug.")
         _counts, attribution = self._holdings(raw)
         known = self.config.issuing_body_slugs
         return self.with_envelope({

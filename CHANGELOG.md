@@ -50,6 +50,9 @@ defect this platform files bugs about:
 here" is not "no such agency". A registry that is *declared but unreadable* is reported as
 the fault it is, not as "this corpus declares no registry".
 
+A refusal carries `error` and omits `attribution` — a refusal is not an answer, and a
+completeness claim attached to one invites reading it as one; branch on `error` first.
+
 A declared no-body sentinel is refused by name rather than answered — those documents belong
 to no body by the corpus's own assertion, so they are not any agency's holdings, and serving
 them under one would rebuild the conflation corpus-toolkit#94 closed. An empty slug is

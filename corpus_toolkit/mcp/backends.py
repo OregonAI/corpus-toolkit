@@ -271,7 +271,7 @@ class RetrievalBackend(Protocol):
 
     # ---------- optional ----------
 
-    def holdings_for(self, slug: str) -> dict:
+    def holdings_for(self, slug: str, con=None) -> dict:
         """What this corpus holds for one issuing-body slug, AND how much of the corpus
         that answer could see:
 
@@ -316,6 +316,13 @@ class RetrievalBackend(Protocol):
         none are opposite answers (CONTEXT.md; response convention 5), and a partial
         measurement is not a complete one.
 
+        `con` is an already-open index handle a caller may pass so that two answers describe
+        ONE read. It is declared here, not only on FileBackend, because a backend that
+        subclasses FileBackend and overrides this with the signature the protocol showed
+        inherits `documents_for_slug` -- which passes `con=` -- and dies on every call with
+        `unexpected keyword argument 'con'`. An implementation free to ignore it should
+        still accept it.
+
         OPTIONAL; see REQUIRED_BACKEND_METHODS. A backend that cannot answer it simply omits it, and
         `issuing_body_profile` is not registered for that corpus.
 
@@ -330,6 +337,35 @@ class RetrievalBackend(Protocol):
         ...
 
 
+    def documents_for_slug(self, slug: str, limit: int = 50, offset: int = 0) -> dict:
+        """This corpus's documents for one issuing-body slug (corpus-toolkit#46):
+
+            {"documents": [{id, title, citation, doc_type, content_mode, path}, ...],
+             "total": int,          # matches for this slug, BEFORE limit/offset
+             "coverage": {...}}     # exactly `holdings_for`'s coverage block
+
+        `total` is the match count, not the page size, and `documents` must be ORDERED
+        stably -- a caller paginating with `offset` against an unordered scan sees some
+        documents twice and never sees others.
+
+        The coverage block is `holdings_for`'s, not a second measure: a list of documents
+        and a count of documents are the same claim about the same corpus, and two measures
+        would let a caller read one as complete and the other as a floor. Pass the open
+        handle (`holdings_for(slug, con=con)`) so both describe one index read.
+
+        OPTIONAL, like `holdings_for`. A backend that cannot answer omits it and
+        `documents_by_agency` is not registered -- but a backend that implements it with a
+        DIFFERENT shape passes that gate and fails on every call, so the framework checks
+        the shape and names the backend rather than raising KeyError or TypeError.
+
+        Unlike `issuing_body_profile`, the tool over this does NOT additionally require a
+        registry: "which of my documents carry this slug" needs none. It exists so an
+        aggregating client can assemble a per-agency profile by ASKING each corpus rather
+        than duplicating each corpus's per-consumer agency crosswalk.
+        """
+        ...
+
+
 # What `CorpusFramework._load_backend` requires of a backend at STARTUP. Restated here
 # rather than read off the Protocol because Python exposes no portable way to enumerate a
 # Protocol's members across 3.10-3.13 (`__protocol_attrs__` is 3.12+, `_get_protocol_attrs`
@@ -339,32 +375,6 @@ class RetrievalBackend(Protocol):
 # `holdings_for` is deliberately NOT here: adding a required method would break every
 # corpus-supplied backend already in service on the next pin bump, for a tool most of them
 # do not serve. It is a capability, checked where it is used.
-    def documents_for_slug(self, slug: str, limit: int = 50, offset: int = 0) -> dict:
-        """This corpus's documents for one issuing-body slug (corpus-toolkit#46):
-
-            {"documents": [{id, title, citation, doc_type, content_mode, path}, ...],
-             "total": int,          # matches for this slug, BEFORE limit/offset
-             "coverage": {...}}     # exactly `holdings_for`'s coverage block
-
-        `total` is the match count, not the page size, and `documents` must be ORDERED
-        stably — a caller paginating with `offset` against an unordered scan sees some
-        documents twice and never sees others.
-
-        The coverage block is `holdings_for`'s, not a second measure: a list of documents
-        and a count of documents are the same claim about the same corpus, and two measures
-        would let a caller read one as complete and the other as a floor.
-
-        OPTIONAL, like `holdings_for`. A backend that cannot answer omits it and
-        `documents_by_agency` is not registered — but a backend that implements it with a
-        DIFFERENT shape passes that gate and fails on every call, so the framework checks
-        the shape and names the backend rather than raising KeyError.
-
-        Unlike `issuing_body_profile`, the tool over this does NOT additionally require a
-        registry: "which of my documents carry this slug" needs none. It exists so an
-        aggregating client can assemble a per-agency profile by ASKING each corpus rather
-        than duplicating each corpus's per-consumer agency crosswalk.
-        """
-        ...
 
 
 REQUIRED_BACKEND_METHODS = ("search", "get", "exists", "overview", "health")
@@ -938,7 +948,28 @@ class FileBackend:
                 "total": total,
                 # SAME CONNECTION as the two queries above, so the documents and the
                 # coverage attached to them describe one index read rather than two.
-                "coverage": self.holdings_for(slug, con=con)["coverage"]}
+                #
+                # DEGRADES RATHER THAN DEMANDS. `con` is new, and every custom backend
+                # already in service was written against `holdings_for(self, slug)`; one
+                # that subclasses this and overrides with that signature inherits this
+                # method and would die on every call with `unexpected keyword argument`.
+                # Sharing the handle is an optimisation and a race fix -- worth having, not
+                # worth breaking a live corpus over.
+                "coverage": self._coverage_for(slug, con)}
+
+    def _coverage_for(self, slug: str, con) -> dict:
+        """`holdings_for`'s coverage block, sharing `con` where the implementation takes it.
+
+        Narrow on purpose: only the one signature mismatch this parameter can produce is
+        caught, so a TypeError raised INSIDE an override still surfaces as itself rather
+        than being retried into a second, differently-broken call.
+        """
+        try:
+            return self.holdings_for(slug, con=con)["coverage"]
+        except TypeError as e:
+            if "con" not in str(e):
+                raise
+            return self.holdings_for(slug)["coverage"]
 
     def health(self) -> dict:
         """A file corpus is reachable iff its index holds anything.

@@ -67,6 +67,12 @@ content_roots:
     doc_type: doc
 plugins:
   issuing_body_registry: _meta/registry.yml
+  # SO THE DOCUMENTS RESOLVE TO A SLUG. Without it every document indexes with
+  # `issuing_body_slug = ''` — the docs sit under an unscoped root — so
+  # `documents_by_agency` round-trips an empty list and compares `[] == []` for
+  # `documents`, the one field serialization could drop. That is the same vacuity the
+  # release gate's own leg had (corpus-toolkit#46), at the adjacent site.
+  issuing_body_slug_field: "issuing_body_slug"
 {plugins}
 disclaimer_marker: "NON-AUTHORITATIVE"
 """
@@ -90,6 +96,7 @@ corpus: t
 id: {doc_id}
 title: {title}
 doc_type: doc
+issuing_body_slug: "archives-division"
 citation: "Schedule {n}"
 source_url: "https://example.invalid/{doc_id}"
 relationships:
@@ -166,6 +173,11 @@ def register(mcp, framework):
 # name -> arguments. EVERY registered tool must appear here; `test_every_registered_tool_is
 # _covered` fails when one does not, so a tool added later cannot quietly arrive with no
 # marshalling coverage — which is how `search_corpus` and the extension tools got here.
+# Tools whose payload is a LIST that must come back non-empty, or the round-trip compares
+# `[] == []` and asserts nothing about the one field serialization could drop. Keyed by the
+# response key, checked wherever CALLS is driven (corpus-toolkit#46).
+NON_EMPTY_LIST_PAYLOADS = {"documents_by_agency": "documents"}
+
 CALLS = {
     "corpus_overview": {},
     "search_corpus": {"query": QUERY},
@@ -354,6 +366,11 @@ def test_every_tool_answer_reaches_the_client_intact(fixture, request):
         if name not in tools:
             continue                       # archetype-gated or corpus-supplied
         raw = _call(server, name, arguments)
+        key = NON_EMPTY_LIST_PAYLOADS.get(name)
+        if key and not (raw.get(key) if isinstance(raw, dict) else None):
+            problems.append(f"{name}{arguments} returned an empty {key!r}, so its round "
+                            f"trip compares [] == [] and asserts nothing about the one "
+                            f"field serialization could drop")
         try:
             texts, structured = _sdk.serialized_result(tools[name], raw)
         except Exception as e:             # noqa: BLE001

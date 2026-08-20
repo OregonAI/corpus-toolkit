@@ -283,6 +283,11 @@ every time one changed.
     {slug, slug_in_registry, documents: [{id, title, citation, doc_type,
      content_mode, path}], total, returned, limit, offset, attribution}
 
+A **refusal** — a declared no-body sentinel, or an empty slug — carries `error`
+and **omits `attribution`**: a refusal is not an answer, and attaching a
+completeness claim to one invites reading it as an answer. Branch on `error`
+before reading `attribution`.
+
 `total` is the number of matches, not the page size, and documents are ordered
 by `id` — paging by `offset` against an unordered scan repeats some documents
 and skips others.
