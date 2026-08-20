@@ -498,3 +498,41 @@ def test_an_empty_index_is_not_a_corpus_where_everything_is_attributed(tmp_path)
     assert out["attribution"]["documents_in_corpus"] == 0
     assert "NO documents" in out["attribution"]["note"]
     assert out["in_repo"] != "no documents ingested for this issuing body yet"
+
+
+def test_an_empty_query_is_refused_on_a_ONE_ENTRY_registry(tmp_path):
+    """corpus-toolkit#122. `issuing_body_profile("")` answered with a full profile.
+
+    The tool takes a slug OR a free-text name fragment, and the fallback is a substring
+    match: `"" in name` is true for every entry. On a registry holding ONE entry that is
+    exactly one hit, the uniqueness test passes, and the tool serves registry identity,
+    curated notes and holdings for an agency nobody named.
+
+    ONE ENTRY IS THE WHOLE POINT OF THIS FIXTURE. On a multi-entry registry every entry
+    matches, `len(hits) != 1`, and the error path already fires — so the failure is INVERTED
+    with corpus size, silent exactly where one match looks like a deliberate answer. A test
+    written against the existing two-entry registry would pass without exercising anything.
+
+    Sibling of the empty-slug case corpus-toolkit#123 closed in `documents_by_agency`: an
+    empty argument is not a wildcard and not a name fragment, it is a missing one."""
+    one = {"entries": [{"slug": "employment-department", "name": "Employment Department"}]}
+    root = _corpus(tmp_path, DECLARING_FIELD, {"docs/a.md": _policy(1, "verbatim")})
+    (root / "_meta" / "registry.yml").write_text(json.dumps(one))
+
+    for query in ("", "   ", "\t"):
+        got = CorpusFramework(load_config(root / "_meta" / "corpus.yml")
+                              ).issuing_body_profile(query)
+        assert "error" in got, f"{query!r} was answered: {got.get('slug')}"
+        assert "slug" not in got or not got.get("registry")
+
+
+def test_a_padded_slug_still_resolves(tmp_path):
+    """The other half, and the trap #123's third review found in the sibling fix: stripping
+    for the emptiness test and then looking up the UNSTRIPPED value reports a real slug as
+    one the registry does not contain. Strip once, use the stripped value."""
+    root = _corpus(tmp_path, DECLARING_FIELD, {"docs/a.md": _policy(1, "verbatim")})
+
+    got = CorpusFramework(load_config(root / "_meta" / "corpus.yml")
+                          ).issuing_body_profile(f"  {DAS}  ")
+
+    assert got.get("slug") == DAS, got

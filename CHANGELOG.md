@@ -59,6 +59,25 @@ looks fine.
 
 No manifest on the platform is affected today; every live entry writes `id:` first and no two
 group files share a `group:`. Nothing enforced either.
+### Fixed — `issuing_body_profile("")` served a profile nobody asked for
+
+**Affects any corpus whose issuing-body registry holds one entry.** The tool takes a slug
+**or** a free-text name fragment, and the fallback is a case-insensitive substring match —
+where `"" in name` is true for every entry. On a one-entry registry that is exactly one hit,
+the uniqueness test passes, and the tool answers with registry identity, curated notes and
+holdings for an agency nobody named (corpus-toolkit#122).
+
+**The failure is inverted with corpus size.** On a multi-entry registry every entry matches,
+so `len(hits) != 1` and the error path already fires. It was silent precisely where one match
+looks like a deliberate answer.
+
+An empty or whitespace-only query is now refused by name — it is a missing argument, not a
+wildcard and not a name fragment — matching the shape corpus-toolkit#123 gave
+`documents_by_agency`.
+
+The query is also **stripped once and the stripped value used throughout**. `"  slug  "`
+previously missed the exact-match branch, fell into the substring fallback, matched nothing,
+and was reported as a slug the registry does not contain — about one it does.
 
 
 ### Added — `documents_by_agency(slug)`: a corpus answers for one agency registry slug
