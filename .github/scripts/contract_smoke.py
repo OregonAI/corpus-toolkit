@@ -620,6 +620,144 @@ def _refuse_shell_tail(dockerfile: Path, step: str) -> None:
                 f"out of the RUN.")
 
 
+def dockerfile_cmd_argv(path: Path) -> list[str]:
+    """The template's `CMD`, as argv (corpus-toolkit#116).
+
+    THE CMD IS HOW THE CONTAINER ACTUALLY STARTS, and nothing validated it. The gate asserts
+    `corpus-mcp-serve --help`, which argparse answers with exit 0 regardless of which options
+    exist -- so renaming a flag left the unit suite green (test_mount_path.py builds the app
+    through `_sdk.http_kwargs` and never touches the parser), the entrypoints job green (it
+    asserts `hasattr(module, "main")`), and this gate green, while every corpus container
+    crash-looped on `unrecognized arguments`. That CMD is identical across all seven live
+    corpora.
+
+    EXTRACTED, NOT COPIED -- corpus-toolkit#100's rule. A hardcoded duplicate in CI drifts
+    from the Dockerfile and then asserts nothing, which is the species of bug this closes.
+
+    JSON-ARRAY FORM ONLY, and shell form is REFUSED rather than skipped: silence is how a
+    gate ends up asserting less than it appears to. Continuations are removed the way a shell
+    removes them (`\\<newline>` deleted, not replaced with a space) -- #100 hit that exact
+    trap and produced an IndentationError that read as "this release breaks the template".
+    """
+    text = path.read_text(encoding="utf-8")
+    # Comments stripped BEFORE joining continuations: Docker does it in that order, and a
+    # comment line ending in a backslash otherwise glues the next instruction onto it.
+    text = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    text = re.sub(r"\\\n", "", text)
+    for line in text.splitlines():
+        if not re.match(r"(?i)^\s*CMD\s", line):
+            continue
+        payload = line.split(None, 1)[1].strip()
+        if not payload.startswith("["):
+            raise GateFailure(
+                f"{path.name}: CMD is in shell form ({payload[:60]!r}). This gate parses the "
+                f"JSON-array (exec) form only, and refuses rather than skipping — a CMD it "
+                f"cannot read is a CMD nothing validates.")
+        try:
+            argv = json.loads(payload)
+        except json.JSONDecodeError as e:
+            raise GateFailure(f"{path.name}: CMD is not parseable JSON ({e}): {payload[:80]!r}")
+        if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+            raise GateFailure(f"{path.name}: CMD is not a list of strings: {argv!r}")
+        return argv
+    raise GateFailure(
+        f"{path.name}: found no CMD. The container's start command is the one artifact "
+        f"describing how a corpus actually runs; refusing to report zero as success.")
+
+
+def requirements_extras(path: Path) -> set[str]:
+    """The extras named in a `requirements.txt` line for corpus-toolkit.
+
+    THE EXTRAS ARE NAMES A CORPUS DEPENDS ON. The gate classifies
+    `pip install -r requirements.txt` as container-only and skips it, so nothing checked
+    them -- and pip only WARNS on an unknown extra. Delete or rename `semantic` and the image
+    builds, this gate is green, and every corpus loses numpy: `semantic.available()` returns
+    False and the corpus serves keyword-only WHILE REPORTING HEALTHY. That is the
+    federal-reference incident `pyproject.toml`'s own comment records.
+    """
+    extras: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        m = re.match(r"^corpus-toolkit\s*\[([^\]]*)\]", line)
+        if m:
+            extras |= {e.strip() for e in m.group(1).split(",") if e.strip()}
+    return extras
+
+
+def _read_toml(path: Path) -> dict:
+    """Parse a TOML file on any Python this project supports.
+
+    `tomllib` is 3.11+, and `requires-python` is `>=3.10` with 3.10 in the test matrix -- so
+    the first version of this raised `ModuleNotFoundError: No module named 'tomllib'` there,
+    which surfaced as the extras check failing for a reason that had nothing to do with
+    extras. `tomli` is the same parser under its pre-stdlib name and is carried in the `test`
+    extra for 3.10 only.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:                       # Python 3.10
+        try:
+            import tomli as tomllib                   # type: ignore[no-redef]
+        except ModuleNotFoundError:
+            raise GateFailure(
+                "cannot parse pyproject.toml: this Python has no `tomllib` (3.11+) and "
+                "`tomli` is not installed. Install the toolkit's `test` extra, which "
+                "carries it for 3.10.")
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def check_requirements_extras(requirements: Path, pyproject: Path) -> set[str]:
+    """Every extra the template depends on must be declared. Returns them."""
+    extras = requirements_extras(requirements)
+    if not extras:
+        raise GateFailure(
+            f"{requirements.name}: found no `corpus-toolkit[...]` extras. The template pins "
+            f"the toolkit with extras every corpus depends on; finding none means this "
+            f"check is reading the wrong line, not that none are needed.")
+    declared = set(_read_toml(pyproject).get("project", {})
+                   .get("optional-dependencies", {}))
+    missing = sorted(extras - declared)
+    if missing:
+        raise GateFailure(
+            f"{requirements.name} depends on extra(s) {missing} that pyproject.toml does not "
+            f"declare (it has {sorted(declared)}). pip only WARNS on an unknown extra, so "
+            f"every corpus image would build green and silently lose what the extra carries.")
+    return extras
+
+
+def check_template_start_surface(template: Path) -> None:
+    """The template's `CMD` argv parses, and every extra it names is declared.
+
+    Both are consumed surface in the same file corpus-toolkit#100 fixed the `RUN` in, and
+    both fail identically: unit tests green, entrypoints green, this gate green, and every
+    corpus broken (corpus-toolkit#116).
+    """
+    from corpus_toolkit.mcp.server import build_arg_parser
+
+    argv = dockerfile_cmd_argv(template / "Dockerfile")
+    if argv[0] != "corpus-mcp-serve":
+        raise GateFailure(
+            f"the template's CMD starts {argv[0]!r}, not `corpus-mcp-serve`. If that is "
+            f"deliberate this check needs revisiting; refusing rather than validating an "
+            f"argv against a parser that does not belong to it.")
+    # The template's `{{CORPUS_ID}}` is still unfilled here -- this step runs against the
+    # TEMPLATE, not the instantiated copy, so the placeholder is part of a path value and
+    # argparse neither knows nor cares.
+    try:
+        build_arg_parser().parse_args(argv[1:])
+    except SystemExit as e:
+        raise GateFailure(
+            f"the template's CMD is not accepted by `corpus-mcp-serve`'s own parser "
+            f"(argparse exited {e.code}). Every corpus container starts with this argv, so "
+            f"this is a crash loop on every corpus — and `--help` would still have exited 0.")
+    say(f"  CMD accepted: {' '.join(argv[1:])}")
+
+    extras = check_requirements_extras(
+        template / "requirements.txt",
+        Path(__file__).resolve().parent.parent.parent / "pyproject.toml")
+    say(f"  requirements extras all declared: {sorted(extras)}")
+
+
 def _smoke_slug(root) -> str:
     """The issuing-body slug the smoke corpus actually resolved, read from its own index.
 
@@ -846,6 +984,12 @@ def main() -> int:
         # releases (corpus-toolkit#100).
         ("the template's own Dockerfile build commands",
          lambda: check_template_build_commands(dest, args.template)),
+        # BESIDE the RUN check, because they are the same class: consumed surface in the
+        # same file that nothing executed. The RUN is how the image is BUILT; the CMD is
+        # how the container STARTS, and `--help` answers 0 whatever options exist
+        # (corpus-toolkit#116).
+        ("the template's CMD argv and requirements extras",
+         lambda: check_template_start_surface(args.template)),
         ("toolkit CLI gates", lambda: run_cli_gates(dest)),
         ("mandatory MCP contract tools", lambda: check_mcp_tools(dest)),
         # The hybrid leg reuses the SAME scratch corpus: flip the archetype, add the

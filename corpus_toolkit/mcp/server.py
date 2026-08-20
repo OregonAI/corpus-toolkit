@@ -324,7 +324,18 @@ def build_server(config):
     return mcp
 
 
-def main():
+def build_arg_parser() -> argparse.ArgumentParser:
+    """The parser `corpus-mcp-serve` runs on.
+
+    EXPOSED SO THE ARGV CAN BE VALIDATED WITHOUT STARTING A SERVER (corpus-toolkit#116).
+    The container starts from the template's `CMD`, not from `--help` -- and argparse answers
+    `--help` with exit 0 whatever options exist, so renaming a flag left the unit suite, the
+    entrypoints job and the release gate all green while every corpus crash-looped on
+    `unrecognized arguments`. The gate now parses the extracted `CMD` argv through this.
+
+    `main()` calls it rather than building its own: two parsers would drift, and the drift
+    would be invisible -- the gate would be validating an argv `main` no longer accepts.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="path to _meta/corpus.yml")
     ap.add_argument("--http", action="store_true", help="streamable-HTTP instead of stdio")
@@ -349,6 +360,11 @@ def main():
                          "does NOT strip it, so the server must mount at the same prefix "
                          "the route matches (e.g. /oregon-legislature/mcp) or every "
                          "request 404s.")
+    return ap
+
+
+def main():
+    ap = build_arg_parser()
     args = ap.parse_args()
 
     config = config_mod.load(args.config)

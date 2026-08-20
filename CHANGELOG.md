@@ -78,6 +78,46 @@ wildcard and not a name fragment — matching the shape corpus-toolkit#123 gave
 The query is also **stripped once and the stripped value used throughout**. `"  slug  "`
 previously missed the exact-match branch, fell into the substring fallback, matched nothing,
 and was reported as a slug the registry does not contain — about one it does.
+### Added — the release gate now covers the template's `CMD` and its requirements extras
+
+**No action required.** A gate-only change plus one new public function,
+`corpus_toolkit.mcp.server.build_arg_parser()`.
+
+corpus-toolkit#100 made the gate run the template's Dockerfile `RUN` commands. Two more
+pieces of consumed surface in the same file were still uncovered, and both fail the same way:
+unit tests green, `entrypoints` green, the gate green, **every corpus broken**
+(corpus-toolkit#116).
+
+**The `CMD` is how the container actually starts.** The gate asserted
+`corpus-mcp-serve --help`, which argparse answers with exit 0 regardless of which options
+exist. Rename an option in the toolkit and: the unit suite stays green (`test_mount_path.py`
+builds the app through `_sdk.http_kwargs` and never touches the parser), the `entrypoints`
+job stays green (it asserts `hasattr(module, "main")`), `--help` still exits 0, #100's
+build-command step still passes — and every corpus container crash-loops on
+`unrecognized arguments`. That `CMD` is identical across all seven live corpora.
+
+The gate now extracts the `CMD` argv from the Dockerfile and parses it through the parser
+`corpus-mcp-serve` itself runs. That needed the parser out of `main()`, so
+**`build_arg_parser()` is now importable**; `main()` calls it, because two parsers would
+drift and the gate would be validating an argv `main` no longer accepts.
+
+Shell-form `CMD` is **refused**, not skipped — a `CMD` the gate cannot read is a `CMD`
+nothing validates.
+
+**The extras are names a corpus depends on.** `pip install -r requirements.txt` is classified
+container-only and skipped, so `corpus-toolkit[mcp,semantic]` was never checked against
+`pyproject.toml`. pip only *warns* on an unknown extra: delete or rename `semantic` and the
+image builds, the gate is green, and every corpus loses numpy — `semantic.available()`
+returns `False` and the corpus serves keyword-only **while reporting healthy**. That is the
+`federal-reference` incident the extra's own comment in `pyproject.toml` records.
+
+Both checks verified by mutation: renaming a parser option and undeclaring an extra each fail
+the gate at step 5.
+
+The extras check reads `pyproject.toml`, so it needs a TOML parser. `tomllib` is 3.11+ and
+this project supports 3.10, so the `test` extra now carries `tomli` there — the same parser
+under its pre-stdlib name. With neither available the gate says so by name rather than
+failing the extras check for a reason that has nothing to do with extras.
 
 
 ### Added — `documents_by_agency(slug)`: a corpus answers for one agency registry slug
