@@ -57,6 +57,12 @@ from corpus_toolkit.repo import (
 # was always live; dropping the shadow changes no behaviour, it only stops the name
 # meaning two things. See corpus-toolkit#52.
 
+# One page of `documents_by_agency`. A slug can match tens of thousands of documents on ERF,
+# and an unclamped LIMIT put all of them in one MCP response; SQLite also reads a NEGATIVE
+# limit as unbounded, so `limit=-1` was the whole corpus. Higher than `search`'s 40 because
+# this is an exhaustive per-agency listing rather than a relevance ranking.
+_MAX_DOCUMENTS_PER_PAGE = 200
+
 # What `issuing_body_profile` puts in `in_repo` when it counted nothing, keyed by whether
 # attribution coverage is complete (True), known to be partial (False) or unmeasured (None).
 #
@@ -1018,10 +1024,135 @@ class CorpusFramework:
             "disclaimer": self.disclaimer,
         }
 
-    # The counts `_holdings` needs before it will call coverage measured. Every one, as an
-    # int: a backend that reports some of them has measured some of the question, and a
-    # partial measurement served as a complete one is the failure this whole block exists
-    # to stop (corpus-toolkit#71).
+    def documents_by_agency(self, slug: str, limit: int = 50, offset: int = 0) -> dict:
+        """This corpus's documents for one registry slug (corpus-toolkit#46).
+
+        Exists so `corpus-gateway` can assemble `agency_profile(slug)` by ASKING each
+        corpus rather than duplicating every corpus's agency crosswalk. The crosswalks are
+        per-consumer by design -- "the table lives in the consumer, correctness belongs to
+        the registry" -- so a gateway that copied them would re-centralise what was
+        deliberately distributed, and would go stale silently every time one changed.
+
+        FOUR ANSWERS THAT MUST NOT COLLAPSE INTO EACH OTHER, because conflating any pair is
+        the defect this platform files bugs about:
+
+          * documents, and `attribution.complete` true -- the whole answer;
+          * documents, and `complete` false -- a FLOOR: this corpus holds documents it
+            attributed to nobody, so the agency may have more here;
+          * none, and `complete` true -- this corpus genuinely holds nothing for it;
+          * none, and `complete` null -- nobody measured. NOT the same as none.
+
+        `slug_in_registry` answers a DIFFERENT question and is deliberately separate: a
+        corpus with no registry cannot check whether the slug names a real agency, and says
+        so with null rather than guessing. Requiring a registry to serve this tool at all
+        would leave it unregistered on oregon-kpm and oregon-audits, which declare none and
+        are two of the three corpora `agency_profile` needs.
+        """
+        # CLAMPED HERE, AND THE CLAMPED VALUES ARE WHAT THE RESPONSE ECHOES. SQLite reads a
+        # negative LIMIT as unbounded, so `limit=-1` returned every match in one response --
+        # 1,929 documents for ERF's Department of Environmental Quality -- while the
+        # response still said `limit: -1`. `limit=0` returned an empty list that the
+        # contract's table reads as "this corpus genuinely holds nothing". Every sibling in
+        # `backends.py` clamps; this did not.
+        limit = max(1, min(int(limit), _MAX_DOCUMENTS_PER_PAGE))
+        offset = max(0, int(offset))
+        # STRIPPED ONCE, AND THE STRIPPED VALUE IS WHAT IS USED. The empty-slug guard below
+        # stripped for its emptiness test only, so a padded slug reached the backend
+        # verbatim: zero documents and `slug_in_registry: false` -- "a typo, or an agency
+        # that does not exist" -- about a slug the registry does contain.
+        slug = str(slug).strip()
+        # A SENTINEL IS NOT AN AGENCY. It is this corpus positively asserting "these
+        # documents belong to NO body" (corpus-toolkit#94), so returning them as that
+        # body's holdings hands back, on ERF, 37,991 documents as `statewide`'s complete
+        # collection. `slug_in_registry: false` would be wrong too -- its own comment
+        # defines that as "a typo, or an agency that does not exist", and this is neither.
+        if slug in self.config.issuing_body_slug_sentinels:
+            known = self.config.issuing_body_slugs
+            return self.with_envelope({
+                "slug": slug,
+                # NULL WHERE NOTHING WAS CHECKED, like every other path. Hardcoding False
+                # here contradicted the comment above it, this method's docstring, the
+                # contract and the CHANGELOG -- and did so on exactly the registry-less
+                # corpora this tool exists for, telling a gateway "checked, and the registry
+                # does not contain it" from a corpus with nothing to check against.
+                "slug_in_registry": None if known is None else slug in known,
+                "error": (f"{slug!r} is a declared no-body sentinel for this corpus "
+                          f"(plugins.issuing_body_slug_sentinels), not an agency slug. The "
+                          f"documents carrying it are the ones this corpus attributes to NO "
+                          f"issuing body, deliberately, so they are not any agency's "
+                          f"holdings."),
+                "documents": [], "total": 0, "returned": 0,
+                "limit": limit, "offset": offset,
+                "disclaimer": self.disclaimer,
+            })
+        # An empty slug matched the `''` written for every unattributed document, so the
+        # same response returned them as an agency's AND counted them under
+        # `documents_with_no_issuing_body`. One response, two contradictory claims.
+        if not slug:
+            return self.with_envelope({
+                "slug": slug,
+                "slug_in_registry": None,
+                "error": ("no slug given. An empty slug is not a wildcard and is not the "
+                          "unattributed documents — those are counted under "
+                          "`attribution.documents_with_no_issuing_body` and belong to no "
+                          "agency."),
+                "documents": [], "total": 0, "returned": 0,
+                "limit": limit, "offset": offset,
+                "disclaimer": self.disclaimer,
+            })
+        raw = self.backend.documents_for_slug(slug, limit=limit, offset=offset)
+        # NAMED, NOT KeyError. The registration gate checks the method EXISTS; a backend
+        # implementing it with a different shape passes that and then dies on every call --
+        # the registered-landmine outcome the gate was added for (corpus-toolkit#38), one
+        # layer in. `_holdings` is defensive about the coverage block throughout and this
+        # was not about the rest.
+        # TYPES, NOT ONLY PRESENCE. Checking that the keys exist let `{"documents": 5}`
+        # through, which then died on `len(5)` -- a TypeError naming no backend, i.e. the
+        # unattributable failure this check exists to replace, reached by a shorter route.
+        wanted = {"documents": (list, tuple), "total": int}
+        bad = [k for k, t in wanted.items()
+               if not isinstance(raw, dict) or not isinstance(raw.get(k), t)
+               or isinstance(raw.get(k), bool)]
+        if bad:
+            raise TypeError(
+                f"backend {self.backend.name!r} implements documents_for_slug but its "
+                f"result is not the declared shape: "
+                + "; ".join(f"{k} is {type(raw.get(k)).__name__ if isinstance(raw, dict) else type(raw).__name__}"
+                            for k in bad)
+                + ". The declared shape is {documents: [...], total: int, "
+                  "coverage: {...}}. See RetrievalBackend.documents_for_slug.")
+        _counts, attribution = self._holdings(raw)
+        known = self.config.issuing_body_slugs
+        return self.with_envelope({
+            "slug": slug,
+            # NULL, NOT FALSE, where there is no registry to ask. False means "checked, and
+            # the registry does not contain it" -- a typo, or an agency that does not
+            # exist. Null means the question was not asked. Reporting the second as the
+            # first tells a caller its slug is wrong on every corpus that has no registry.
+            "slug_in_registry": None if known is None else slug in known,
+            "documents": raw["documents"],
+            "total": raw["total"],
+            "returned": len(raw["documents"]),
+            "limit": limit,
+            "offset": offset,
+            # WHAT THE ANSWER COULD SEE. Same measure `issuing_body_profile` serves, from
+            # the same backend coverage block, because a list of documents and a count of
+            # documents are the same claim about the same corpus -- two measures would let
+            # a caller read one as complete and the other as a floor.
+            "attribution": attribution,
+            "disclaimer": self.disclaimer,
+        })
+
+    # The counts `_holdings` needs before it will call coverage measured on the FOUR-BUCKET
+    # path. Every one, as an int: a backend that reports some of them has measured some of
+    # the question, and a partial measurement served as a complete one is the failure this
+    # whole block exists to stop (corpus-toolkit#71).
+    #
+    # A corpus with no readable registry takes a different path with a smaller required set
+    # — `in_registry`/`no_registry_entry` are the only two that need a registry, and are
+    # omitted rather than guessed there (corpus-toolkit#46). That path is gated on the
+    # CONFIG, not on which keys the backend happened to send, so a partial report still
+    # lands here and is still refused.
     _COVERAGE_COUNTS = ("documents", "in_registry", "no_registry_entry", "unattributed")
 
     def _holdings(self, raw: dict) -> tuple[dict, dict]:
@@ -1058,6 +1189,86 @@ class CorpusFramework:
         required = self._COVERAGE_COUNTS
         if self.config.issuing_body_slug_sentinels:
             required = required + ("declared_no_body",)
+
+        # NO REGISTRY IS A DIFFERENT SHAPE, NOT A MISSING MEASUREMENT. Only `in_registry`
+        # and `no_registry_entry` need a registry to tell apart; whether a document carries
+        # a slug at all does not. A backend reporting `documents` + `unattributed` without
+        # the registry pair has measured the one fact that decides whether a per-slug answer
+        # is a FLOOR, and reporting that as unknown discards it.
+        #
+        # GATED ON THE CORPUS, NOT ONLY ON THE SHAPE, and the first version was not. Asking
+        # only "did the backend omit the registry pair?" made this fire for a corpus that
+        # DOES have a registry against a backend that measured 2 of the 4 buckets: the
+        # half-measurement was served as a measurement, the diagnostic naming what was
+        # missing disappeared, and the note asserted a config fact this code had never
+        # looked at. A half-measurement is not a measurement (CONTEXT.md).
+        registry_pair = ("in_registry", "no_registry_entry")
+        needed = ("documents", "unattributed") + tuple(
+            k for k in required if k not in registry_pair
+            and k not in ("documents", "unattributed"))
+        if (self.config.issuing_body_slugs is None
+                and coverage is not None
+                and all(isinstance(coverage.get(k), int) for k in needed)
+                and not any(isinstance(coverage.get(k), int) for k in registry_pair)):
+            unattributed = coverage["unattributed"]
+            in_corpus = coverage["documents"]
+            _d = coverage.get("declared_no_body")
+            # DECLARED-BUT-UNREADABLE IS NOT DECLARES-NONE. `issuing_body_slugs` answers
+            # None to both, and collapsing them tells an operator their corpus is configured
+            # the way they meant while its registry path is in fact broken -- absorbing the
+            # last signal that anything is wrong into a positive statement about intent.
+            why = ("this corpus declares no issuing-body registry, so whether a slug names "
+                   "a real body was NOT checked here"
+                   if not self.config.issuing_body_registry else
+                   f"this corpus declares an issuing-body registry at "
+                   f"{self.config.issuing_body_registry} but it could not be read, so "
+                   f"whether a slug names a real body could NOT be checked — this is a "
+                   f"broken configuration, not a corpus without a registry")
+            if in_corpus == 0:
+                # An empty index is not a fully attributed corpus. The four-bucket path says
+                # so; dropping it here claimed "every document carries a slug" about a corpus
+                # with none -- on exactly the configuration this branch was written for.
+                tail = ("; and this corpus's index holds NO documents, so this is not a "
+                        "measurement of attribution at all")
+            elif unattributed:
+                # FALSE IS PROVABLE WITHOUT A REGISTRY. Documents carrying no slug cannot
+                # appear under any slug, so a non-zero count makes the answer a floor.
+                tail = (f"; {unattributed} document(s) carry no slug at all and can appear "
+                        f"under none, so this answer is a floor")
+            else:
+                # TRUE IS NOT PROVABLE. A mistyped slug is invisible without a registry to
+                # check against -- which is exactly what `no_registry_entry` exists to
+                # surface -- so completeness is unknown rather than yes.
+                tail = ("; every document carries a slug, but a mistyped one would be "
+                        "invisible without a registry, so whether this answer is complete "
+                        "is UNKNOWN — not yes")
+            return counts, {
+                "complete": False if (in_corpus and unattributed) else None,
+                "basis": basis,
+                "documents_in_corpus": in_corpus,
+                "documents_with_no_issuing_body": unattributed,
+                "documents_declared_no_issuing_body": _d if isinstance(_d, int) else 0,
+                "note": why + tail,
+            }
+
+        # A BACKEND CLAIMING REGISTRY BUCKETS AGAINST A CONFIG WITH NO REGISTRY IS A
+        # DISAGREEMENT, and the strict path below would resolve it in the backend's favour
+        # -- serving `complete: true` ("every document is matched to a registry entry") in
+        # the same response as `slug_in_registry: null` ("there is no registry to ask").
+        # Those cannot both hold. Newly reachable because `documents_by_agency` is
+        # deliberately not registry-gated where `issuing_body_profile` is, so on main no
+        # tool reached here without a registry.
+        if (self.config.issuing_body_slugs is None and coverage is not None
+                and any(isinstance(coverage.get(k), int) for k in registry_pair)):
+            return counts, {
+                "complete": None,
+                "basis": basis,
+                "note": (f"this corpus's backend ({self.backend.name}) reported documents "
+                         f"matched against an issuing-body registry, but this corpus "
+                         f"declares no readable one — so what those counts were measured "
+                         f"against is UNKNOWN. Backend and config disagree; that is the "
+                         f"finding, not a count."),
+            }
 
         if coverage is None or not all(
                 isinstance(coverage.get(k), int) for k in required):

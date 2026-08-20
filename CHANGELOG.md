@@ -17,6 +17,79 @@ it can break you.
 
 ## Unreleased
 
+### Added — `documents_by_agency(slug)`: a corpus answers for one agency registry slug
+
+**Additive.** A new tool, registered on any corpus whose retrieval backend implements
+`documents_for_slug(slug, limit, offset)` — which `FileBackend` now does, so every
+file-backed corpus serves it on the pin bump with no config change.
+
+```
+documents_by_agency("department-of-geology-and-mineral-industries")
+→ {slug, slug_in_registry, documents: [...], total, returned, limit, offset, attribution}
+```
+
+It exists so `corpus-gateway` can assemble `agency_profile(slug)` by **asking** each corpus
+instead of duplicating each corpus's agency crosswalk. The crosswalks are per-consumer by
+design — *"the table lives in the consumer, correctness belongs to the registry"* — so a
+gateway that copied them would re-centralise what was deliberately distributed and go stale
+silently whenever one changed. No crosswalk loader was added to the toolkit: the mapping is
+applied at ingest by the corpus that owns it (`oregon-kpm` 785/785 documents, `oregon-audits`
+223/242, measured 2026-08-19) and the toolkit reads the resolved slug it already indexes.
+
+**Four answers that must not collapse into each other**, because conflating any pair is the
+defect this platform files bugs about:
+
+| `documents` | `attribution.complete` | means |
+|---|---|---|
+| non-empty | `true` | the whole answer |
+| non-empty | `false` | a **floor** — documents here are attributed to nobody |
+| empty | `true` | this corpus genuinely holds nothing for that slug |
+| empty | `null` | nobody measured. **Not** the same as none |
+
+`slug_in_registry` is `null`, never `false`, where the slug was not checked: "not checked
+here" is not "no such agency". A registry that is *declared but unreadable* is reported as
+the fault it is, not as "this corpus declares no registry".
+
+A refusal carries `error` and omits `attribution` — a refusal is not an answer, and a
+completeness claim attached to one invites reading it as one; branch on `error` first.
+
+A declared no-body sentinel is refused by name rather than answered — those documents belong
+to no body by the corpus's own assertion, so they are not any agency's holdings, and serving
+them under one would rebuild the conflation corpus-toolkit#94 closed. An empty slug is
+refused too: it matched the `''` written for every unattributed document, so one response
+returned them as an agency's *and* counted them as belonging to none.
+
+`limit` is clamped to 200 and `offset` to ≥ 0, and the response echoes the values actually
+served — SQLite reads a negative LIMIT as unbounded, so `limit=-1` returned every match in
+one response while the response still said `limit: -1`.
+
+**Not gated on a registry**, unlike `issuing_body_profile`. That tool reports registry
+identity and needs one; this reports which documents carry a slug and does not. The
+difference is load-bearing — `oregon-kpm` has its registry commented out and `oregon-audits`
+declares none, so mirroring that gate would leave the tool unregistered on two of the three
+corpora a cross-corpus agency profile has to ask.
+
+`holdings_for` now also reports `unattributed` and `declared_no_body` for a corpus with no
+registry. Only `in_registry`/`no_registry_entry` need one to tell apart, and omitting all
+four discarded the fact that decides whether a per-slug answer is a floor. `complete` is
+`false` or `null` there, never `true`: documents carrying no slug prove a floor without a
+registry, but a mistyped slug is invisible without one, so completeness is unknown rather
+than yes.
+
+That path is selected on the **corpus's config**, not on which keys a backend happened to
+send. Selecting on the report shape alone — the first version — fired for a corpus that
+*does* have a registry whose backend reported a partial measurement: the half-measurement
+was served as a measurement, the diagnostic naming what was missing disappeared, and the
+note asserted a config fact the code had never looked at. `issuing_body_profile` reaches
+`_holdings` through the same door, so that did change existing answers. It no longer does.
+
+A backend reporting registry buckets for a corpus that declares no readable registry is a
+**disagreement**, reported as unknown and named as such, rather than resolved in the
+backend's favour.
+
+Closes corpus-toolkit#46's toolkit slice.
+
+
 ### Added — a JSON source can declare which paths it watches
 
 **Opt-in; nothing changes unless a source adds `watch`.** Verified across the platform: 1,116
