@@ -34,12 +34,15 @@ of the largest groups rather than an arbitrary prefix of the manifest.
 Ordering is deterministic — group drift count ascending, then group name, then the
 manifest's own order within a group — so a re-run over the same drift files the same set.
 
-A capped run now prints one extra stderr line naming, per group, issues attempted of sources
-changed (`wrd (1 of 1), dhs (2 of 2), odot (2 of 2), deq (20 of 52), oar (0 of 484)`), plus a
-line naming any group that drifted and got nothing. That second line exists because "a group
-that drifted has no issue" is now a decision this run made, and from the outside it is
-indistinguishable from the silent reporting failure of #53. `changed-sources.tsv` is
-unaffected: still every changed source, still in manifest order, still four columns.
+A capped run now prints, per group, **issues opened/attempted of sources changed** —
+`wrd (1/1 of 1), dhs (2/2 of 2), odot (2/2 of 2), deq (20/20 of 52), oar (0/0 of 484)` — and
+separates the two ways a group can end up with no ticket: *not reached by the budget* (this
+allocation working) and *every issue creation failed* (#53 happening, which the run-wide
+alarm cannot see when a larger group's filings succeeded). Both are named, because from the
+breakdown alone "a group that drifted has no issue" looks the same either way.
+
+`changed-sources.tsv` is unaffected: still every changed source, still in manifest order,
+still the same four columns — now pinned by a test, which it never had.
 
 **This does nothing for the everything-is-broken shape.** oregon-counties run 31400877762 —
 3,391 of 3,447 changed because every manifest entry carried `sha256: ''` — files exactly what

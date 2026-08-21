@@ -55,6 +55,8 @@ import sys
 import urllib.parse
 import urllib.request
 
+from typing import NamedTuple
+
 import yaml
 
 from corpus_toolkit import config as config_mod
@@ -613,7 +615,22 @@ def _print_group_breakdown(per_group: dict) -> None:
     print("drift by group (changed/checked): " + ", ".join(parts))
 
 
-def _issue_order(changed: list[tuple], per_group: dict[str, dict]) -> list[tuple]:
+class ChangedSource(NamedTuple):
+    """One source that drifted, plus the group it came from.
+
+    A tuple with names because it is unpacked in four scopes and one of them writes
+    `changed-sources.tsv`, whose four columns a corpus repo reads — positional unpacking
+    there means a field added in the middle silently rewrites a public file.
+    """
+    group: str
+    id: str
+    url: str
+    old: str
+    new: str
+
+
+def _issue_order(changed: list[ChangedSource],
+                 per_group: dict[str, dict]) -> list[ChangedSource]:
     """The changed sources, ordered smallest-drifting-group first (corpus-toolkit#69).
 
     `MAX_ISSUES_PER_RUN` decides HOW MANY issues a run files; this decides WHICH. The
@@ -642,13 +659,19 @@ def _issue_order(changed: list[tuple], per_group: dict[str, dict]) -> list[tuple
     MAX_ISSUES_PER_RUN` sources unreported and still exits non-zero; the dropped ones are
     now the tail of the largest group instead of an arbitrary prefix.
     """
-    return sorted(changed, key=lambda c: (per_group[c[0]]["changed"], c[0]))
+    return sorted(changed, key=lambda c: (per_group[c.group]["changed"], c.group))
 
 
-def _drifting_groups_in_spend_order(per_group: dict[str, dict]) -> list[str]:
-    """Every group that drifted, in the order `_issue_order` spends the budget on them."""
-    return sorted((g for g, st in per_group.items() if st["changed"]),
-                  key=lambda g: (per_group[g]["changed"], g))
+def _drifting_groups_in_spend_order(changed: list[ChangedSource],
+                                    per_group: dict[str, dict]) -> list[str]:
+    """Every group that drifted, in the order `_issue_order` spends the budget on them.
+
+    DERIVED from `_issue_order` rather than re-deriving its sort key, because the caller
+    uses this to narrate an allocation the run already made. A second copy of the key that
+    drifted from the first would print an authoritative-looking account of an order nobody
+    used — the failure mode the rest of this file's reporting exists to prevent.
+    """
+    return list(dict.fromkeys(c.group for c in _issue_order(changed, per_group)))
 
 
 def main():
@@ -831,7 +854,7 @@ def main():
             # (corpus-toolkit#69) and the spend loop is far from the only scope that knows
             # `gname`. It is NOT written to the tsv: that file is read by corpus repos, so
             # its four columns are public surface.
-            changed.append((gname, sid, url, old, new))
+            changed.append(ChangedSource(gname, sid, url, old, new))
             stats["changed"] += 1
             print(f"CHANGED  {sid}: {old[:12]}… -> {new[:12]}…")
 
@@ -839,7 +862,7 @@ def main():
     # Detection order, i.e. manifest order — unchanged by #69's reordering, which applies
     # to the capped issue spend only. The tsv is not capped, so its order carries no
     # priority meaning and re-sorting it would churn a file consumers diff.
-    out.write_text("".join(f"{a}\t{b}\t{c}\t{d}\n" for _, a, b, c, d in changed))
+    out.write_text("".join(f"{c.id}\t{c.url}\t{c.old}\t{c.new}\n" for c in changed))
 
     recorded = None
     if args.record_baseline:
@@ -867,20 +890,25 @@ def main():
             f.write(f"unseeded={n_unseeded}\n")
 
     opened = attempted = 0
+    # Per group, because on a capped run "which groups got a ticket" is now a DECISION this
+    # run made and not a fact about the drift. BOTH numbers, for the reason the summary
+    # line below carries both: a group whose two filings were attempted and both failed has
+    # reported nothing, and printing only the attempt reinstates precisely the
+    # corpus-toolkit#53 confusion — on the loudest line of a run that is already failing.
     attempted_by_group: dict[str, int] = {}
+    opened_by_group: dict[str, int] = {}
     capped = False
     if args.open_issues and changed and not inert:
         _ensure_label()
-        for gname, sid, url, old, new in _issue_order(changed, per_group):
+        for c in _issue_order(changed, per_group):
             if attempted >= MAX_ISSUES_PER_RUN:
                 capped = True
                 break
             attempted += 1
-            # Per group, because on a capped run "which groups got a ticket" is now a
-            # DECISION this run made and not a fact about the drift. Counted where the
-            # spend happens so it cannot drift from what was actually attempted.
-            attempted_by_group[gname] = attempted_by_group.get(gname, 0) + 1
-            opened += bool(_open_issue(sid, url, old, new))
+            attempted_by_group[c.group] = attempted_by_group.get(c.group, 0) + 1
+            ok = bool(_open_issue(c.id, c.url, c.old, c.new))
+            opened += ok
+            opened_by_group[c.group] = opened_by_group.get(c.group, 0) + ok
 
     # THE SUMMARY REPORTS WHAT WAS REPORTED, not only what drifted. The previous version
     # printed the changed count alone, which read as "these were filed" even when every
@@ -1014,22 +1042,36 @@ def main():
             # "no issue for a group that drifted" is also exactly what the silent-reporting
             # failure of corpus-toolkit#53 looks like from the outside, and an operator
             # cannot tell those apart from the breakdown alone.
+            spend_order = _drifting_groups_in_spend_order(changed, per_group)
             print("BUDGET SPENT SMALLEST-GROUP-FIRST (corpus-toolkit#69): groups were "
-                  "reported in ascending order of drift count, so a small genuine finding "
-                  "files ahead of a bulk one and what was dropped is the tail of the "
-                  "largest group(s) — NOT a delivery failure, and not manifest order. "
-                  "Per group, issues attempted of sources changed: "
-                  + ", ".join(f"{g} ({attempted_by_group.get(g, 0)} of "
-                              f"{per_group[g]['changed']})"
-                              for g in _drifting_groups_in_spend_order(per_group))
+                  "reported in ascending order of drift count — ties broken by group name, "
+                  "then by manifest order within a group — so a small genuine finding files "
+                  "ahead of a bulk one and what was dropped is the tail of the largest "
+                  "group(s), NOT a delivery failure and not manifest order. Per group, "
+                  "issues opened/attempted of sources changed: "
+                  + ", ".join(f"{g} ({opened_by_group.get(g, 0)}/"
+                              f"{attempted_by_group.get(g, 0)} of "
+                              f"{per_group[g]['changed']})" for g in spend_order)
                   + ".", file=sys.stderr)
-            starved = [g for g in _drifting_groups_in_spend_order(per_group)
-                       if not attempted_by_group.get(g)]
-            if starved:
-                print(f"{len(starved)} group(s) with drift were not reported at all: "
-                      + ", ".join(starved) + ". Their drift is in the breakdown above and "
-                      "in changed-sources.tsv; raising nothing for them is the cap, not a "
-                      "finding about them.", file=sys.stderr)
+            # TWO DIFFERENT FINDINGS, and the earlier version of this block called both of
+            # them "not reported at all". A group the budget never reached is this
+            # allocation working; a group whose every filing failed is corpus-toolkit#53
+            # happening, and the global `attempted and opened == 0` alarm below cannot see
+            # it because a larger group's successful filings keep `opened` non-zero.
+            unreached = [g for g in spend_order if not attempted_by_group.get(g)]
+            all_failed = [g for g in spend_order
+                          if attempted_by_group.get(g) and not opened_by_group.get(g)]
+            if unreached:
+                print(f"{len(unreached)} group(s) with drift were not reached by the "
+                      f"budget at all: " + ", ".join(unreached) + ". Their drift is in the "
+                      "breakdown above and in changed-sources.tsv; raising nothing for "
+                      "them is the cap, not a finding about them.", file=sys.stderr)
+            if all_failed:
+                print(f"EVERY issue creation failed for {len(all_failed)} group(s) that "
+                      f"drifted: " + ", ".join(all_failed) + ". Those sources were "
+                      "attempted and NOTHING was filed — drift detected and not reported, "
+                      "which is corpus-toolkit#53 and has nothing to do with the cap.",
+                      file=sys.stderr)
             if n_unseeded:
                 print(f"MEASURED: {n_unseeded} of {n_total} in-scope source(s) have no "
                       f"recorded baseline and therefore drift every run. Seed with "

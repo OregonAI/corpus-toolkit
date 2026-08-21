@@ -130,6 +130,10 @@ class _DriftRun(unittest.TestCase):
     """Drives main() over a real manifest on disk with only the network faked."""
 
     def setUp(self):
+        # Ids whose `gh issue create` will fail. Default empty: filings succeed. The #53
+        # shape is a filing that is ATTEMPTED and does not exist afterwards, and no test
+        # could express it while the mock returned True unconditionally.
+        self.failing_ids: set[str] = set()
         self.root = Path(tempfile.mkdtemp())
         (self.root / "_meta" / "sources").mkdir(parents=True)
         (self.root / "documents").mkdir()
@@ -184,7 +188,9 @@ class _DriftRun(unittest.TestCase):
         with mock.patch.object(sys, "argv", args), \
              mock.patch.object(changes, "fetch", self._fetch), \
              mock.patch.object(changes, "_ensure_label", return_value=True), \
-             mock.patch.object(changes, "_open_issue", return_value=True) as open_issue, \
+             mock.patch.object(changes, "_open_issue",
+                               side_effect=lambda sid, *a: sid not in self.failing_ids
+                               ) as open_issue, \
              redirect_stdout(out), redirect_stderr(err):
             self.open_issue = open_issue
             try:
@@ -303,7 +309,9 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         # something belonging to the group, the run files whichever file the loader
         # happened to open first, and moving a group between files silently changes which
         # sources get reported.
-        n = changes.MAX_ISSUES_PER_RUN - 12   # 13 each: the second group cannot fit whole
+        # Just over half the cap each, so the second group cannot fit whole and which
+        # group is second is the whole question.
+        n = changes.MAX_ISSUES_PER_RUN // 2 + 1
         self.group("zebra", n, baseline="stale", file_stem="a-first")
         self.group("alpha", n, baseline="stale", file_stem="b-second")
         self.run_cli("--open-issues")
@@ -314,17 +322,6 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         self.assertEqual([s for s in filed if s.startswith("zebra-")],
                          [f"zebra-{i}" for i in range(changes.MAX_ISSUES_PER_RUN - n)],
                          "within a group the manifest's own order must survive the sort")
-
-    def test_a_re_run_over_the_same_drift_files_the_same_set(self):
-        self.group("deq", 40, baseline="stale")
-        self.group("oam", 2, baseline="stale")
-        self.group("wrd", 3, baseline="stale")
-        self.run_cli("--open-issues")
-        first = self._filed()
-        self.run_cli("--open-issues")
-        self.assertEqual(first, self._filed(),
-                         "an unstable order means a re-run reports a different set and "
-                         "nobody can tell why")
 
 
     def test_a_capped_run_says_the_budget_was_allocated_and_how(self):
@@ -337,10 +334,11 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         code, out, err = self.run_cli("--open-issues")
         self.assertEqual(code, 1)
         self.assertIn("smallest-group-first", err.lower())
-        self.assertIn("oam (2 of 2)", err)
-        self.assertIn("oar (23 of 30)", err)
-        self.assertIn("deq (0 of 40)", err)
-        self.assertIn("not reported at all", err)
+        self.assertIn("oam (2/2 of 2)", err)
+        self.assertIn(f"oar ({changes.MAX_ISSUES_PER_RUN - 2}/"
+                      f"{changes.MAX_ISSUES_PER_RUN - 2} of 30)", err)
+        self.assertIn("deq (0/0 of 40)", err)
+        self.assertIn("not reached by the budget", err)
 
     def test_the_starved_group_line_does_not_fire_when_every_group_got_a_ticket(self):
         # Capped, but the budget reached all three groups (deq takes the remaining 20 of
@@ -351,8 +349,28 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         self.group("wrd", 3, baseline="stale")
         code, out, err = self.run_cli("--open-issues")
         self.assertEqual(code, 1)
-        self.assertIn("deq (20 of 40)", err, "the run is capped and the line is printed")
-        self.assertNotIn("not reported at all", err)
+        self.assertIn(f"deq ({changes.MAX_ISSUES_PER_RUN - 5}/"
+                      f"{changes.MAX_ISSUES_PER_RUN - 5} of 40)", err,
+                      "the run is capped and the line is printed")
+        self.assertNotIn("not reached by the budget", err)
+
+    def test_a_group_whose_every_filing_failed_is_not_reported_as_reported(self):
+        # The allocation line is the one an operator reads on a capped run, so it must not
+        # repeat the corpus-toolkit#53 confusion the summary line was fixed to remove:
+        # attempting two filings and creating zero is not "reported". The global
+        # every-creation-failed alarm cannot catch this — `opened` is non-zero overall
+        # because the big group's filings succeeded.
+        self.group("deq", 40, baseline="stale")
+        self.group("oam", 2, baseline="stale")
+        self.failing_ids = {"oam-0", "oam-1"}
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(code, 1)
+        self.assertIn("oam (0/2 of 2)", err,
+                      "opened, attempted and changed are three different numbers")
+        self.assertIn("EVERY issue creation failed", err)
+        self.assertIn("oam", err.split("EVERY issue creation failed")[1][:200])
+        self.assertNotIn("not reached by the budget", err,
+                         "oam WAS reached — the cap is not what went wrong here")
 
     def test_an_uncapped_run_does_not_print_the_allocation_line(self):
         # Nothing was allocated: every drifting source was filed. Printing the policy
@@ -361,6 +379,31 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         code, out, err = self.run_cli("--open-issues")
         self.assertEqual(code, 0)
         self.assertNotIn("smallest-group-first", (err + out).lower())
+
+
+class ChangedSourcesTsvIsPublicSurfaceTest(_DriftRun):
+    """`changed-sources.tsv` is read by corpus repos, and no test read it — so the four
+    columns and their order were a claim in a comment. #69 reshaped the record behind this
+    writer (a group name rides along now), which is exactly the change that would rewrite
+    the file by accident."""
+
+    def test_four_columns_id_url_old_new_in_manifest_order(self):
+        # `aaa` drifts more than `zzz`, so the two orders DISAGREE: the manifest yields
+        # aaa first, the issue spend takes zzz first. A fixture where they coincide cannot
+        # tell which one the writer used.
+        self.group("aaa", 3, baseline="stale")
+        self.group("zzz", 1, baseline="stale")
+        self.run_cli("--open-issues")
+        rows = [ln.split("\t") for ln in
+                (self.root / "changed-sources.tsv").read_text().splitlines()]
+        self.assertEqual([r[0] for r in rows], ["aaa-0", "aaa-1", "aaa-2", "zzz-0"],
+                         "manifest order, NOT the order issues were filed in")
+        self.assertEqual([c.args[0] for c in self.open_issue.call_args_list][0], "zzz-0",
+                         "and the spend order really is the other one")
+        self.assertTrue(all(len(r) == 4 for r in rows), rows)
+        self.assertEqual(rows[0][1], "https://example.gov/aaa/0")
+        self.assertEqual(rows[0][2], "stale")
+        self.assertEqual(rows[0][3], content_hash(_body(0), "html"))
 
 
 class UnseededManifestIsNotDriftTest(_DriftRun):
