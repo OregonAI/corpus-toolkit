@@ -17,6 +17,40 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — the drift issue budget is no longer spent in manifest order
+
+**No action required, and the cap does not move.** `MAX_ISSUES_PER_RUN` is still 25 and a
+capped run still exits 1. What changed is *which* 25 sources get an issue: they are now
+taken smallest-drifting-group first instead of in manifest iteration order.
+
+The budget used to go to whichever group the loop reached first. ERF run 31022774644 is the
+case: 544 changed, 25 opened, 519 dropped, and the whole budget went to a 52-source DEQ
+group that happened to sort first. Five apparently genuine changes across three other
+agencies got no ticket, and neither did `oar` — 484 of the 544 changed sources. Reconstructed
+against this release, the same manifest files `wrd 1/1, dhs 2/2, odot 2/2` and spends the
+remaining 20 on DEQ: every small genuine finding is reported, and what is dropped is the tail
+of the largest groups rather than an arbitrary prefix of the manifest.
+
+Ordering is deterministic — group drift count ascending, then group name, then the
+manifest's own order within a group — so a re-run over the same drift files the same set.
+
+A capped run now prints, per group, **issues opened/attempted of sources changed** —
+`wrd (1/1 of 1), dhs (2/2 of 2), odot (2/2 of 2), deq (20/20 of 52), oar (0/0 of 484)` — and
+separates the two ways a group can end up with no ticket: *not reached by the budget* (this
+allocation working) and *every issue creation failed* (#53 happening, which the run-wide
+alarm cannot see when a larger group's filings succeeded). Both are named, because from the
+breakdown alone "a group that drifted has no issue" looks the same either way.
+
+`changed-sources.tsv` is unaffected: still every changed source, still in manifest order,
+still the same four columns — now pinned by a test, which it never had.
+
+**This does nothing for the everything-is-broken shape.** oregon-counties run 31400877762 —
+3,391 of 3,447 changed because every manifest entry carried `sha256: ''` — files exactly what
+it filed before, because when every group drifts at ~100% every allocation is equally
+meaningless. That shape is #68's (seed the baselines); the per-group breakdown from #67 is
+what tells the two apart. (corpus-toolkit#69)
+
+
 ### Added — a corpus declares which registry fields carry a name
 
 **No action required. Which bodies a corpus matches does not change unless it declares
