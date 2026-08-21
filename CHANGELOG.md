@@ -15,6 +15,60 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## Unreleased
+
+### Added — a corpus declares which registry fields carry a name
+
+**No action required. Which bodies a corpus matches does not change unless it declares
+something; the candidate payload changes for everyone.** New config key
+`plugins.issuing_body_name_fields`, defaulting to `["name"]` — exactly the one field
+`issuing_body_profile`'s free-text fallback matched before, so a pin bump never widens a
+corpus's matcher on its behalf. What *every* corpus gains is two additive keys on each
+candidate (below) and one fixed crash.
+
+`issuing_body_profile` takes a registry slug or free text, and the free-text half matched
+`name` alone. That is right only while `name` holds the name readers know.
+`executive-regulatory-frameworks` is migrating under its ADR 0003: `name` holds the OAR
+chapter title, that title has been copied to `oar_name`, and ERF#168 makes `name` the
+**statutory** name. Those differ in practice — "Business Development Department, Oregon
+(DBA: Business Oregon)" is one string in the state's financial register, another in the
+rules index, and a third in statute. Measured against ERF's committed 189-row registry with
+that promotion simulated, matching `name` alone leaves **189 of 189** bodies unfindable by
+the name printed on every OAR citation; `name` + `oar_name` + `aliases` leaves **0**
+(corpus-toolkit#128).
+
+```yaml
+plugins:
+  issuing_body_registry: _meta/agency-registry.yml
+  issuing_body_name_fields: ["name", "oar_name", "aliases"]
+```
+
+A declared field's value may be a **string or a list of strings**, matched element-wise, so
+a curated alias list needs no key of its own. Uniqueness stays **per body, not per name** —
+a query hitting a body's name, its `oar_name` and two aliases is one hit, not four.
+Widening is safe here in a way widening a *join* would not be: this is a disambiguation
+surface, so a wider net produces a question, never a silent misattribution.
+
+**Candidates now carry the name that matched**: `{slug, name, matched_field, matched_name}`.
+`name` is unchanged; the two new keys are always present (for a corpus declaring nothing
+they read `name` and the entry's name), so a caller that renders candidates never branches
+on what the corpus declared. A reader who searched by an OAR name is no longer handed a list
+of statutory names they may never have seen.
+
+**Also fixed, for every corpus: a malformed registry cell no longer takes the tool down.**
+A registry entry whose `name` is null, numeric, or a list made the free-text fallback raise
+`AttributeError` on `None.lower()` — every free-text query against that registry, not just
+one naming the bad entry. Such a cell is now skipped rather than coerced (`str(None)`
+matching the query "none" is a match nobody wrote), and a list is matched element-wise. A
+corpus whose registry holds a **list-valued `name`** therefore finds bodies through it that
+v1.28.0 crashed on; that is the one respect in which a corpus declaring nothing is not
+byte-identical, and the previous behaviour was an exception rather than an answer.
+
+The declaration is checked at load: an empty list, a key with no value, a bare string, a
+non-string entry, or name fields declared with no `issuing_body_registry` all fail loudly.
+Each of those otherwise degrades into "matches nothing", which is indistinguishable from a
+body that is not there — the very symptom this change fixes.
+
 ## v1.28.0 — 2026-08-20
 
 ### Fixed — two silent wrong-writes in `--record-baseline`

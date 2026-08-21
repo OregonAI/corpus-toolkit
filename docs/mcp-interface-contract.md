@@ -174,8 +174,60 @@ corpus without a graph answers the first row above.
   index but never extends the walk, so a cross-corpus chain is one level deep.
 - `issuing_body_profile(slug_or_query)` — who the issuing body is, what it
   holds in this corpus. Takes a registry slug **or** free text, which falls
-  back to a unique case-insensitive substring match on the registry name;
-  an ambiguous or unmatched query returns `error` plus `candidates`.
+  back to a unique case-insensitive substring match on the registry's **name
+  fields**; an ambiguous or unmatched query returns `error` plus `candidates`.
+
+  **Which registry fields carry a name is the corpus's declaration**, under
+  `plugins.issuing_body_name_fields`. It defaults to `["name"]`, so a corpus
+  that declares nothing matches exactly the one field it always matched, and a
+  toolkit upgrade never widens a corpus's matcher on its behalf. A corpus whose
+  readers know a body under more than one name lists them in the order it wants
+  them tried:
+
+  ```yaml
+  plugins:
+    issuing_body_registry: _meta/agency-registry.yml
+    issuing_body_name_fields: ["name", "oar_name", "aliases"]
+  ```
+
+  A declared field's value may be a **string or a list of strings**, and a list
+  is matched element-wise — so a curated alias list needs no config key of its
+  own. Anything else in a registry cell (a number, a null, a mapping) is skipped
+  rather than coerced: `str(None)` matching the query "none" is a match nobody
+  wrote. The declaration is checked at load and a corpus fails loudly for an
+  empty list, a bare string, a non-string entry, or fields declared with no
+  `issuing_body_registry` to name columns of — each of those otherwise degrades
+  into "matches nothing", which is indistinguishable from a body that is not
+  there.
+
+  **Uniqueness is per body, not per name.** A query hitting a body's `name`, its
+  `oar_name` and two of its aliases is one hit, not four; otherwise a wider net
+  would turn good matches into `no unique issuing body match`.
+
+  Widening this matcher is safe in a way that widening a **join** would not be.
+  This is a disambiguation surface: it demands a unique hit and otherwise hands
+  back candidates for a human or agent to choose between, so a wider net can
+  only ever produce a question, never a silent misattribution.
+
+  Each candidate carries the name that matched, because a reader who searched by
+  one name should not be asked to choose between names they have never seen:
+
+      {slug, name, matched_field, matched_name}
+
+  `name` is unchanged — the registry's `name` field. `matched_name` is the
+  string that actually contained the query and `matched_field` is the field it
+  came from. Both are **always present**, including for a corpus that declares
+  nothing (where they read `name` and the entry's name), so a caller that renders
+  candidates never branches on what the corpus declared.
+
+  *Why config and not a second hardcoded key: `name` is the name a reader knows
+  only for as long as a corpus keeps it that way. `executive-regulatory-frameworks`
+  is migrating under its ADR 0003 — `name` holds the OAR chapter title, that title
+  is copied to `oar_name`, and ERF#168 makes `name` the statutory name. Measured
+  against ERF's committed 189-row registry with that promotion simulated, matching
+  `name` alone leaves 189 of 189 bodies unfindable by the name printed on every OAR
+  citation; `name` + `oar_name` + `aliases` leaves none (corpus-toolkit#128).
+  `oar_name` is ERF's field name, and this toolkit serves many corpora.*
 
   Registered when **both** hold: the corpus declares
   `plugins.issuing_body_registry`, and its retrieval backend implements

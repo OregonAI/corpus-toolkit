@@ -113,6 +113,24 @@ class CorpusConfig:
     issuing_body_registry: Path | None
     issuing_body_registry_key: str
     issuing_body_profiles: Path | None
+    # Registry fields that carry a NAME, in the order `issuing_body_profile`'s free-text
+    # fallback tries them. ("name",) for a corpus that declares nothing, which then matches
+    # exactly what it matched before.
+    #
+    # WHY THIS IS CONFIG AND NOT A SECOND HARDCODED KEY. `name` is the name a reader knows
+    # only for as long as a corpus keeps it that way, and a corpus may legitimately promote
+    # it to something else — `executive-regulatory-frameworks` is doing exactly that under
+    # its ADR 0003, which is what left 189 of 189 of its bodies unfindable by the name
+    # printed on their OAR citations. The replacement field is ERF's own name for it and
+    # this toolkit serves many corpora, so the corpus declares its own list (AGENTS.md: all
+    # corpus specifics come from config). The measurement and the migration are told once,
+    # in docs/mcp-interface-contract.md under `issuing_body_profile` (corpus-toolkit#128).
+    #
+    # A LIST-VALUED FIELD NEEDS NO SECOND KEY. An entry's value may be a string or a list of
+    # strings, and a list is matched element-wise, so ERF's curated `aliases` is declared in
+    # the same list as `oar_name`. A separate `issuing_body_alias_fields` would double the
+    # public surface to encode a shape the value already states.
+    issuing_body_name_fields: tuple[str, ...]
     # The frontmatter key carrying a document's REGISTRY SLUG, where a corpus has one.
     # None = this corpus attributes documents by directory only, and the path-derived
     # scope slug is the whole answer. See `registry_slug_for` for which wins and why.
@@ -565,6 +583,72 @@ def _validated_slug_sentinels(raw, *, field: str | None, registry_slugs) -> froz
     return sentinels
 
 
+def _validated_name_fields(raw, *, registry) -> tuple[str, ...]:
+    """Parse and CHECK `plugins.issuing_body_name_fields`, loudly.
+
+    ABSENT IS ("name",) AND THAT DEFAULT IS THE COMPATIBILITY PROMISE: a corpus that
+    declares nothing matches exactly the one field it matched before, so a toolkit upgrade
+    never widens a corpus's matcher on its behalf. Widening is the corpus's decision.
+
+    The mistakes below are all SILENT without this check, and all fail the same way: a
+    field name that reaches no registry cell matches nothing, and "matches nothing" is
+    indistinguishable from a body that genuinely is not there — the exact symptom
+    corpus-toolkit#128 is about, arriving from the fix for it.
+
+      * PRESENT WITH NO VALUE: declares nothing while looking like it declares something —
+        the state a corpus author reaches by commenting out their only entry.
+      * declared without `plugins.issuing_body_registry`: the fields name columns OF THAT
+        REGISTRY, so there is nothing for them to name and the fallback they widen never
+        runs (`issuing_body_profile` errors out before reaching it).
+      * a bare string: `issuing_body_name_fields: oar_name` would iterate as the characters
+        of the word, so the corpus would match on fields named "o", "a", "r"...
+      * an EMPTY list: read as "no name fields" it would make every free-text query
+        unmatchable.
+      * a non-string or blank entry: names no column, and quietly drops out of the list.
+
+    NOT CHECKED, DELIBERATELY: whether a declared field appears in any registry entry. A
+    corpus mid-migration legitimately declares the field its registry is about to grow (ERF
+    declared `oar_name` while ADR 0003 was still copying titles into it), so failing the
+    load there would refuse to start a corpus whose config is correct and merely early. It
+    does leave a config typo — `oar_nmae` — silent; that is corpus-toolkit#129's question of
+    where a *reported* rather than *fatal* config finding should surface.
+    """
+    if raw is _ABSENT:
+        return ("name",)
+    # ORDER MIRRORS `_validated_slug_sentinels` DELIBERATELY: no-value before the
+    # companion-key check, so the same mistake in either declaration is reported the same
+    # way. Two sibling validators reporting a bare `key:` differently is the kind of
+    # inconsistency a corpus author reads as two different problems.
+    if raw is None:
+        raise ValueError(
+            "plugins.issuing_body_name_fields is declared with no value, which declares "
+            "nothing. Remove the key to match on `name` alone, or list the registry fields "
+            "that carry a name.")
+    if not registry:
+        raise ValueError(
+            "plugins.issuing_body_name_fields is declared but plugins.issuing_body_registry "
+            "is not, so the fields name columns of a registry this corpus does not have. "
+            "Declare the registry, or remove the name fields.")
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            f"plugins.issuing_body_name_fields must be a list of registry field names, got "
+            f"{type(raw).__name__}: {raw!r}")
+    if not raw:
+        raise ValueError(
+            "plugins.issuing_body_name_fields is an empty list, which declares nothing and "
+            "would leave every free-text query unmatchable. Remove the key to match on "
+            "`name` alone, or list the registry fields that carry a name.")
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"plugins.issuing_body_name_fields: every entry must be a non-empty "
+                f"registry field name, got {entry!r}")
+    # Order is preserved and is load-bearing: it decides which field a candidate reports as
+    # the one that matched. Duplicates are dropped — a field scanned twice cannot match
+    # anything the first scan missed.
+    return tuple(dict.fromkeys(e.strip() for e in raw))
+
+
 def _validated_archetype(raw) -> str:
     """Parse and CHECK `corpus.archetype`, loudly.
 
@@ -828,6 +912,9 @@ def load(config_path: str | Path) -> CorpusConfig:
         issuing_body_registry=_resolve(root, plugins.get("issuing_body_registry")),
         issuing_body_registry_key=plugins.get("issuing_body_registry_key", "entries"),
         issuing_body_profiles=_resolve(root, plugins.get("issuing_body_profiles")),
+        issuing_body_name_fields=_validated_name_fields(
+            plugins.get("issuing_body_name_fields", _ABSENT),
+            registry=plugins.get("issuing_body_registry")),
         issuing_body_slug_field=_slug_field,
         issuing_body_slug_sentinels=_validated_slug_sentinels(
             plugins.get("issuing_body_slug_sentinels", _ABSENT),

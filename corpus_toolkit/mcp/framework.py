@@ -209,6 +209,29 @@ def _collect_schemes(config: CorpusConfig) -> list:
     return list(collected)
 
 
+def _name_match(entry: dict, fields, query: str) -> tuple[str, str] | None:
+    """The first declared name field of `entry` holding a name that contains `query`, as
+    (field, name) — or None where the query reaches none of them. Case-insensitive.
+
+    THE LOWERCASING HAPPENS HERE, not in the caller. Taking a pre-lowered query would be an
+    unstated precondition, and the way it breaks is the failure this whole function exists
+    to fix: a later caller passing raw text matches nothing and looks like a body that is
+    not there.
+
+    A field's value may be a STRING or a LIST of strings (ERF's curated `aliases`), and a
+    list is matched element-wise. Anything else in a registry cell is skipped rather than
+    coerced: a registry is hand-maintained, and `str(None)` matching "none" is a match
+    nobody wrote.
+    """
+    q = query.lower()
+    for field in fields:
+        value = entry.get(field)
+        for name in (value if isinstance(value, (list, tuple)) else [value]):
+            if isinstance(name, str) and q in name.lower():
+                return field, name
+    return None
+
+
 class CorpusFramework:
     def __init__(self, config: CorpusConfig):
         self.config = config
@@ -1008,13 +1031,15 @@ class CorpusFramework:
                     "error": ("no issuing body given. An empty query is not a wildcard — "
                               "pass a registry slug, or a fragment of a body's name.")}
         if slug not in entries:
-            q = slug.lower()
-            hits = [s for s, o in entries.items() if q in o.get("name", "").lower()]
+            hits = [(s, m) for s, o in entries.items()
+                    if (m := _name_match(o, self.config.issuing_body_name_fields, slug))]
             if len(hits) != 1:
                 return {**self._envelope(),
                         "error": f"no unique issuing body match for {slug!r}",
-                        "candidates": [{"slug": s, "name": entries[s].get("name")} for s in hits[:8]]}
-            slug = hits[0]
+                        "candidates": [{"slug": s, "name": entries[s].get("name"),
+                                        "matched_field": field, "matched_name": name}
+                                       for s, (field, name) in hits[:8]]}
+            slug = hits[0][0]
 
         # Through the seam, not around it. This ran raw SQL against FileBackend's `docs`
         # table via ensure_index(), which is why the tool could not exist for any other

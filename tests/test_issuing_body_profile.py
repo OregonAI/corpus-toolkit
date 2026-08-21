@@ -536,3 +536,244 @@ def test_a_padded_slug_still_resolves(tmp_path):
                           ).issuing_body_profile(f"  {DAS}  ")
 
     assert got.get("slug") == DAS, got
+
+
+# ---------- #128: which registry fields carry a NAME is the corpus's declaration ----------
+#
+# The free-text fallback matched exactly one field, `name`, which is right only while `name`
+# holds the name readers know. `executive-regulatory-frameworks` is mid-migration under its
+# ADR 0003: `name` currently holds the OAR chapter title, that title has been copied to
+# `oar_name`, and ERF#168 makes `name` the STATUTORY name. Those differ in practice —
+# "Business Development Department, Oregon (DBA: Business Oregon)" is one string in the
+# financial register, another in the rules index, and a third in statute.
+#
+# Measured against ERF's committed 189-row registry with that promotion simulated (`name`
+# replaced, `oar_name` untouched): matching `name` alone leaves 189 of 189 bodies unfindable
+# by the name printed on every OAR citation; `name` + `oar_name` + `aliases` leaves 0.
+#
+# `oar_name` is ERF-specific and this toolkit is generic, so the field list is CONFIG
+# (AGENTS.md: all corpus specifics come from config), defaulting to ["name"].
+
+PROMOTED = {
+    "entries": [
+        {"slug": DAS,
+         # What ERF#168 makes `name`: the name the body's enabling authority gives it.
+         "name": "Administrative Services, Department of",
+         # What every OAR citation prints, and what a reader is holding when they ask.
+         "oar_name": "Oregon Department of Administrative Services",
+         "aliases": ["DAS", "State Services Division"]},
+        {"slug": "employment-department",
+         "name": "Employment Department",
+         "oar_name": "Employment Department, Oregon",
+         "aliases": []},
+    ]
+}
+
+DECLARING_NAME_FIELDS = DECLARING_FIELD + (
+    '      issuing_body_name_fields: ["name", "oar_name", "aliases"]\n')
+
+
+def _promoted(tmp_path: Path, config_yaml: str) -> Path:
+    """ERF after its `name` promotion, in miniature: the OAR name lives in `oar_name`."""
+    root = _corpus(tmp_path, config_yaml, {f"agencies/{DAS}/policies/policy-0.md":
+                                           _policy(0, "verbatim")})
+    (root / "_meta" / "registry.yml").write_text(json.dumps(PROMOTED))
+    return root
+
+
+def test_a_declared_name_field_finds_a_body_by_the_name_a_reader_holds(tmp_path):
+    """The defect, stated as the reader's experience: they query by the name printed on the
+    OAR citation, and today's matcher — `name` only — cannot find the body at all."""
+    root = _promoted(tmp_path, DECLARING_NAME_FIELDS)
+
+    out = fw(root).issuing_body_profile("Oregon Department of Administrative Services")
+
+    assert out.get("slug") == DAS, out
+
+
+def test_a_corpus_declaring_nothing_matches_the_name_field_and_nothing_else(tmp_path):
+    """THE BACKWARD-COMPATIBILITY BASELINE, and the reason the default is ("name",).
+
+    The same promoted registry, read by a corpus that declares no name fields: the OAR name
+    reaches nothing, exactly as on v1.28.0. A corpus adopting a toolkit release must not
+    find its queries suddenly resolving to bodies it never declared findable — a wider net
+    is the corpus's decision to make, not the toolkit's to make for it.
+
+    Also pins that this test cannot pass by accident: `Administrative Services` still
+    resolves through `name`, so the fallback is running and the registry is loadable."""
+    root = _promoted(tmp_path, DECLARING_FIELD)
+
+    unmatched = fw(root).issuing_body_profile("Oregon Department of Administrative Services")
+
+    assert "error" in unmatched, unmatched
+    assert unmatched["candidates"] == []
+    assert fw(root).issuing_body_profile("Administrative Services, Department of")["slug"] == DAS
+
+
+def test_a_curated_alias_list_is_matched_element_wise(tmp_path):
+    """An alias list needs no config key of its own. A declared field whose value is a LIST
+    is matched per element, so ERF's `aliases` — a curated, reviewed assertion that two
+    strings denote the same body, a stronger signal than any fuzzy match — is declared in
+    the same list as `oar_name`."""
+    root = _promoted(tmp_path, DECLARING_NAME_FIELDS)
+
+    out = fw(root).issuing_body_profile("State Services Division")
+
+    assert out.get("slug") == DAS, out
+
+
+def test_a_body_matching_in_several_declared_fields_is_still_ONE_hit(tmp_path):
+    """A WIDER NET MUST NOT MANUFACTURE AMBIGUITY. Uniqueness is per BODY, not per name: a
+    query hitting a body's `name` and its `oar_name` and two of its aliases is one body
+    found, and counting names instead would turn every good match into `no unique issuing
+    body match` — the tool refusing to answer precisely where it now knows more."""
+    root = _promoted(tmp_path, DECLARING_NAME_FIELDS)
+
+    out = fw(root).issuing_body_profile("Administrative Services")
+
+    assert out.get("slug") == DAS, out
+
+
+def test_candidates_name_the_field_and_the_name_that_matched(tmp_path):
+    """WIDENING THE NET PRODUCES A QUESTION, so the question has to be readable.
+
+    `issuing_body_profile` is a disambiguation surface: it demands a unique hit and
+    otherwise hands back candidates for a human or agent to choose between, which is why a
+    wider net here is safe where a wider JOIN would not be — it can only ever produce a
+    question, never a silent misattribution.
+
+    But `{slug, name}` alone answers a reader who searched by the OAR name with a list of
+    STATUTORY names they may never have seen. The candidate now carries the string that
+    actually matched and the field it came from, so the reader recognises what they are
+    being asked to choose between. `name` keeps its existing meaning and value."""
+    root = _promoted(tmp_path, DECLARING_NAME_FIELDS)
+
+    out = fw(root).issuing_body_profile("Oregon")
+
+    assert "error" in out
+    assert out["candidates"] == [
+        {"slug": DAS,
+         "name": "Administrative Services, Department of",
+         "matched_field": "oar_name",
+         "matched_name": "Oregon Department of Administrative Services"},
+        {"slug": "employment-department",
+         "name": "Employment Department",
+         "matched_field": "oar_name",
+         "matched_name": "Employment Department, Oregon"},
+    ]
+
+
+def test_candidates_carry_the_same_keys_for_a_corpus_declaring_nothing(corpus):
+    """The shape is UNIFORM, not conditional. A caller that renders candidates must not
+    have to branch on whether the corpus declared anything — the same reasoning that keeps
+    `attribution` present on every success. Where nothing is declared the two new keys
+    always read `name` and the entry's name, which is the truth about that match."""
+    out = fw(corpus).issuing_body_profile("Department")
+
+    assert out["candidates"] == [
+        {"slug": DAS, "name": "Department of Administrative Services",
+         "matched_field": "name", "matched_name": "Department of Administrative Services"},
+        {"slug": "employment-department", "name": "Employment Department",
+         "matched_field": "name", "matched_name": "Employment Department"},
+    ]
+
+
+# ---------- the declaration is CHECKED at load, because every way of getting it wrong is
+# silent otherwise: a name field that reaches no registry cell matches nothing, and
+# "matches nothing" is exactly what an unfindable body looks like from the outside.
+
+@pytest.mark.parametrize("declared, phrase, why", [
+    ("[]", "empty list", "an empty list declares nothing"),
+    ("", "declared with no value", "the key present with no value declares nothing"),
+    ("oar_name", "got str", "a bare string would iterate as its characters"),
+    ('{name: oar_name}', "got dict", "a mapping is not a list of field names"),
+    ('["name", ""]', "non-empty", "an empty field name reaches no registry cell"),
+    ('["name", 7]', "got 7", "a non-string is not a field name"),
+])
+def test_a_malformed_name_field_declaration_fails_at_load(tmp_path, declared, phrase, why):
+    """EACH CASE PINS THE MESSAGE ITS OWN GUARD PRODUCES. Asserting only the config key name
+    is a check that passes without checking anything — every branch names the key, so the
+    wrong guard firing (or one guard swallowing every case) reads as six working checks."""
+    root = _promoted(tmp_path, DECLARING_FIELD + f"      issuing_body_name_fields: {declared}\n")
+
+    with pytest.raises(ValueError) as e:
+        load_config(root / "_meta" / "corpus.yml")
+
+    assert "issuing_body_name_fields" in str(e.value), why
+    assert phrase in str(e.value), f"{why}: wrong guard fired — {e.value}"
+
+
+def test_name_fields_without_a_registry_is_a_config_error(tmp_path):
+    """Sibling of the sentinels-without-a-slug-field check. The fields name columns of the
+    ISSUING-BODY REGISTRY, so with no registry declared there is nothing for them to name:
+    the corpus has widened a matcher that never runs, and would read its unfindable bodies
+    as a data problem."""
+    config = DECLARING_FIELD.replace("      issuing_body_registry: _meta/registry.yml\n", "")
+    root = _promoted(tmp_path, config + '      issuing_body_name_fields: ["name", "oar_name"]\n')
+
+    with pytest.raises(ValueError) as e:
+        load_config(root / "_meta" / "corpus.yml")
+
+    assert "issuing_body_name_fields" in str(e.value)
+    assert "issuing_body_registry" in str(e.value)
+
+
+def test_a_corpus_declaring_nothing_gets_the_documented_default(corpus):
+    """The default is a real value a corpus can read back, not an implicit branch."""
+    assert load_config(corpus / "_meta" / "corpus.yml").issuing_body_name_fields == ("name",)
+
+
+def test_a_registry_cell_that_is_not_a_string_is_skipped_not_coerced(tmp_path):
+    """A registry is hand-maintained YAML, so a declared field can hold anything. Coercing
+    with `str()` invents names nobody wrote — `aliases: [~]` would make the query "none"
+    match a body — and calling `.lower()` on it takes the whole tool down instead."""
+    root = _promoted(tmp_path, DECLARING_NAME_FIELDS)
+    registry = json.loads((root / "_meta" / "registry.yml").read_text())
+    registry["entries"][0]["oar_name"] = 1988
+    registry["entries"][0]["aliases"] = [None, {"was": "DAS"}, "State Services Division"]
+    (root / "_meta" / "registry.yml").write_text(json.dumps(registry))
+    f = fw(root)
+
+    assert "error" in f.issuing_body_profile("none")
+    assert "error" in f.issuing_body_profile("1988")
+    assert f.issuing_body_profile("State Services Division").get("slug") == DAS
+
+
+def test_a_field_declared_twice_is_scanned_once(tmp_path):
+    """Order decides which field a candidate reports as the one that matched, so the list
+    is order-preserving; a repeat cannot match anything the first scan missed."""
+    root = _promoted(
+        tmp_path,
+        DECLARING_FIELD + '      issuing_body_name_fields: ["oar_name", "name", "oar_name"]\n')
+
+    cfg = load_config(root / "_meta" / "corpus.yml")
+
+    assert cfg.issuing_body_name_fields == ("oar_name", "name")
+    assert fw(root).issuing_body_profile("Oregon Department of Administrative")[
+        "slug"] == DAS
+
+
+def test_a_malformed_registry_cell_no_longer_takes_the_tool_down(tmp_path):
+    """THE ONE RESPECT IN WHICH A CORPUS DECLARING NOTHING IS NOT BYTE-IDENTICAL, pinned
+    here rather than left for a corpus to discover.
+
+    v1.28.0 matched `q in o.get("name", "").lower()`, so a registry entry whose `name` is
+    null, numeric or a list raised `AttributeError: 'NoneType' object has no attribute
+    'lower'` — taking down EVERY free-text query against that registry, not just one naming
+    the bad entry. A hand-maintained YAML file makes that a data typo away.
+
+    Skipping is the fix, and `str()` is not: coercing would make the query "none" match a
+    body. A LIST-valued `name` is the case where the two differ visibly — it crashed before
+    and is matched element-wise now, so this corpus finds a body v1.28.0 could not. An
+    exception is not behaviour worth preserving, but it IS a difference, so it is a test and
+    a CHANGELOG line rather than a footnote."""
+    root = _promoted(tmp_path, DECLARING_FIELD)          # declares NO name fields
+    registry = {"entries": [{"slug": DAS, "name": None},
+                            {"slug": "employment-department",
+                             "name": ["Employment Department", "Employment Board"]}]}
+    (root / "_meta" / "registry.yml").write_text(json.dumps(registry))
+    f = fw(root)
+
+    assert f.config.issuing_body_name_fields == ("name",)
+    assert "error" in f.issuing_body_profile("Administrative")     # was AttributeError
+    assert f.issuing_body_profile("Employment Board")["slug"] == "employment-department"
