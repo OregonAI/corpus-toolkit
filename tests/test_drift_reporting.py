@@ -139,10 +139,17 @@ class _DriftRun(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def group(self, name: str, n: int, *, baseline: str | None, start: int = 0):
+    def group(self, name: str, n: int, *, baseline: str | None, start: int = 0,
+              file_stem: str | None = None):
         """Write a group of n sources. baseline=None means `sha256: \'\'` (unseeded),
-        "current" means the hash they will actually fetch, anything else is a literal."""
-        lines = ["sources:"]
+        "current" means the hash they will actually fetch, anything else is a literal.
+
+        `file_stem` writes the group to a differently-named file and declares `group:`
+        inside it, which is what a real manifest does when the file name and the group
+        name disagree. That is the only way the manifest's iteration order (file name)
+        can differ from the group name, so it is the only way to observe a tiebreak that
+        sorts on the name."""
+        lines = ["sources:"] if file_stem is None else [f"group: {name}", "sources:"]
         for i in range(start, start + n):
             url = f"https://example.gov/{name}/{i}"
             self.bodies[url] = _body(i)
@@ -158,7 +165,8 @@ class _DriftRun(unittest.TestCase):
                     format: html
                     sha256: "{sha}"
             """).rstrip())
-        (self.root / "_meta" / "sources" / f"{name}.yml").write_text("\n".join(lines) + "\n")
+        stem = file_stem or name
+        (self.root / "_meta" / "sources" / f"{stem}.yml").write_text("\n".join(lines) + "\n")
 
     def _fetch(self, url):
         # RAISES rather than returning the exception. Returning it let a "failed" fetch
@@ -256,6 +264,103 @@ class CappedRunIsNotACleanRunTest(_DriftRun):
         _, _, err = self.run_cli("--open-issues")
         self.assertIn(f"{n} of {n}", err)
         self.assertIn("--record-baseline", err)
+
+
+class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
+    """corpus-toolkit#69: the cap decides WHICH issues are filed, and it used to decide by
+    manifest iteration order alone.
+
+    ERF run 31022774644: 544 changed, 25 opened, 519 dropped. The 52-source DEQ group came
+    first alphabetically and consumed the whole budget, so the five genuine changes in three
+    small agency groups — and the 484-source `oar` template change that was 89% of the drift
+    — got no ticket at all. Nothing about the budget was allocated; it was simply spent by
+    whoever the loop reached first.
+    """
+
+    def _filed(self):
+        return [c.args[0] for c in self.open_issue.call_args_list]
+
+    def test_a_noisy_group_no_longer_shuts_out_the_small_ones(self):
+        # Alphabetically first AND far over the cap on its own: the ERF shape.
+        self.group("deq", 40, baseline="stale")
+        self.group("oam", 2, baseline="stale")
+        self.group("wrd", 3, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        filed = self._filed()
+        self.assertEqual(len(filed), changes.MAX_ISSUES_PER_RUN,
+                         "the cap is not weakened — it still bounds the run")
+        self.assertEqual({"oam-0", "oam-1"}, {s for s in filed if s.startswith("oam-")},
+                         "every source in the smallest drifting group must be filed")
+        self.assertEqual({"wrd-0", "wrd-1", "wrd-2"},
+                         {s for s in filed if s.startswith("wrd-")},
+                         "a small genuine finding must not be starved by a bulk one")
+        self.assertEqual(code, 1, "a capped run is still not a clean run")
+
+
+    def test_equal_sized_groups_are_ordered_by_name_not_by_file_position(self):
+        # Two groups drifting equally, written to files whose names sort the OPPOSITE way
+        # to the group names — the manifest's own iteration order. Without a tiebreak on
+        # something belonging to the group, the run files whichever file the loader
+        # happened to open first, and moving a group between files silently changes which
+        # sources get reported.
+        n = changes.MAX_ISSUES_PER_RUN - 12   # 13 each: the second group cannot fit whole
+        self.group("zebra", n, baseline="stale", file_stem="a-first")
+        self.group("alpha", n, baseline="stale", file_stem="b-second")
+        self.run_cli("--open-issues")
+        filed = self._filed()
+        self.assertEqual(len(filed), changes.MAX_ISSUES_PER_RUN)
+        self.assertEqual(len([s for s in filed if s.startswith("alpha-")]), n,
+                         "the tie must be broken by the group name, so `alpha` files whole")
+        self.assertEqual([s for s in filed if s.startswith("zebra-")],
+                         [f"zebra-{i}" for i in range(changes.MAX_ISSUES_PER_RUN - n)],
+                         "within a group the manifest's own order must survive the sort")
+
+    def test_a_re_run_over_the_same_drift_files_the_same_set(self):
+        self.group("deq", 40, baseline="stale")
+        self.group("oam", 2, baseline="stale")
+        self.group("wrd", 3, baseline="stale")
+        self.run_cli("--open-issues")
+        first = self._filed()
+        self.run_cli("--open-issues")
+        self.assertEqual(first, self._filed(),
+                         "an unstable order means a re-run reports a different set and "
+                         "nobody can tell why")
+
+
+    def test_a_capped_run_says_the_budget_was_allocated_and_how(self):
+        # A group at 484/484 in the breakdown with no issue against it now means "the
+        # budget went to smaller groups first", not "reporting failed" (corpus-toolkit#53
+        # is the reason that distinction has to be printed rather than inferred).
+        self.group("deq", 40, baseline="stale")
+        self.group("oam", 2, baseline="stale")
+        self.group("oar", 30, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(code, 1)
+        self.assertIn("smallest-group-first", err.lower())
+        self.assertIn("oam (2 of 2)", err)
+        self.assertIn("oar (23 of 30)", err)
+        self.assertIn("deq (0 of 40)", err)
+        self.assertIn("not reported at all", err)
+
+    def test_the_starved_group_line_does_not_fire_when_every_group_got_a_ticket(self):
+        # Capped, but the budget reached all three groups (deq takes the remaining 20 of
+        # its 40). A line that says "not reported at all" on a run where every drifting
+        # group WAS reported would send an operator looking for a group that is not there.
+        self.group("deq", 40, baseline="stale")
+        self.group("oam", 2, baseline="stale")
+        self.group("wrd", 3, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(code, 1)
+        self.assertIn("deq (20 of 40)", err, "the run is capped and the line is printed")
+        self.assertNotIn("not reported at all", err)
+
+    def test_an_uncapped_run_does_not_print_the_allocation_line(self):
+        # Nothing was allocated: every drifting source was filed. Printing the policy
+        # anyway would train an operator to skim past it on the run where it matters.
+        self.group("oam", 2, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(code, 0)
+        self.assertNotIn("smallest-group-first", (err + out).lower())
 
 
 class UnseededManifestIsNotDriftTest(_DriftRun):

@@ -108,6 +108,10 @@ ISSUE_LABEL = "source-change"
 # every source reads as changed, forever. Capping and saying so surfaces that; opening
 # 618 issues buries it. See OregonAI/oregon-collective-bargaining#14 for the case that
 # motivated this.
+#
+# HOW MANY, not which: `_issue_order` decides which sources the budget buys
+# (corpus-toolkit#69). The two are separate on purpose — the cap is the guardrail and does
+# not move, while the allocation is a policy about whose drift is worth a ticket first.
 MAX_ISSUES_PER_RUN = 25
 
 # Fraction of the bytes fetched on the HTML/XML path that one `volatile_patterns:` entry
@@ -609,6 +613,44 @@ def _print_group_breakdown(per_group: dict) -> None:
     print("drift by group (changed/checked): " + ", ".join(parts))
 
 
+def _issue_order(changed: list[tuple], per_group: dict[str, dict]) -> list[tuple]:
+    """The changed sources, ordered smallest-drifting-group first (corpus-toolkit#69).
+
+    `MAX_ISSUES_PER_RUN` decides HOW MANY issues a run files; this decides WHICH. The
+    budget used to be spent in manifest iteration order, so whichever group the loop
+    reached first consumed it. ERF run 31022774644 is the case: the 52-source DEQ group
+    came first and took all 25, so `oar` — 484 of the 544 changed sources, 89% of the
+    drift — got no issue at all, and neither did five apparently genuine changes spread
+    across three other agencies.
+
+    Ascending drift COUNT, because a group with two changed sources is the shape a human
+    can act on and a group with 484 is a template change, a broken fetch, or a stale
+    baseline that one ticket describes as well as 484 do. Small genuine findings therefore
+    file before a bulk false positive absorbs the run. The alternative considered was a
+    per-group share of the budget; it needs a policy for unused slices and would still let
+    a 52-source noisy group spend its whole share ahead of a two-source real one.
+
+    Deterministic and stable, so a re-run over the same drift files the same set and a
+    changed set is a fact about upstream rather than about iteration luck:
+
+    1. the group's total changed count, ascending;
+    2. then the group name, so two groups of equal size never trade places;
+    3. then detection order within a group — Python's sort is stable and `changed` is in
+       manifest order, so a group's own sources keep the order the manifest gave them.
+
+    This does NOT reduce what a run drops. A capped run still leaves `len(changed) -
+    MAX_ISSUES_PER_RUN` sources unreported and still exits non-zero; the dropped ones are
+    now the tail of the largest group instead of an arbitrary prefix.
+    """
+    return sorted(changed, key=lambda c: (per_group[c[0]]["changed"], c[0]))
+
+
+def _drifting_groups_in_spend_order(per_group: dict[str, dict]) -> list[str]:
+    """Every group that drifted, in the order `_issue_order` spends the budget on them."""
+    return sorted((g for g, st in per_group.items() if st["changed"]),
+                  key=lambda g: (per_group[g]["changed"], g))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True, help="path to _meta/corpus.yml")
@@ -785,12 +827,19 @@ def main():
             continue
         fetched[(gname, sid)] = new
         if new != old:
-            changed.append((sid, url, old, new))
+            # The group rides along because the issue budget is allocated by group
+            # (corpus-toolkit#69) and the spend loop is far from the only scope that knows
+            # `gname`. It is NOT written to the tsv: that file is read by corpus repos, so
+            # its four columns are public surface.
+            changed.append((gname, sid, url, old, new))
             stats["changed"] += 1
             print(f"CHANGED  {sid}: {old[:12]}… -> {new[:12]}…")
 
     out = config.root / "changed-sources.tsv"
-    out.write_text("".join(f"{a}\t{b}\t{c}\t{d}\n" for a, b, c, d in changed))
+    # Detection order, i.e. manifest order — unchanged by #69's reordering, which applies
+    # to the capped issue spend only. The tsv is not capped, so its order carries no
+    # priority meaning and re-sorting it would churn a file consumers diff.
+    out.write_text("".join(f"{a}\t{b}\t{c}\t{d}\n" for _, a, b, c, d in changed))
 
     recorded = None
     if args.record_baseline:
@@ -818,14 +867,19 @@ def main():
             f.write(f"unseeded={n_unseeded}\n")
 
     opened = attempted = 0
+    attempted_by_group: dict[str, int] = {}
     capped = False
     if args.open_issues and changed and not inert:
         _ensure_label()
-        for sid, url, old, new in changed:
+        for gname, sid, url, old, new in _issue_order(changed, per_group):
             if attempted >= MAX_ISSUES_PER_RUN:
                 capped = True
                 break
             attempted += 1
+            # Per group, because on a capped run "which groups got a ticket" is now a
+            # DECISION this run made and not a fact about the drift. Counted where the
+            # spend happens so it cannot drift from what was actually attempted.
+            attempted_by_group[gname] = attempted_by_group.get(gname, 0) + 1
             opened += bool(_open_issue(sid, url, old, new))
 
     # THE SUMMARY REPORTS WHAT WAS REPORTED, not only what drifted. The previous version
@@ -954,6 +1008,28 @@ def main():
                   f"a broken fetch, or a stale baseline far more often than it is that "
                   f"many genuine upstream revisions. Check the largest group first.",
                   file=sys.stderr)
+            # WHAT A CAPPED RUN MEANS CHANGED WITH #69, so the run says so rather than
+            # leaving it to be inferred. A group sitting at 484/484 in the breakdown above
+            # with no issue against it is now this allocation working as designed — but
+            # "no issue for a group that drifted" is also exactly what the silent-reporting
+            # failure of corpus-toolkit#53 looks like from the outside, and an operator
+            # cannot tell those apart from the breakdown alone.
+            print("BUDGET SPENT SMALLEST-GROUP-FIRST (corpus-toolkit#69): groups were "
+                  "reported in ascending order of drift count, so a small genuine finding "
+                  "files ahead of a bulk one and what was dropped is the tail of the "
+                  "largest group(s) — NOT a delivery failure, and not manifest order. "
+                  "Per group, issues attempted of sources changed: "
+                  + ", ".join(f"{g} ({attempted_by_group.get(g, 0)} of "
+                              f"{per_group[g]['changed']})"
+                              for g in _drifting_groups_in_spend_order(per_group))
+                  + ".", file=sys.stderr)
+            starved = [g for g in _drifting_groups_in_spend_order(per_group)
+                       if not attempted_by_group.get(g)]
+            if starved:
+                print(f"{len(starved)} group(s) with drift were not reported at all: "
+                      + ", ".join(starved) + ". Their drift is in the breakdown above and "
+                      "in changed-sources.tsv; raising nothing for them is the cap, not a "
+                      "finding about them.", file=sys.stderr)
             if n_unseeded:
                 print(f"MEASURED: {n_unseeded} of {n_total} in-scope source(s) have no "
                       f"recorded baseline and therefore drift every run. Seed with "
