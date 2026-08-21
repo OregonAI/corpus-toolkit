@@ -524,6 +524,47 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
+### Unreleased — a corpus declares which registry fields carry a name (corpus-toolkit#128)
+
+**No index rebuild, no schema-version bump, and no change to which bodies you match unless
+you opt in.** `issuing_body_profile`'s free-text fallback now matches the registry fields
+listed in `plugins.issuing_body_name_fields`, which defaults to `["name"]` — the one field
+it always matched.
+
+**Optional, and only if your readers know a body under more than one name:**
+
+```yaml
+plugins:
+  issuing_body_registry: _meta/agency-registry.yml
+  issuing_body_name_fields: ["name", "oar_name", "aliases"]
+```
+
+Order is the order they are tried, and it decides which field a candidate reports as the one
+that matched. A field's value may be a string **or a list of strings** (matched element-wise),
+so an alias list needs no second key. A field naming no column in your registry is not
+rejected — see corpus-toolkit#129 — so check the spelling against the registry yourself.
+
+**Two things change for every corpus, whether or not you declare anything.**
+
+1. **Candidates gain two keys.** An ambiguous or unmatched query returns
+   `{slug, name, matched_field, matched_name}` per candidate instead of `{slug, name}`.
+   `name` is unchanged. `ResponseEnvelope` is open (`extra="allow"`), so nothing drops them;
+   a client that renders candidates should show `matched_name`, which is the string the
+   reader's query actually hit.
+2. **A malformed registry cell no longer takes the tool down.** An entry whose `name` is
+   null, numeric or a list previously raised `AttributeError: 'NoneType' object has no
+   attribute 'lower'` on *every* free-text query against that registry. Those cells are now
+   skipped, and a list-valued `name` is matched element-wise — so a corpus with one of those
+   finds a body it could not find before. Check your registry if you are relying on the
+   crash, which nobody is.
+
+**Sequencing note for `executive-regulatory-frameworks` (ERF#168).** Land the
+`issuing_body_name_fields` declaration in the same PR as the `name` promotion, or before it.
+The promotion moves the OAR chapter title out of `name`, and until `oar_name` is declared,
+every body in the 189-row registry is unfindable by the name printed on its OAR citations —
+which is the defect this key exists to prevent, arriving through the migration that motivated
+it.
+
 ### Unreleased — a JSON source can declare which paths it watches (corpus-toolkit#72)
 
 **Nothing changes unless you opt in.** A `format: json` source with no `watch` hashes exactly
