@@ -23,8 +23,6 @@ import urllib.parse
 import jsonschema
 import yaml
 
-from typing import NamedTuple
-
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.config import name_values
 from corpus_toolkit.repo import (
@@ -253,75 +251,24 @@ def _resolution_universe(config, docs):
     return (_graph_node_ids(config) or _all_content_ids(config)) | set(docs)
 
 
-class RegistryRead(NamedTuple):
-    """ONE READ OF THE ISSUING-BODY REGISTRY, and every question this run asks of it.
+# THE NAME STAYS IMPORTABLE FROM HERE. `RegistryRead` was defined in this module until
+# corpus-toolkit#136 moved it to `config`, and a name a corpus repo can import is public
+# surface wherever it is defined (AGENTS.md). One binding, so there is still one class.
+RegistryRead = config_mod.RegistryRead
 
-    `entries` is None for COULD NOT READ, WHICH IS NEVER THE SAME ANSWER AS AN EMPTY
-    REGISTRY. Both callers gate on that distinction: the per-file checks skip rather than
-    report every document's slug as unregistered, and `_check_config` declines to call a
-    declared name field unmatched by a registry nobody could open.
 
-    The derived answers hang off the read rather than being recomputed per caller.
-    `config._parse_registry_slugs` is documented as THE one registry parser precisely
-    because two derivations of one registry drift into disagreeing about which slugs exist
-    — a third one written inline at a call site is how that starts.
+def _read_registry(config) -> config_mod.RegistryRead:
+    """This run's one read of the issuing-body registry, for every check that asks about it.
+
+    A THIN NAME OVER `config.issuing_body_registry_read`, NOT A SECOND READER. The validator
+    grew `RegistryRead` first (corpus-toolkit#129) while the runtime parsed the same file
+    separately and RAISED where this reported (corpus-toolkit#136) — the same registry
+    answering two ways depending on who asked. The shape moved to `config`, which both `mcp`
+    and `validate` already import, so "unreadable" is decided once. This function stays
+    because a corpus's own scripts may call it, and because `_check_config` reads better
+    taking the read as an argument than reaching into config for it.
     """
-    entries: list | None
-    problem: str | None
-
-    @property
-    def readable(self) -> bool:
-        return self.entries is not None
-
-    @property
-    def slugs(self):
-        """The registry's slugs, or None where there was nothing readable to check."""
-        if self.entries is None:
-            return None
-        return {e["slug"] for e in self.entries if e.get("slug")}
-
-    @property
-    def without_slug(self) -> int:
-        """Entries carrying no slug — rows nothing can ever be attributed to."""
-        return 0 if self.entries is None else sum(1 for e in self.entries if not e.get("slug"))
-
-
-def _read_registry(config) -> RegistryRead:
-    """Read the issuing-body registry once, for every check that asks about it.
-
-    A file that parses to a mapping with a missing or null entries key is READ, and holds
-    no entries — that is a registry saying nothing, and the per-file checks are entitled to
-    act on it exactly as they always have. Unreadable is: gone, unparseable, or shaped like
-    something other than a registry.
-
-    Entry-level shape is the tolerant rule `config._parse_registry_slugs` already uses: a
-    non-mapping entry, or one with no slug, is skipped rather than raised over. It used to
-    raise `KeyError` out of the load, a traceback naming neither the file nor the row —
-    which is a bad message but a loud one, so `_check_config` reports the count instead of
-    letting a broken row disappear.
-    """
-    if not config.issuing_body_registry:
-        return RegistryRead(None, None)
-    key = config.issuing_body_registry_key
-    try:
-        data = yaml.safe_load(config.issuing_body_registry.read_text())
-    except (OSError, yaml.YAMLError) as e:
-        # ONE FINDING, ONE LINE, capped like the schema errors above. A yaml.YAMLError's
-        # message is several lines with a caret diagram, and `Reporter` prints a finding as
-        # a line — pasted in raw, the rest of this sentence ended up under a `^`, reading
-        # as a different message.
-        detail = " ".join(str(e).split())[:200]
-        return RegistryRead(None, f"could not be read: {type(e).__name__}: {detail}")
-    if data is None:
-        data = {}
-    if not isinstance(data, dict):
-        return RegistryRead(None, (f"could not be read as a registry: expected a mapping "
-                                   f"with a {key!r} list, got {type(data).__name__}"))
-    entries = data.get(key) or []
-    if not isinstance(entries, list):
-        return RegistryRead(None, (f"could not be read as a registry: {key!r} must be a "
-                                   f"list of entries, got {type(entries).__name__}"))
-    return RegistryRead([e for e in entries if isinstance(e, dict)], None)
+    return config.issuing_body_registry_read
 
 
 # RFC 2606 reserves these names so they can never belong to anyone: §2 sets aside the
@@ -552,15 +499,15 @@ def _check_registry(config, r, rel, registry):
     if not config.issuing_body_registry:
         # Nothing to name columns of; declaring fields in that state is refused at load.
         return
-    registry_rel = config.issuing_body_registry
-    try:
-        registry_rel = registry_rel.relative_to(config.root)
-    except ValueError:
-        pass
+    # The same spelling of the file the MCP tools' notes use — see
+    # `CorpusConfig.issuing_body_registry_rel`.
+    registry_rel = config.issuing_body_registry_rel
     fields = config.issuing_body_name_fields
 
     if not registry.readable:
-        r.error(rel, f"plugins.issuing_body_registry {registry_rel} {registry.problem} — "
+        # THE SAME SENTENCE THE MCP TOOLS SERVE — see
+        # `CorpusConfig.issuing_body_registry_fault`.
+        r.error(rel, f"{config.issuing_body_registry_fault} — "
                      f"so the issuing-body slug of every document went unchecked, and "
                      f"plugins.issuing_body_name_fields ({', '.join(fields)}) could not be "
                      f"checked against it either. This is 'could not check', not 'nothing "
@@ -588,7 +535,8 @@ def _check_registry(config, r, rel, registry):
                     f"issuing-body slug is reported as unregistered.")
         return
 
-    unmatched = [f for f in fields if not any(name_values(e, f) for e in registry.entries)]
+    unmatched = [f for f in fields
+                 if not any(name_values(e, f) for e in registry.mappings)]
     if not unmatched:
         return
     # A corpus that declared nothing must not be told off for a key it never wrote: the
@@ -599,8 +547,8 @@ def _check_registry(config, r, rel, registry):
            "no override")
     r.warn(rel, (
         f"{how}: no entry in {registry_rel} carries a name in "
-        f"{', '.join(repr(f) for f in unmatched)} — checked {len(registry.entries)} entr"
-        f"{'y' if len(registry.entries) == 1 else 'ies'}, and a name is a string cell or a "
+        f"{', '.join(repr(f) for f in unmatched)} — checked {len(registry.mappings)} entr"
+        f"{'y' if len(registry.mappings) == 1 else 'ies'}, and a name is a string cell or a "
         f"list of strings. A free-text `issuing_body_profile` query can never match on "
         f"{'these fields' if len(unmatched) > 1 else 'that field'}, and matching nothing "
         f"looks exactly like a body this corpus does not hold. "
@@ -695,7 +643,7 @@ def main():
     doc_schema = schema_with_extensions(doc_schema, config)
     # ONE READ, EVERY QUESTION. The per-file checks want the slug set; the config check
     # wants the entries themselves. Reading the file twice is how two answers about one
-    # registry start to disagree (config._parse_registry_slugs carries the same warning).
+    # registry start to disagree (config.RegistryRead carries the same warning).
     registry = _read_registry(config)
 
     docs = {}

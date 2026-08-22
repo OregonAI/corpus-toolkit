@@ -6,6 +6,7 @@ import dataclasses
 import functools
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
@@ -218,21 +219,67 @@ class CorpusConfig:
                 return rel_parts[1]
         return None
 
-    @functools.cached_property
-    def issuing_body_slugs(self) -> frozenset[str] | None:
-        """Every slug in the issuing-body registry, or None when there is no registry to
-        read — in which case "does this value name a body?" is a question with no answer
-        here, and callers must report it as unknown rather than as no.
+    @property
+    def issuing_body_registry_rel(self):
+        """The registry file as a READER names it — repo-relative where it is inside the
+        repo, absolute where a corpus points somewhere else.
 
-        Cached because the index build asks it once per document. Read through this rather
-        than re-parsing the registry: `issuing_body_profile` needs the whole entry and
-        parses it separately, and two parsers disagreeing about which slugs exist is the
-        kind of drift that shows up as a count instead of an error.
+        One spelling, because the validator's findings and the MCP tools' notes are read by
+        the same people about the same file, and an absolute `/tmp/.../_meta/registry.yml`
+        in one and `_meta/registry.yml` in the other reads as two files.
         """
-        if not self.issuing_body_registry or not self.issuing_body_registry.is_file():
+        if not self.issuing_body_registry:
             return None
-        return _parse_registry_slugs(self.issuing_body_registry,
-                                     self.issuing_body_registry_key)
+        try:
+            return self.issuing_body_registry.relative_to(self.root)
+        except ValueError:
+            return self.issuing_body_registry
+
+    @property
+    def issuing_body_registry_fault(self) -> str | None:
+        """One sentence naming the config key, the file and what went wrong — or None where
+        this corpus declares no registry, or declares one that read fine.
+
+        ONE WORDING, FOUR READERS. The validator's finding, `search_corpus`'s filter note,
+        `documents_by_agency`'s attribution note, `issuing_body_profile`'s error and the
+        server's startup warning are all about the same broken file and are read by the
+        same people. Each assembling its own "file + reason" prose is how one of them ends
+        up naming the file and not the key, which is half an answer to an operator who has
+        to change the key.
+        """
+        if not self.issuing_body_registry or self.issuing_body_registry_read.readable:
+            return None
+        return (f"plugins.issuing_body_registry {self.issuing_body_registry_rel} "
+                f"{self.issuing_body_registry_read.problem}")
+
+    @functools.cached_property
+    def issuing_body_registry_read(self) -> RegistryRead:
+        """This corpus's issuing-body registry, read once — entries, slugs, and why not.
+
+        Cached because the index build asks it once per document, and because a corpus with
+        a broken registry would otherwise re-read and re-fail the same file per document.
+        Read through this rather than re-parsing the registry anywhere: two readers
+        disagreeing about which slugs exist is the kind of drift that shows up as a count
+        instead of an error, and a second reader that RAISES where this one reports is
+        corpus-toolkit#136 exactly.
+        """
+        return read_issuing_body_registry(self.issuing_body_registry,
+                                          self.issuing_body_registry_key)
+
+    @property
+    def issuing_body_slugs(self) -> frozenset[str] | None:
+        """Every slug in the issuing-body registry, or None when there is no registry this
+        corpus can read — in which case "does this value name a body?" is a question with no
+        answer here, and callers must report it as unknown rather than as no.
+
+        NONE COVERS BOTH "DECLARES NONE" AND "DECLARES ONE IT CANNOT READ", deliberately:
+        neither can answer the question. They are not the same finding, though — one is a
+        choice and the other a fault — so a caller that reports the difference asks
+        `issuing_body_registry_read.problem`, which names the file and what went wrong.
+        A declared-but-unparseable registry used to RAISE here instead, out of whatever
+        asked, including a live MCP tool call (corpus-toolkit#136).
+        """
+        return self.issuing_body_registry_read.slugs
 
     def registry_slug_for(self, frontmatter: dict, rel_parts: tuple[str, ...]) -> str | None:
         """The issuing-body slug this document is attributed to, or None if it carries no
@@ -514,37 +561,161 @@ def name_values(entry, field: str) -> list[str]:
             if isinstance(v, str)]
 
 
+class RegistryRead(NamedTuple):
+    """ONE READ OF THE ISSUING-BODY REGISTRY, and every question anything asks of it.
+
+    THE one registry reader, for the runtime and the validator alike. It lives in `config`
+    because that is the floor both `mcp` and `validate` already import: the validator grew
+    this shape first (corpus-toolkit#129) and the runtime raised where the validator
+    reported, so the same registry answered two ways depending on who asked
+    (corpus-toolkit#136). One fact declared twice with nothing gating agreement is the
+    shape of five separate defects in this project; this is the one declaration.
+
+    `entries` is None for COULD NOT READ, WHICH IS NEVER THE SAME ANSWER AS AN EMPTY
+    REGISTRY. Every caller gates on that distinction: the per-file checks skip rather than
+    report every document's slug as unregistered, `_check_config` declines to call a
+    declared name field unmatched by a registry nobody could open, and the MCP tools report
+    "could not check" rather than "not a slug".
+
+    `problem` is why, in one line, or None when there was nothing to read (this corpus
+    declares no registry) or nothing wrong. A CALLER MUST NOT READ `problem is None` AS
+    "READABLE" — `readable` answers that, and the two differ for a corpus that declares no
+    registry at all: nothing failed, and there is still nothing to check against.
+
+    The derived answers hang off the read rather than being recomputed per caller. Two
+    derivations of one registry drift into disagreeing about which slugs exist — a third
+    one written inline at a call site is how that starts.
+    """
+    entries: list | None
+    problem: str | None
+
+    @property
+    def readable(self) -> bool:
+        return self.entries is not None
+
+    @staticmethod
+    def _slug_of(entry):
+        """The slug this row can be attributed by, or None — for ANY row shape.
+
+        A registry is hand-maintained, so a row may be a bare string or a number where an
+        entry was meant. `entry["slug"]` and `entry.get(...)` both raise on those, which is
+        why every caller asks through here.
+        """
+        return entry.get("slug") if isinstance(entry, dict) else None
+
+    @property
+    def slugs(self) -> frozenset[str] | None:
+        """The registry's slugs, or None where there was nothing readable to check."""
+        if self.entries is None:
+            return None
+        return frozenset(s for e in self.entries if (s := self._slug_of(e)))
+
+    @property
+    def without_slug(self) -> int:
+        """Rows nothing can ever be attributed to: no `slug`, or not an entry at all.
+
+        BOTH SHAPES, BECAUSE BOTH HAVE THE SAME CONSEQUENCE. A bare string under
+        `entries:` used to be filtered out before anything counted it — the registry read
+        clean, the validator reported nothing, and every document naming that body was
+        reported as unregistered. A check that passes without checking anything is a defect
+        in this repo (AGENTS.md), and this one was silent about exactly the row a human
+        mistyped.
+        """
+        return 0 if self.entries is None else sum(
+            1 for e in self.entries if not self._slug_of(e))
+
+    @property
+    def by_slug(self) -> dict:
+        """Every row that can be attributed to, keyed by its slug. The lookup
+        `issuing_body_profile` serves from, so a row of the wrong shape is skipped there
+        the same way it is counted here rather than raising in one and not the other."""
+        return {s: e for e in (self.entries or []) if (s := self._slug_of(e))}
+
+    @property
+    def mappings(self) -> list:
+        """The rows that are entries — the ones a field can be read off at all. `entries`
+        is what the file holds; `without_slug` counts the difference."""
+        return [e for e in (self.entries or []) if isinstance(e, dict)]
+
+
+def read_issuing_body_registry(registry_path, key: str) -> RegistryRead:
+    """Read the issuing-body registry once, for every question that asks about it.
+
+    Takes a path and a key rather than a `CorpusConfig` because `load()` asks this before
+    there is a config to ask through (the sentinel/registry clash check), and the answer
+    must be the same one every later caller gets.
+
+    A file that parses to a mapping with a missing or null entries key is READ, and holds
+    no entries — that is a registry saying nothing, and callers are entitled to act on it
+    exactly as they always have. UNREADABLE IS: gone, unopenable, unparseable, or shaped
+    like something other than a registry. All four are one condition from a caller's point
+    of view — *this corpus declares a registry it cannot read* — and the reason says which.
+
+    Entry-level shape is tolerant: a non-mapping entry, or one with no slug, is skipped
+    rather than raised over. That used to raise `KeyError` out of the load, a traceback
+    naming neither the file nor the row — which is a bad message but a loud one, so
+    `RegistryRead.without_slug` carries the count and `_check_registry` reports it instead
+    of letting a broken row disappear.
+
+    A REGISTRY IS READ AS TEXT AND NOT EVERY FILE IS ONE: a latin-1 or binary file raises
+    `UnicodeDecodeError`, which is a `ValueError` and so slips an `OSError`/`YAMLError`
+    catch. It is the same condition as a parse failure and is caught here with them.
+    """
+    if not registry_path:
+        return RegistryRead(None, None)
+    path = Path(registry_path)
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+        # ONE FINDING, ONE LINE, because a `Reporter` finding is a line and an MCP note is
+        # a sentence. A yaml.YAMLError's message is several lines with a caret diagram;
+        # pasted in raw, the rest of the sentence ended up under a `^`, reading as a
+        # different message.
+        detail = " ".join(str(e).split())[:200]
+        return RegistryRead(None, f"could not be read: {type(e).__name__}: {detail}")
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return RegistryRead(None, (f"could not be read as a registry: expected a mapping "
+                                   f"with a {key!r} list, got {type(data).__name__}"))
+    entries = data.get(key) or []
+    if not isinstance(entries, list):
+        return RegistryRead(None, (f"could not be read as a registry: {key!r} must be a "
+                                   f"list of entries, got {type(entries).__name__}"))
+    # EVERY ROW, INCLUDING THE ONES THAT ARE NOT ENTRIES. Filtering them out here is how
+    # they stopped being counted at all; `mappings` is for callers that need to read a
+    # field off a row, and `without_slug` is the finding.
+    return RegistryRead(list(entries), None)
+
+
+def _parse_registry_slugs(path: Path, key: str) -> frozenset[str]:
+    """KEPT AS A NAME, NOT AS A SECOND PARSER. Nothing in this toolkit calls it any more —
+    `read_issuing_body_registry` is the one reader — but a name a corpus repo can import is
+    public surface whatever it is prefixed with (AGENTS.md), and absence of a local caller
+    is not evidence of no caller.
+
+    It keeps its old shape: the slugs, or a raise for a registry that cannot be read. The
+    exception is now a `ValueError` naming the file and the problem rather than whatever
+    the file happened to raise — which is the whole point of corpus-toolkit#136 for every
+    caller inside this toolkit, and a message rather than a traceback for any outside it.
+    """
+    read = read_issuing_body_registry(path, key)
+    if not read.readable:
+        raise ValueError(f"{path} {read.problem}")
+    return read.slugs
+
+
 def _registry_slugs_at_load(registry_path, key: str):
     """The registry's slugs during `load()`, or None when there is no registry to read.
 
     `CorpusConfig.issuing_body_slugs` answers the same question but is a cached_property on
-    the config being constructed, so it is unavailable here. Reads through the same key and
-    the same shape; the sentinel/registry clash check is the only caller, and a registry
-    that cannot be read yields None, which that check treats as "unknown" and skips rather
-    than as "no slugs" — a missing registry file must not turn every sentinel into a
-    spurious clash-free pass OR a spurious error.
+    the config being constructed, so it is unavailable here. It reads through the same
+    reader, so the two cannot disagree; the sentinel/registry clash check is the only
+    caller, and a registry that cannot be read yields None, which that check treats as
+    "unknown" and skips rather than as "no slugs" — an unreadable registry must not turn
+    every sentinel into a spurious clash-free pass OR a spurious error.
     """
-    if not registry_path or not Path(registry_path).is_file():
-        return None
-    try:
-        return _parse_registry_slugs(Path(registry_path), key)
-    except Exception:                                            # noqa: BLE001
-        return None
-
-
-def _parse_registry_slugs(path: Path, key: str) -> frozenset[str]:
-    """THE one registry parser. `CorpusConfig.issuing_body_slugs` and the load-time clash
-    check both go through it.
-
-    Its docstring warns that "two parsers disagreeing about which slugs exist is the kind of
-    drift that shows up as a count instead of an error", and the load-time check was briefly
-    a second one that differed in two ways — admitting `slug: null` into the set, and
-    treating a null entry list differently. Sharing the function is the only way that
-    warning stays true.
-    """
-    data = yaml.safe_load(path.read_text()) or {}
-    return frozenset(e["slug"] for e in (data.get(key) or [])
-                     if isinstance(e, dict) and e.get("slug"))
+    return read_issuing_body_registry(registry_path, key).slugs
 
 
 def _validated_slug_sentinels(raw, *, field: str | None, registry_slugs) -> frozenset[str]:

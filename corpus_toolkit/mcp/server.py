@@ -112,6 +112,21 @@ def build_server(config):
     if not _h.get("reachable"):
         print("[corpus-mcp] WARNING: backend reports itself UNREACHABLE — the server "
               "will start, but expect every query to return nothing.", file=sys.stderr)
+    # SAID ONCE, TO THE OPERATOR, because the per-call answer only reaches the agent.
+    #
+    # A corpus that declares a registry it cannot read now STARTS and answers: every
+    # body-shaped tool degrades to "could not check" rather than raising
+    # (corpus-toolkit#136). That is the right answer for the caller and an invisible one
+    # for the person who can fix the file, so the fault is named here too — the same
+    # reasoning as the backend gate above, which validates its plug-in at startup
+    # precisely so a fault does not first surface on some later query. It is a warning and
+    # not a refusal: a broken registry costs this corpus one class of question, and
+    # refusing to start would cost it every other one as well.
+    if config.issuing_body_registry_fault:
+        print(f"[corpus-mcp] WARNING: {config.issuing_body_registry_fault} — the server "
+              f"will start, but issuing_body_profile can look up no body, and every tool "
+              f"that reports whether a slug names a registry entry answers 'could not "
+              f"check' instead. Fix the file and restart.", file=sys.stderr)
     # Log the SDK. The failure that motivated the compat seam is invisible in the
     # toolkit's own version number: same toolkit, different SDK major, unstartable server.
     _sdk.report()

@@ -73,13 +73,21 @@ then — a search that passes no `issuing_body` is unchanged, key for key:
 `matched: "issuing_body"` **with** `registry_checked: true` means checked, and
 the value is not a registry **slug**. The same `matched` with
 `registry_checked: false` means the question was never asked — this corpus
-declares no registry, or declares one that is not there to read (the `note` says
-which, because a broken path is a fault and no registry is a choice). Serving
-the second as the first would tell a caller its slug is wrong on every corpus
-that has no registry to be wrong against — the collapse `slug_in_registry: null`
-already exists to prevent below. A registry that IS present and does not parse
-reaches neither: it raises out of the config read before the filter resolves
-(corpus-toolkit#136).
+declares no registry, or declares one it **could not read** (the `note` says
+which, and names the file and the reason, because a broken registry is a fault
+and no registry is a choice). Serving the second as the first would tell a
+caller its slug is wrong on every corpus that has no registry to be wrong
+against — the collapse `slug_in_registry: null` already exists to prevent below.
+
+**A registry that cannot be read is one condition however it fails** — missing,
+unopenable, unparseable, not text, or shaped like something else. Every one of
+them answers `registry_checked: false` with the reason in the `note`, which
+names the config key and the file as well as what went wrong. Until
+corpus-toolkit#136 only a missing FILE did: a registry that was present and did
+not parse raised out of the config read instead, so one broken YAML line reached
+the caller as a failed tool call rather than a stated limit, and took every
+body-shaped tool on the server with it. A server whose registry cannot be read
+still starts, still serves, and says so on stderr at startup.
 
 **"Not a slug" is not "not a body", and only the first is ever claimed.**
 `issuing_body_profile` also takes a registry **name**, so a caller may hold one.
@@ -331,6 +339,17 @@ corpus without a graph answers the first row above.
   registry holding no entries is reported as an empty registry rather than as a
   misspelled field — "could not check" is never served as "is not there"
   (response convention 5).
+
+  **A registry this corpus cannot read is answered, not raised.** The tool
+  returns the envelope plus an `error` naming the file, the config key that
+  declared it and what went wrong, and says explicitly that this is a broken
+  configuration rather than a fact about the body asked for. It is deliberately
+  not the `no unique issuing body match` wording: "could not read the registry",
+  "the registry is empty" and "that body is not in the registry" are three
+  findings with three different fixes, and only the first is known here
+  (corpus-toolkit#136). A single registry **row** carrying no `slug` is skipped
+  rather than raised over, so the bodies that do have one are still served; the
+  validator reports those rows by count.
 
   **Uniqueness is per body, not per name.** A query hitting a body's `name`, its
   `oar_name` and two of its aliases is one hit, not four; otherwise a wider net

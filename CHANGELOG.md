@@ -17,6 +17,60 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — a registry this corpus cannot read is an answer, not a traceback (corpus-toolkit#136)
+
+**No corpus needs to do anything, and one class of tool crash stops happening.**
+`CorpusConfig.issuing_body_slugs` answered `None` — the documented "could not check" that
+`documents_by_agency`'s `slug_in_registry: null` and `search_corpus`'s
+`registry_checked: false` both rest on — only when the declared registry path was **not a
+file**. A registry that WAS a file and did not parse raised `yaml.ParserError` out of
+whatever asked, including a live MCP tool call. One mistyped YAML line therefore took out
+every body-shaped tool on a server, and the index build with them, instead of degrading
+them.
+
+**Missing, unopenable, unparseable and wrongly shaped are now one condition** — *this
+corpus declares a registry it cannot read* — reported the way the missing file already
+was, with the reason carried alongside so every caller can name the file and say what went
+wrong. `search_corpus`'s `issuing_body_filter.note`, `documents_by_agency`'s
+`attribution.note` and `issuing_body_profile`'s `error` all say it; the last of those used
+to raise. A registry **row** with no `slug` no longer raises `KeyError` out of
+`issuing_body_profile` either — it is skipped, and the bodies that have a slug are served.
+
+**Three findings stay three findings.** "Could not read the registry", "the registry is
+empty" and "that body is not in the registry" have different causes and different fixes,
+and the first is never served as either of the others (CONTEXT.md; response convention 5).
+
+**The operator is told once, at startup.** A per-call note reaches the agent, not the
+person who can fix the file, so a server whose declared registry cannot be read prints a
+WARNING on stderr naming the file and the reason. It still starts: a broken registry costs
+one class of question, and refusing to start would cost every other one too.
+
+**A row that is not an entry at all is now counted.** A bare string or a number under
+`entries:` was filtered out before anything counted it, so the registry read clean, the
+validator reported nothing, and every document naming that body was reported as
+unregistered — a check that passed without checking. It is now reported alongside a row
+that carries no `slug`: both are rows nothing can be attributed to, and both fail
+`corpus-validate-frontmatter`. **No live corpus has one** (measured across the four
+registries the nine corpora declare).
+
+**One reader, in `config`.** `RegistryRead` moved from `validate/frontmatter.py` to
+`corpus_toolkit.config`, which both `mcp` and `validate` already import, and it is the one
+reader the runtime, the load-time sentinel check and the validator all go through. The
+validator grew this shape first (#129) while the runtime parsed the same file separately
+and raised where the validator reported — one fact declared twice, which is the shape of
+five separate defects in this project. The wording of "this registry is broken" is
+likewise declared once, as `CorpusConfig.issuing_body_registry_fault`, so the validator's
+finding, the three tool responses and the startup warning cannot drift into naming
+different halves of it.
+
+**Nothing importable was removed.** `validate.frontmatter.RegistryRead` is now a binding
+to the class in `config`, `validate.frontmatter._read_registry(config)` delegates, and
+`config._parse_registry_slugs(path, key)` is kept as a name over the one reader — it
+returns the slugs as it always did, and raises a `ValueError` naming the file and the
+problem where it used to raise whatever the file raised. Nothing in the toolkit calls it;
+a corpus repo might, and absence of a local caller is not evidence (AGENTS.md).
+
+
 ### Changed — a corpus without a front door no longer validates (corpus-toolkit#11)
 
 **This can turn your CI red on the next pin bump, and that is the point.**
