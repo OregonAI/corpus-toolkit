@@ -421,7 +421,7 @@ def _reserved_name(host: str) -> str | None:
     not. They are as dead as a `.invalid` host, but they are dead under a different rule
     (RFC 5735/6890 special-purpose addresses), and the value of naming RFC 2606 is that
     "this is a placeholder" stops being a judgement about someone's intent. Filed as
-    corpus-toolkit#136 rather than smuggled in under a citation that does not cover it.
+    corpus-toolkit#138 rather than smuggled in under a citation that does not cover it.
     """
     if not host:
         return None
