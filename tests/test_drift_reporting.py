@@ -134,6 +134,9 @@ class _DriftRun(unittest.TestCase):
         # shape is a filing that is ATTEMPTED and does not exist afterwards, and no test
         # could express it while the mock returned True unconditionally.
         self.failing_ids: set[str] = set()
+        # Same idea for the group findings of ADR 0010: a finding that was ATTEMPTED and
+        # does not exist afterwards is a different outcome from one that was never due.
+        self.failing_findings: set[str] = set()
         self.root = Path(tempfile.mkdtemp())
         (self.root / "_meta" / "sources").mkdir(parents=True)
         (self.root / "documents").mkdir()
@@ -191,8 +194,12 @@ class _DriftRun(unittest.TestCase):
              mock.patch.object(changes, "_open_issue",
                                side_effect=lambda sid, *a: sid not in self.failing_ids
                                ) as open_issue, \
+             mock.patch.object(changes, "_open_group_finding",
+                               side_effect=lambda g, *a, **k: g not in self.failing_findings
+                               ) as group_finding, \
              redirect_stdout(out), redirect_stderr(err):
             self.open_issue = open_issue
+            self.group_finding = group_finding
             try:
                 changes.main()
                 code = 0
@@ -293,7 +300,10 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         self.group("wrd", 3, baseline="stale")
         code, out, err = self.run_cli("--open-issues")
         filed = self._filed()
-        self.assertEqual(len(filed), changes.MAX_ISSUES_PER_RUN,
+        # All three groups drift wholly, so each also files a group drift finding out of
+        # the same budget (ADR 0010). The cap still bounds the run; what it buys changed.
+        self.assertEqual(self.group_finding.call_count, 3)
+        self.assertEqual(len(filed), changes.MAX_ISSUES_PER_RUN - 3,
                          "the cap is not weakened — it still bounds the run")
         self.assertEqual({"oam-0", "oam-1"}, {s for s in filed if s.startswith("oam-")},
                          "every source in the smallest drifting group must be filed")
@@ -316,11 +326,14 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         self.group("alpha", n, baseline="stale", file_stem="b-second")
         self.run_cli("--open-issues")
         filed = self._filed()
-        self.assertEqual(len(filed), changes.MAX_ISSUES_PER_RUN)
+        # Both groups drift wholly, so two of the slots go to group findings (ADR 0010).
+        tickets = changes.MAX_ISSUES_PER_RUN - 2
+        self.assertEqual(self.group_finding.call_count, 2)
+        self.assertEqual(len(filed), tickets)
         self.assertEqual(len([s for s in filed if s.startswith("alpha-")]), n,
                          "the tie must be broken by the group name, so `alpha` files whole")
         self.assertEqual([s for s in filed if s.startswith("zebra-")],
-                         [f"zebra-{i}" for i in range(changes.MAX_ISSUES_PER_RUN - n)],
+                         [f"zebra-{i}" for i in range(tickets - n)],
                          "within a group the manifest's own order must survive the sort")
 
 
@@ -335,8 +348,9 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         self.assertEqual(code, 1)
         self.assertIn("smallest-group-first", err.lower())
         self.assertIn("oam (2/2 of 2)", err)
-        self.assertIn(f"oar ({changes.MAX_ISSUES_PER_RUN - 2}/"
-                      f"{changes.MAX_ISSUES_PER_RUN - 2} of 30)", err)
+        # Three whole-group findings and `oam`'s two tickets come out of the budget first.
+        oar_tickets = changes.MAX_ISSUES_PER_RUN - 3 - 2
+        self.assertIn(f"oar ({oar_tickets}/{oar_tickets} of 30)", err)
         self.assertIn("deq (0/0 of 40)", err)
         self.assertIn("not reached by the budget", err)
 
@@ -349,8 +363,9 @@ class BudgetIsSpentSmallestGroupFirstTest(_DriftRun):
         self.group("wrd", 3, baseline="stale")
         code, out, err = self.run_cli("--open-issues")
         self.assertEqual(code, 1)
-        self.assertIn(f"deq ({changes.MAX_ISSUES_PER_RUN - 5}/"
-                      f"{changes.MAX_ISSUES_PER_RUN - 5} of 40)", err,
+        # Three whole-group findings, then oam's 2 and wrd's 3 tickets, then the rest.
+        deq_tickets = changes.MAX_ISSUES_PER_RUN - 3 - 5
+        self.assertIn(f"deq ({deq_tickets}/{deq_tickets} of 40)", err,
                       "the run is capped and the line is printed")
         self.assertNotIn("not reached by the budget", err)
 
@@ -419,6 +434,9 @@ class UnseededManifestIsNotDriftTest(_DriftRun):
         self.group("counties", 4, baseline=None)
         code, out, err = self.run_cli("--open-issues")
         self.open_issue.assert_not_called()
+        # Including the group drift finding of ADR 0010, whose founding case this is:
+        # oregon-counties reported 3,447 of 3,447 changed with every baseline empty.
+        self.group_finding.assert_not_called()
         self.assertEqual(code, 1, "detection is inert here; the run must not report success")
         self.assertIn("--record-baseline", err)
 
@@ -950,6 +968,353 @@ class WatchPathReportingTest(_DriftRun):
         self.assertIn("[1 not compared]", out)
         self.assertIn("1 skipped (not compared)", out,
                       f"the tally disagreed with the two lines above it:\n{out}")
+
+
+class GroupDriftFindingTest(_DriftRun):
+    """ADR 0010: a group where EVERY COMPARED source changed may get one finding of its own.
+
+    It states that they changed together and asserts nothing about why. ERF run
+    31022774644 is the case it exists for: `oar` was 484 of 484 changed sources, 89% of the
+    drift and a single template-level cause, and the budget — spent smallest-group-first
+    since corpus-toolkit#69 — reached it last and filed nothing at all for it.
+    """
+
+    def _findings(self):
+        return [c.args[0] for c in self.group_finding.call_args_list]
+
+    def test_a_group_where_every_compared_source_changed_gets_a_finding(self):
+        self.group("oar", 4, baseline="stale")
+        self.group("oam", 3, baseline="current")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(self._findings(), ["oar"],
+                         "the whole-group drift got no finding of its own")
+
+    def test_the_finding_accompanies_the_individual_tickets_and_never_replaces_them(self):
+        """ADR 0010, and the one place issue #132's own sketch says the opposite. It
+        proposed filing one issue for the group "instead of individual issues for its
+        sources" (the sketch's own wording; CONTEXT.md avoids "group issue", which reads
+        as a diagnosis of the group).
+
+        The tool observes bytes, not causes, so a finding is not entitled to speak for a
+        source that changed for its own reasons — and suppressing would reproduce, one
+        level down, the starvation corpus-toolkit#69 had just removed."""
+        self.group("oar", 4, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(self._findings(), ["oar"])
+        self.assertEqual([c.args[0] for c in self.open_issue.call_args_list],
+                         ["oar-0", "oar-1", "oar-2", "oar-3"],
+                         "the group finding suppressed the individual tickets")
+
+    def test_a_group_holding_one_compared_source_gets_no_finding(self):
+        """ADR 0010: more than one compared source. One source cannot corroborate itself,
+        and its own ticket already says everything the finding would — so the finding
+        would spend a budget slot to say the same thing twice. Three ERF groups hold
+        exactly one source (`constitution`, `external`, `public-utility-commission-policies`)."""
+        self.group("constitution", 1, baseline="stale")
+        self.group("oar", 3, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(self._findings(), ["oar"],
+                         "a group of one filed a finding that restates its own ticket")
+
+    def test_a_group_that_was_never_compared_gets_no_finding(self):
+        """THE REQUIRED CASE, and the one that decided ADR 0010's shape. oregon-counties
+        reported 3,447 of 3,447 sources changed (corpus-toolkit#68) because every baseline
+        was empty: nothing was ever compared, and a finding there would have diagnosed an
+        inert run with confidence.
+
+        The manifest is only partly unseeded, so the run is NOT inert — the existing
+        wholly-unseeded refusal cannot be what makes this pass."""
+        self.group("counties", 3, baseline=None)
+        self.group("oar", 2, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(self._findings(), ["oar"],
+                         "an unseeded group reported drift that never happened")
+
+    def test_a_fetch_failure_is_not_a_compared_source_either(self):
+        """The other half of "an uncompared source is not a changed source" (ADR 0010), and
+        the one ERF actually hit: the DEQ group read 52/52 off a broken fetch.
+
+        Two of the four were never compared, so the finding is about the two that were —
+        and it must say `2 of 2`, not `2 of 4`, which would report the group as 50% drifted
+        and contradict the rule that fired it."""
+        self.group("blocked", 4, baseline="stale")
+        for i in (0, 1):
+            self.bodies[f"https://example.gov/blocked/{i}"] = OSError("HTTP Error 403")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(self._findings(), ["blocked"],
+                         "every source that was compared changed, and nothing was filed")
+        self.assertEqual(self.group_finding.call_args_list[0].args,
+                         ("blocked", ["blocked-2", "blocked-3"], 2, 4),
+                         "the finding counted sources it never compared — or lost track "
+                         "of how many were in the group at all")
+
+    def test_a_source_that_is_both_unseeded_and_unfetchable_is_subtracted_once(self):
+        """`unseeded` is counted before the fetch and `uncompared` after it, so ONE source
+        that has no baseline and then fails to fetch increments both. Deriving the compared
+        count as `total - unseeded - uncompared` removes it twice — here that reads 1
+        compared source where there are 2, and the finding silently disappears under the
+        "more than one compared source" rule. The count is measured at the comparison
+        instead, so this shape cannot arise."""
+        (self.root / "_meta" / "sources" / "mixed.yml").write_text(textwrap.dedent("""\
+            group: mixed
+            sources:
+              - id: "mixed-gone"
+                url: "https://example.gov/mixed/gone"
+                format: html
+                sha256: ""
+              - id: "mixed-a"
+                url: "https://example.gov/mixed/a"
+                format: html
+                sha256: "stale"
+              - id: "mixed-b"
+                url: "https://example.gov/mixed/b"
+                format: html
+                sha256: "stale"
+            """))
+        self.bodies["https://example.gov/mixed/gone"] = OSError("HTTP Error 403")
+        self.bodies["https://example.gov/mixed/a"] = _body(1)
+        self.bodies["https://example.gov/mixed/b"] = _body(2)
+
+        code, out, err = self.run_cli("--open-issues")
+
+        self.assertEqual(self._findings(), ["mixed"],
+                         f"the finding vanished: the group reads as 1 compared source, "
+                         f"below the more-than-one rule:\n{out}")
+        self.assertEqual(self.group_finding.call_args_list[0].args,
+                         ("mixed", ["mixed-a", "mixed-b"], 2, 3),
+                         f"the both-markers source was subtracted twice:\n{out}")
+
+    def test_one_compared_source_holding_still_is_enough_to_withhold_the_finding(self):
+        """ADR 0010 rejected ">80%" on principle, not preference: 100% is the only
+        threshold that is itself an observation, and the sources that did NOT change are
+        evidence against the very pattern the finding would assert. Nine of ten is nine of
+        ten, and the tenth says the ten did not move together.
+
+        Sized so a share rule and the observation rule disagree: 9 of 10 is 90%."""
+        self.group("oar", 9, baseline="stale")
+        self.group("oar", 1, baseline="current", start=9, file_stem="oar-stable")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("oar 9/10", out, "the fixture is not 90% drift")
+        self.assertEqual(self._findings(), [],
+                         "a group with a source that held still still spoke for it")
+
+    def test_a_group_whose_every_fetch_failed_gets_no_finding(self):
+        """The adjacent shape to the unseeded one, and the reason the rule is stated over
+        COMPARED sources rather than over the group. A group where nothing was fetched has
+        no changed source and no compared source; "every compared source changed" is
+        vacuously true of it, and a finding would report drift on a group the run never
+        looked at."""
+        self.group("blocked", 2, baseline="stale")
+        self.group("oar", 2, baseline="stale")
+        for i in (0, 1):
+            self.bodies[f"https://example.gov/blocked/{i}"] = OSError("HTTP Error 403")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("blocked 0/2 [2 not compared]", out, "the fixture compared nothing")
+        self.assertEqual(self._findings(), ["oar"],
+                         "a group nothing was fetched from reported whole-group drift")
+
+    def test_the_finding_consumes_a_slot_and_is_filed_before_the_individual_tickets(self):
+        """Both orderings of ADR 0010 in one fixture, because they only hold together.
+
+        The cap is the cap: exempting the finding would mean a corpus with twenty-seven
+        bulk-drifting groups files twenty-seven issues past a limit of twenty-five. And the
+        finding files FIRST — corpus-toolkit#69 spends the budget smallest-drifting-group
+        first, which reaches the largest group last, so a finding queued behind the tickets
+        is exactly the finding that never files. Here the group fills the budget on its
+        own: if the finding were filed last there would be no slot left for it."""
+        n = changes.MAX_ISSUES_PER_RUN
+        self.group("oar", n, baseline="stale")
+
+        code, out, err = self.run_cli("--open-issues")
+
+        self.assertEqual(self._findings(), ["oar"],
+                         "the finding was queued behind a budget it could not outlast")
+        self.assertEqual(self.open_issue.call_count, n - 1,
+                         "the finding was filed outside the cap, so the cap is not the cap")
+        self.assertEqual(code, 1, "a capped run is still not a clean run")
+        self.assertIn("STOPPED after", err)
+
+    def test_findings_the_budget_did_not_reach_are_not_swallowed_silently(self):
+        """The findings come out of the cap, so enough of them exhaust it on their own —
+        and a finding the budget never reached is exactly the silence corpus-toolkit#132
+        was opened about. It must be said, not left to be inferred from a count."""
+        n = changes.MAX_ISSUES_PER_RUN + 1
+        for i in range(n):
+            self.group(f"g{i:02d}", 2, baseline="stale")
+
+        code, out, err = self.run_cli("--open-issues")
+
+        self.assertEqual(self.group_finding.call_count, changes.MAX_ISSUES_PER_RUN,
+                         "the findings ignored the cap they are supposed to spend from")
+        self.assertEqual(self.open_issue.call_count, 0,
+                         "the budget was spent on findings; no slot is left to invent")
+        self.assertEqual(code, 1)
+        self.assertIn("1 group drift finding(s) were not filed", err,
+                      f"a finding the budget never reached went unmentioned:\n{err}")
+        # NAMED, not counted. Every neighbouring message names its groups, and a bare
+        # count leaves the reader to work out which group is missing an issue by
+        # subtracting two lists — the inference this message exists to remove.
+        self.assertIn("g25", err.split("were not filed")[1],
+                      f"the dropped finding was counted but not named:\n{err}")
+
+    def test_the_unreached_group_line_does_not_deny_a_finding_that_was_filed(self):
+        """`N group(s) with drift were not reached by the budget at all ... raising nothing
+        for them is the cap` predates ADR 0010, and a group finding makes it false: those
+        groups now have an issue. An operator who believes the line stops looking, and the
+        issue it denies is the one corpus-toolkit#132 exists to create."""
+        for i in range(5):
+            self.group(f"g{i:02d}", 8, baseline="stale")
+
+        code, out, err = self.run_cli("--open-issues")
+
+        filed = [c.args[0] for c in self.open_issue.call_args_list]
+        self.assertNotIn("g04-0", filed, "the fixture must starve the last group")
+        self.assertIn("g04", self._findings(), "which still gets a finding of its own")
+        self.assertNotIn("raising nothing for them", err,
+                         f"the run denied an issue it had just filed:\n{err}")
+        self.assertIn("did file a group drift finding", err)
+
+    def test_the_largest_drifting_group_files_its_finding_first(self):
+        """The ADR settles the findings' order against the TICKETS, not against each
+        other, so this is a choice the ADR left open. It is observable only when the
+        findings alone exhaust the budget — and then no per-source ticket files at all, so
+        no group in the list is covered by tickets instead. What is left to prefer by is
+        the evidence: dropping the largest group's finding discards the most of what the
+        run observed. Ties by group name, so a re-run over the same drift files the same
+        set."""
+        n = changes.MAX_ISSUES_PER_RUN
+        # Named to sort LAST, so alphabetical order and drift order disagree — a fixture
+        # where they coincide cannot tell which one the run used.
+        self.group("zbig", 4, baseline="stale")
+        for i in range(n):
+            self.group(f"g{i:02d}", 2, baseline="stale")
+
+        code, out, err = self.run_cli("--open-issues")
+
+        self.assertEqual(self._findings()[0], "zbig",
+                         "the group with the most evidence behind it was dropped first")
+        self.assertNotIn("g24", self._findings(),
+                         "and the budget really did run out before the last one")
+
+    def test_the_run_says_which_groups_it_filed_a_finding_for(self):
+        """A new kind of issue in the tracker that the run's own log never mentions is the
+        corpus-toolkit#53 shape: the summary counts what drifted, and an operator reads it
+        as what was reported."""
+        self.group("oar", 3, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("1 group drift finding(s) opened or already open, 0 failed: oar",
+                      out, f"the run filed a finding and did not say so:\n{out}")
+
+    def test_a_finding_that_failed_to_file_is_not_reported_as_filed(self):
+        """The other half of corpus-toolkit#53: attempted is not opened."""
+        self.group("oar", 3, baseline="stale")
+        self.failing_findings = {"oar"}
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("0 group drift finding(s) opened or already open, 1 failed", out,
+                      f"a finding that does not exist was counted as filed:\n{out}")
+
+
+class GroupFindingIssueTest(unittest.TestCase):
+    """What the finding actually files. The seam is the same one `_open_issue` uses."""
+
+    def test_an_already_open_finding_is_not_filed_again(self):
+        """A whole-group drift persists across runs until somebody resolves it, and the
+        run fires weekly. Without the dedupe search that `_open_issue` has, the same
+        unresolved condition files a new issue every week."""
+        with mock.patch.object(changes.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(changes.subprocess, "run", side_effect=[
+                 _completed(0, "1"), _completed(0, "https://github.com/o/r/issues/2"),
+             ]) as run:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                ok = changes._open_group_finding("oar", ["oar-0", "oar-1"], 2, 2)
+        self.assertTrue(ok, "an open finding already reports this group")
+        self.assertEqual(run.call_args_list[0].args[0][1:3], ["issue", "list"],
+                         "the finding did not look for its own title before filing")
+        self.assertEqual(run.call_count, 1,
+                         "a second issue was filed for a condition already tracked")
+
+    def _file(self, group, ids, compared, in_scope=None):
+        """File one finding against a mocked `gh` and return (search argv, create argv)."""
+        with mock.patch.object(changes.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(changes.subprocess, "run", side_effect=[
+                 _completed(0, "0"), _completed(0, "https://github.com/o/r/issues/2"),
+             ]) as run:
+            changes._open_group_finding(group, ids, compared,
+                                        in_scope if in_scope is not None else compared)
+        return run.call_args_list[0].args[0], run.call_args_list[1].args[0]
+
+    @staticmethod
+    def _opt(argv, name):
+        return argv[argv.index(name) + 1]
+
+    def test_the_title_carries_no_counts_so_the_condition_files_once(self):
+        """ADR 0010: `_open_issue` prevents re-filing by searching for its own title, and
+        `Group drifted: oar (484 of 484)` breaks that — the run that reads 480 tomorrow
+        writes a different title, the search misses, and the same unresolved condition
+        files a second issue. The counts belong in the body."""
+        first_search, first_create = self._file("oar", [f"oar-{i}" for i in range(484)], 484)
+        _, later_create = self._file("oar", [f"oar-{i}" for i in range(480)], 480)
+
+        title = self._opt(first_create, "--title")
+        self.assertEqual(title, self._opt(later_create, "--title"),
+                         "the title moved while the condition persisted")
+        self.assertNotIn("484", title, "a count in the title defeats the dedupe search")
+        self.assertIn(f'in:title "{title}"', first_search,
+                      "the search must look for the title that is actually filed")
+        body = self._opt(first_create, "--body")
+        self.assertIn("484 of 484", body, "the counts have to be somewhere")
+        self.assertIn("oar-0", body, "and a sample of the ids behind them")
+
+    def test_it_refuses_to_write_a_finding_about_a_group_that_partly_changed(self):
+        """`- **Compared sources that changed**: 480 of 484` is the ">80%" finding ADR 0010
+        rejected, and nothing in this function stops it being rendered: the two numbers
+        arrive independently and the rule that they be equal lives at the one call site.
+        This is the gate, not a second copy of the rule — the rule stays where it is, and
+        the writer refuses anything that does not satisfy it."""
+        with mock.patch.object(changes.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(changes.subprocess, "run") as run:
+            with self.assertRaises(ValueError) as e:
+                changes._open_group_finding("oar", [f"oar-{i}" for i in range(480)], 484, 484)
+        self.assertIn("480", str(e.exception))
+        self.assertIn("484", str(e.exception))
+        run.assert_not_called()
+
+    def test_the_body_says_how_much_of_the_group_was_never_compared(self):
+        """`2 of 2` is true of a group of two and of a group of five where three were
+        never compared, and those are the two shapes corpus-toolkit#67 built the per-group
+        breakdown to separate. The denominator is honest because it excludes them; the
+        report has to carry what it excluded, or the reader cannot tell how much of the
+        group the finding actually speaks for."""
+        _, create = self._file("oar", ["oar-3", "oar-4"], 2, in_scope=5)
+        body = self._opt(create, "--body")
+        self.assertIn("2 of 2", body)
+        self.assertIn("5", body, "the group's size in scope is not in the report")
+        self.assertIn("3", body, "nor how many of them were never compared")
+        self.assertIn("not compared", body)
+
+    def test_the_body_links_the_run_that_found_it_when_there_is_one(self):
+        """ADR 0010 puts the run link in the body. A finding says only that these sources
+        changed together; the run it came out of is where the breakdown, the per-source
+        hashes and `changed-sources.tsv` are, and without the link a reader has to guess
+        which weekly run produced the issue they are holding."""
+        env = {"GITHUB_SERVER_URL": "https://github.com",
+               "GITHUB_REPOSITORY": "OregonAI/erf", "GITHUB_RUN_ID": "31022774644"}
+        with mock.patch.dict(changes.os.environ, env, clear=False):
+            _, create = self._file("oar", ["oar-0", "oar-1"], 2)
+        self.assertIn("https://github.com/OregonAI/erf/actions/runs/31022774644",
+                      self._opt(create, "--body"))
+
+    def test_the_body_does_not_invent_a_run_link_outside_actions(self):
+        """The environment does not always say. Half a url built from missing variables is
+        a dead link that looks like a citation."""
+        for var in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"):
+            with mock.patch.dict(changes.os.environ, {}, clear=False):
+                changes.os.environ.pop(var, None)
+                _, create = self._file("oar", ["oar-0", "oar-1"], 2)
+            body = self._opt(create, "--body")
+            self.assertNotIn("actions/runs", body,
+                             f"a run link was built with {var} missing:\n{body}")
 
 
 if __name__ == "__main__":
