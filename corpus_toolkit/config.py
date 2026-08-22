@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import ipaddress
 import re
+import socket
 import urllib.parse
 from pathlib import Path
 from typing import NamedTuple
@@ -747,9 +749,8 @@ def _reserved_name(host: str) -> str | None:
     callers own the message for a value that is not a usable URL.
 
     WHERE THIS RULE STOPS: an address literal is not a NAME, so `http://127.0.0.1:8000`
-    is not reserved here. It is refused, under its own rule and its own message, by
-    `address_literal` below — RFC 2606 does not cover it, and folding it in under that
-    citation would make the citation wrong (corpus-toolkit#138).
+    is not reserved here. `_address_literal` below owns it, and says why it is a separate
+    rule rather than a widening of this one.
     """
     if not host:
         return None
@@ -763,6 +764,89 @@ def _reserved_name(host: str) -> str | None:
     # (the reserved name is the reason it can never resolve); the marker only has to speak
     # for the hosts that rule no longer covers.
     return "REPLACE-ME" if _TEMPLATE_MARKER in labels else None
+
+
+def _address_literal(host: str) -> "ipaddress.IPv4Address | ipaddress.IPv6Address | None":
+    """`host` as an IP address, or None where it is a NAME rather than an address.
+
+    A SECOND RULE, NOT A WIDENING OF THE FIRST (corpus-toolkit#138) — the one place that
+    argument is made. RFC 2606 reserves NAMES, so `http://localhost:8000` failed the gate
+    and `http://127.0.0.1:8000`, the same dead pointer differently spelled, sailed through
+    it. The two are refused for genuinely different reasons — a name that can never
+    resolve, and an address that resolves only to the machine asking (RFC 5735/6890) —
+    the messages say which, and folding the second under the first would make a cited RFC
+    wrong about the value it is quoted at.
+
+    `ipaddress.ip_address` ALONE IS NOT ENOUGH, MEASURED. Python's parser takes strict
+    dotted quads only and has rejected leading zeros since CVE-2021-29921, so it raises on
+    `127.1` and on `127.000.000.001` — the two shortenings corpus-toolkit#138 names, and
+    the two every resolver in the path turns into 127.0.0.1. A guard built on it alone
+    would have shipped with exactly the hole it was written to close. `socket.inet_aton`
+    is the classic parser those forms are written for, and it is consulted second: it
+    accepts one-, two-, three- and four-part forms and returns four packed bytes, which
+    `ip_address` re-reads as the address a browser would reach.
+
+    IPv4-MAPPED IPv6 IS UNWRAPPED, because `IPv6Address("::ffff:127.0.0.1").is_loopback`
+    is False and the address is the loopback: the classification below would otherwise
+    name the wrong reason for a host that reaches the agent's own machine.
+    """
+    if not host:
+        return None
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            addr = ipaddress.ip_address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            return None
+    return getattr(addr, "ipv4_mapped", None) or addr
+
+
+def _why_not_a_front_door(
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    """Why this particular address cannot be a corpus's front door.
+
+    EVERY LITERAL IS REFUSED, LOOPBACK OR NOT, AND THAT IS A DELIBERATE CHOICE.
+    corpus-toolkit#138's own remedy asks for the class — "an IPv4/IPv6 literal host
+    (`ipaddress.ip_address(host)` parses) is never a corpus's front door, loopback or not
+    — a public official-text page has a name" — while the maintainer comment beneath it
+    names only loopback, the case that prompted the issue. Going with the wider of the two
+    because the line drawn at loopback is a line a one-character edit walks through, and
+    each neighbouring class is at least as bad:
+
+      * `0.0.0.0` and `::` are the WILDCARD A SERVER BINDS TO, never an address a client
+        connects to. A corpus that pasted the address its dev server printed has pasted
+        this one about as often as it has pasted 127.0.0.1.
+      * `192.168.*`, `10.*`, `172.16-31.*`, `169.254.*` and `fc00::/7` resolve on the
+        READER'S OWN NETWORK. That is worse than a dead pointer, not better: it can
+        answer, from a host that has nothing to do with this corpus, differently for
+        every reader.
+      * a globally routable literal like `8.8.8.8` genuinely can answer — and still names
+        no publisher, cannot be checked against any TLS certificate name, and stops being
+        this corpus's front door the day the host is renumbered. Official text is
+        published under a name; all nine live corpora and every publisher they draw on
+        use one.
+
+    The cost of the wide rule is a corpus that had a name available and typed an address
+    instead, which the finding tells it to fix in one line. The cost of the narrow one is
+    the class staying half-open.
+    """
+    if addr.is_loopback:
+        return ("a loopback address, which resolves only to the machine asking — on an "
+                "agent's own host, to whatever happens to be listening there")
+    if addr.is_unspecified:
+        return ("the wildcard address a server BINDS to, which is never an address a "
+                "client can connect to")
+    if addr.is_link_local:
+        return ("a link-local address, which reaches only whatever shares the reader's "
+                "network segment")
+    if addr.is_private:
+        return ("a private address, which resolves on the reader's own network rather "
+                "than on the publisher's — differently for every reader, and for some of "
+                "them it answers")
+    return ("routable, and still not a front door: it names no publisher, matches no TLS "
+            "certificate name, and stops pointing at this corpus the day the host is "
+            "renumbered")
 
 
 def front_door_fault(value: str | None) -> FrontDoorFault | None:
@@ -819,6 +903,21 @@ def front_door_fault(value: str | None) -> FrontDoorFault | None:
             f"It parses as a URL, so nothing downstream refuses it: every MCP response "
             f"carries it and tells an agent to verify somewhere that cannot answer. This "
             f"is a placeholder, not a front door. " + _HOW_TO_SET_THE_FRONT_DOOR), True)
+    if (addr := _address_literal(host)) is not None:
+        # AFTER the name rule, so `localhost` keeps being refused as the RFC 2606 reserved
+        # NAME it is — the order is what documents that the two rules are two.
+        #
+        # NOT EXEMPT FOR AN UNINSTANTIATED TEMPLATE, unlike the placeholder above. The
+        # exemption covers the two states the template is legitimately in, and an address
+        # is neither: corpus-template does not ship one, so a template carrying one is a
+        # value somebody typed, and it is exactly the "ran it against my dev server and
+        # pasted what it printed" case this rule exists for.
+        return FrontDoorFault((
+            f"corpus.authoritative_source is {text!r}, whose host {host!r} is an IP "
+            f"address rather than a name — {_why_not_a_front_door(addr)}. It parses as a "
+            f"URL, so nothing downstream refuses it: every MCP response carries it and "
+            f"sends an agent to an address instead of to this corpus's publisher. An "
+            f"address is not a front door. " + _HOW_TO_SET_THE_FRONT_DOOR), False)
     return None
 
 

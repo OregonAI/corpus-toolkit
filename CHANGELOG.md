@@ -17,6 +17,38 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — an address literal is not a name, so `http://127.0.0.1:8000` passed the front-door gate (corpus-toolkit#138)
+
+**This can turn a corpus red that was green.** `corpus-validate-frontmatter` refused a
+`corpus.authoritative_source` under a name RFC 2606 reserves, and an address literal is not
+a name — so `http://localhost:8000/` failed and `http://127.0.0.1:8000/` and
+`http://[::1]/official` passed. Two spellings of the same dead pointer, treated
+differently, and the address spelling is the worse one: it *resolves*, on the agent's own
+machine, to whatever is listening there.
+
+**Every IP address literal is now refused, loopback or not**, under its own rule and its own
+message. `0.0.0.0` and `::` are the wildcard a server binds to rather than an address a
+client connects to; `192.168.*`, `10.*`, `172.16-31.*`, `169.254.*` and `fc00::/7` resolve
+on the *reader's* network, which is worse than dead because they can answer, wrongly, and
+differently for every reader; and a routable literal like `8.8.8.8` names no publisher,
+matches no TLS certificate name, and stops being this corpus's front door the day the host
+is renumbered. `127.1` and `127.000.000.001` are refused as well — every resolver in the
+path reads them as 127.0.0.1, and `ipaddress.ip_address` parses neither (strict dotted
+quads, and no leading zeros since CVE-2021-29921), so the check consults `socket.inet_aton`
+after it.
+
+**corpus-template still validates at exit 0**, and its exemption is not widened: while
+`corpus.id` is unfilled *and* the repo holds no documents, a **missing** front door and the
+**placeholder the template ships** are warnings. Those are the two states an unedited
+template is legitimately in. An address literal is not one of them — the template does not
+ship one — so it is an error there too.
+
+**The RFC 2606 rule is untouched, and the two stay two.** `localhost` still fails as a
+reserved *name*, not as a loopback address: the citations answer different questions and a
+message that blurs them is wrong about the value it is quoted at. `corpus_overview` picked
+the new rule up with no change of its own — that is what moving the predicate in #140 first
+bought. No live corpus is affected; all nine declare a public https host.
+
 ### Fixed — `corpus_overview` names a front door that cannot answer (corpus-toolkit#140)
 
 **Nothing to change; one new sentence may appear in one tool's response.** `corpus_overview`
