@@ -65,6 +65,49 @@ now `_tickets_in_spend_order` and no longer takes the per-group tally, and
 that CLI module and nothing outside it calls them, but AGENTS.md treats anything a corpus
 repo can reach as public surface, so it is named here rather than left silent.
 
+### Internal — the suite now asserts WHERE `corpus_toolkit` was imported from (corpus-toolkit#152)
+
+**Nothing here changes anything a corpus can observe**: test-only, no runtime behaviour, no
+schema, no MCP contract, no version.
+
+`#146` settled that the *metadata* answering `importlib.metadata` belongs to this checkout.
+Nothing asserted that the *code* does, and `import` and `importlib.metadata` search
+`sys.path` independently — so a site-packages copy shadowing this checkout produced a
+`USER_AGENT` built somewhere else while metadata and `pyproject.toml` agreed perfectly, and
+every assertion in the file stayed green. Measured before the guard existed: a tree holding
+these tests with the package resolved from a different checkout reported `9 passed, 2
+skipped`.
+
+`test_the_distribution_is_the_one_in_this_checkout` had become a duplicate of the first
+assertion in `test_user_agent_names_the_version_this_source_declares` — two tests, one fact,
+identical failure messages — because the identity question it was named for now happens
+before the comparison. It is renamed to `test_the_code_under_test_is_the_one_in_this_checkout`
+and given the assertion its name always promised.
+
+**Deliberately not behind `in_tree_distribution`'s skip.** Import provenance does not depend
+on install metadata, and gating it there would make it inert in exactly the environment where
+a shadowing import is most likely — a worktree, where that guard skips. A worktree imports
+its own source, so the ungated check passes there; that was measured in both a worktree and
+the main checkout before it was written.
+
+### Internal — `test_user_agent.py` no longer fails in a git worktree (corpus-toolkit#146)
+
+**Nothing here changes anything a corpus can observe**, and no bump is involved: test-only,
+no runtime behaviour, no schema, no MCP contract, no version.
+
+Recorded because the failure mode wastes an agent's afternoon and then survives into a PR
+description. Two of these tests failed in **every fresh `git worktree`** and passed in the
+main checkout. `importlib.metadata` resolves against `sys.path`, and `*.egg-info/` is
+gitignored, so a worktree has no metadata of its own and resolution falls through to a stale
+user-site install — leaving the assertion comparing this tree's code against an unrelated
+install's metadata. Both tests already skipped when *nothing* answered; the condition asked
+**"is corpus-toolkit installed?"** where the question is **"is the installed distribution
+THIS tree's?"**. The skip reason now names the resolved path of the metadata that answered
+and the tree it came from.
+
+**A stale install of this checkout still fails**, which is what these tests are for; CI
+installs editable from the checkout root, so nothing is skipped there.
+
 ### Fixed — a `plugins.issuing_body_profiles` file that cannot be read now fails CI and warns the operator at startup (corpus-toolkit#150)
 
 **This can break a corpus's CI, and only one that is already broken.** A corpus that
