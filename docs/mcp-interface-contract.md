@@ -351,6 +351,32 @@ corpus without a graph answers the first row above.
   rather than raised over, so the bodies that do have one are still served; the
   validator reports those rows by count.
 
+  **A curated-profiles file this corpus cannot read is answered too, and the
+  answer is not degraded into a claim about the body** (corpus-toolkit#143). The
+  optional `plugins.issuing_body_profiles` overlay is the *other* file this tool
+  reads, and it used to be parsed inline — so a mistyped line in the optional
+  half took down the whole call, losing the registry identity, the holdings and
+  the attribution to a file whose **absence** would have cost nothing. It now
+  reads the same four ways the registry does — gone, unopenable, unparseable, or
+  shaped like something other than a profiles file (a document that parses to a
+  list or a string, or a `profiles:` key that is not a mapping of slug to notes).
+
+  The response is the **normal success response**: `curated` is `{}` and
+  everything else is served, because the registry, the index and the attribution
+  come from other files. Beside it the response carries **`curated_warning`**,
+  naming `plugins.issuing_body_profiles`, the file, and what went wrong, and
+  saying that `curated` is empty because the overlay could not be read rather
+  than because this corpus curates nothing for this body. Those are two findings
+  with two different fixes, and an empty slot with nothing beside it reads as the
+  first — "could not check" is never served as "is not there" (response
+  convention 5).
+
+  **It is a different sentence from the registry's, deliberately**: a different
+  config key naming a different file, so an operator sent to the registry by it
+  would find nothing wrong there. `curated_warning` is additive and absent for
+  every corpus whose overlay reads — and for every corpus that declares none,
+  which is a choice rather than a fault — so this stays contract v1.
+
   **Uniqueness is per body, not per name.** A query hitting a body's `name`, its
   `oar_name` and two of its aliases is one hit, not four; otherwise a wider net
   would turn good matches into `no unique issuing body match`.

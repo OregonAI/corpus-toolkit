@@ -222,21 +222,32 @@ class CorpusConfig:
                 return rel_parts[1]
         return None
 
-    @property
-    def issuing_body_registry_rel(self):
-        """The registry file as a READER names it — repo-relative where it is inside the
+    def _as_a_reader_names_it(self, path):
+        """A declared file as a READER names it — repo-relative where it is inside the
         repo, absolute where a corpus points somewhere else.
 
         One spelling, because the validator's findings and the MCP tools' notes are read by
         the same people about the same file, and an absolute `/tmp/.../_meta/registry.yml`
-        in one and `_meta/registry.yml` in the other reads as two files.
+        in one and `_meta/registry.yml` in the other reads as two files. Shared by every
+        declared-file property rather than re-spelled per file: a second copy that forgot
+        the `ValueError` arm would raise on the one corpus that points outside its repo.
         """
-        if not self.issuing_body_registry:
+        if not path:
             return None
         try:
-            return self.issuing_body_registry.relative_to(self.root)
+            return path.relative_to(self.root)
         except ValueError:
-            return self.issuing_body_registry
+            return path
+
+    @property
+    def issuing_body_registry_rel(self):
+        """The issuing-body registry file as a reader names it."""
+        return self._as_a_reader_names_it(self.issuing_body_registry)
+
+    @property
+    def issuing_body_profiles_rel(self):
+        """The curated issuing-body profiles file as a reader names it."""
+        return self._as_a_reader_names_it(self.issuing_body_profiles)
 
     @property
     def front_door_fault(self) -> "FrontDoorFault | None":
@@ -272,6 +283,36 @@ class CorpusConfig:
             return None
         return (f"plugins.issuing_body_registry {self.issuing_body_registry_rel} "
                 f"{self.issuing_body_registry_read.problem}")
+
+    @property
+    def issuing_body_profiles_fault(self) -> str | None:
+        """One sentence naming the config key, the file and what went wrong — or None where
+        this corpus declares no curated profiles, or declares some that read fine.
+
+        A SECOND SENTENCE, NOT A SECOND USE OF THE REGISTRY'S. `plugins.issuing_body_profiles`
+        is a different key naming a different file with a different fix, and the two are read
+        back to back by one tool — so reporting a broken overlay in the registry's words sends
+        an operator to edit the file that was never at fault (corpus-toolkit#143). Declared
+        here rather than assembled at the call site for the reason the registry's is: the
+        wording is the part that has to agree, and prose written per caller does not.
+        """
+        if not self.issuing_body_profiles or self.issuing_body_profiles_read.readable:
+            return None
+        return (f"plugins.issuing_body_profiles {self.issuing_body_profiles_rel} "
+                f"{self.issuing_body_profiles_read.problem}")
+
+    @functools.cached_property
+    def issuing_body_profiles_read(self) -> ProfilesRead:
+        """This corpus's curated issuing-body profiles, read once — the overlay, and why not.
+
+        Read through this rather than parsing the file at a call site. `issuing_body_profile`
+        did the latter and so raised whatever the file raised — `ParserError`, `PermissionError`,
+        `UnicodeDecodeError`, or `AttributeError` from `.get` on a document that parsed to a
+        list — after the registry beside it had already been hardened against exactly that
+        (corpus-toolkit#136, #143). Cached to match the registry read: one declared file, one
+        read, one answer.
+        """
+        return read_issuing_body_profiles(self.issuing_body_profiles)
 
     @functools.cached_property
     def issuing_body_registry_read(self) -> RegistryRead:
@@ -659,6 +700,58 @@ class RegistryRead(NamedTuple):
         return [e for e in (self.entries or []) if isinstance(e, dict)]
 
 
+class ProfilesRead(NamedTuple):
+    """ONE READ OF THE CURATED ISSUING-BODY PROFILES — the optional overlay
+    `issuing_body_profile` lays over the registry's identity for a body.
+
+    THE SECOND FILE THAT TOOL READS, and for a release it was the only one that could still
+    take the call down. `RegistryRead` beside it turned "declared file I cannot read" into a
+    reported condition (corpus-toolkit#136); the overlay two lines later was parsed inline
+    and raised whatever it raised (corpus-toolkit#143). Same shape, deliberately, so that
+    the two files fail the same way — but a SEPARATE type, because the two hold different
+    things and a caller that got a `RegistryRead` back from the overlay would ask it for
+    `slugs`.
+
+    `profiles` is None for COULD NOT READ, WHICH IS NEVER THE SAME ANSWER AS AN OVERLAY
+    THAT CURATES NOTHING. "This corpus has no curated notes for this body" and "this
+    corpus's curated notes could not be read" are two findings with two different fixes,
+    and serving the second as the first is the collapse this platform files bugs about.
+
+    `problem` is why, in one line, or None when there was nothing to read (this corpus
+    declares no overlay) or nothing wrong. A CALLER MUST NOT READ `problem is None` AS
+    "READABLE" — `readable` answers that, and the two differ for a corpus that declares no
+    overlay at all: nothing failed, and there is still nothing to lay over the registry.
+    """
+    profiles: dict | None
+    problem: str | None
+
+    @property
+    def readable(self) -> bool:
+        """Whether there is an overlay to lay over the registry.
+
+        FALSE COVERS BOTH "DECLARES NONE" AND "DECLARES ONE IT CANNOT READ", the same way
+        `CorpusConfig.issuing_body_slugs` is None for both: neither has an overlay to
+        serve. They are NOT the same finding — one is a choice and the other a fault — so
+        a caller that reports the difference asks `CorpusConfig.issuing_body_profiles_fault`,
+        which is None for the choice and names the file and the reason for the fault.
+        `if not read.readable: warn(...)` on its own would warn every corpus that simply
+        declares no overlay.
+        """
+        return self.profiles is not None
+
+    def for_slug(self, slug: str):
+        """The curated notes for one body — `{}` where there are none AND where there was
+        nothing readable.
+
+        THE VALUE CANNOT TELL THOSE TWO APART, and that is the whole hazard: `readable` is
+        what distinguishes them, so a caller serving this must also serve
+        `CorpusConfig.issuing_body_profiles_fault` or it has reported "could not check" as
+        "is not there". Whatever a corpus curated is served as it wrote it — coercing an
+        unexpected shape here would delete curated data on the way out.
+        """
+        return (self.profiles or {}).get(slug, {})
+
+
 # ---------------------------------------------------------------- the front door
 #
 # ONE DECLARATION, TWO READERS, AND THAT IS THE WHOLE POINT (corpus-toolkit#140).
@@ -921,6 +1014,36 @@ def front_door_fault(value: str | None) -> FrontDoorFault | None:
     return None
 
 
+def _read_declared_yaml(path: Path):
+    """Parse one file a corpus DECLARED in its config: its data, or why not, never a raise.
+
+    THE WHOLE OF "GONE, UNOPENABLE, UNPARSEABLE, OR NOT TEXT", in one place, because every
+    declared config file fails those four ways and each reader that spelled them out again
+    got a subset. The issuing-body registry's reader was hardened first
+    (corpus-toolkit#136) and the curated profiles file beside it kept parsing inline and
+    raising for another release (corpus-toolkit#143) — a second spelling of "unreadable"
+    that disagreed with the first is precisely what this shares to prevent.
+
+    A FILE IS READ AS TEXT AND NOT EVERY FILE IS ONE: a latin-1 or binary file raises
+    `UnicodeDecodeError`, which is a `ValueError` and so slips an `OSError`/`YAMLError`
+    catch. It is the same condition as a parse failure and is caught here with them.
+
+    An EMPTY file parses to None, which is returned as `{}` — a declared file saying
+    nothing, which is a thing a reader may legitimately act on. What shape the data has to
+    be is each reader's question, not this one's.
+    """
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+        # ONE FINDING, ONE LINE, because a `Reporter` finding is a line and an MCP note is
+        # a sentence. A yaml.YAMLError's message is several lines with a caret diagram;
+        # pasted in raw, the rest of the sentence ended up under a `^`, reading as a
+        # different message.
+        detail = " ".join(str(e).split())[:200]
+        return None, f"could not be read: {type(e).__name__}: {detail}"
+    return ({} if data is None else data), None
+
+
 def read_issuing_body_registry(registry_path, key: str) -> RegistryRead:
     """Read the issuing-body registry once, for every question that asks about it.
 
@@ -946,18 +1069,9 @@ def read_issuing_body_registry(registry_path, key: str) -> RegistryRead:
     """
     if not registry_path:
         return RegistryRead(None, None)
-    path = Path(registry_path)
-    try:
-        data = yaml.safe_load(path.read_text())
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
-        # ONE FINDING, ONE LINE, because a `Reporter` finding is a line and an MCP note is
-        # a sentence. A yaml.YAMLError's message is several lines with a caret diagram;
-        # pasted in raw, the rest of the sentence ended up under a `^`, reading as a
-        # different message.
-        detail = " ".join(str(e).split())[:200]
-        return RegistryRead(None, f"could not be read: {type(e).__name__}: {detail}")
-    if data is None:
-        data = {}
+    data, problem = _read_declared_yaml(Path(registry_path))
+    if problem:
+        return RegistryRead(None, problem)
     if not isinstance(data, dict):
         return RegistryRead(None, (f"could not be read as a registry: expected a mapping "
                                    f"with a {key!r} list, got {type(data).__name__}"))
@@ -969,6 +1083,61 @@ def read_issuing_body_registry(registry_path, key: str) -> RegistryRead:
     # they stopped being counted at all; `mappings` is for callers that need to read a
     # field off a row, and `without_slug` is the finding.
     return RegistryRead(list(entries), None)
+
+
+_PROFILES_KEY = "profiles"
+"""The one key a curated issuing-body profiles file holds its overlay under.
+
+NOT A CONFIG KEY, deliberately, unlike `issuing_body_registry_key`. The registry's key is
+declarable because corpora arrived with registries already keyed their own way; the profiles
+file is a shape this toolkit defined, `corpus-template` documents as
+`{profiles: {slug: {...}}}`, and every corpus that has one writes that way.
+
+UNDERSCORED, so it is not surface a corpus repo can pin. AGENTS.md counts anything reachable
+from a corpus repo as public whatever it is prefixed with, but this name has never been
+reachable and does not become so by being extracted from the three f-strings and the lookup
+in `read_issuing_body_profiles` that had to agree on it."""
+
+
+def read_issuing_body_profiles(profiles_path) -> ProfilesRead:
+    """Read the curated issuing-body profiles once, reporting rather than raising.
+
+    THE SAME TREATMENT AS `read_issuing_body_registry`, ONE FILE OVER (corpus-toolkit#143).
+    `issuing_body_profile` read the registry through that reader and then parsed this file
+    inline on the next line, so the optional half of its answer could take the whole call
+    down: registry identity, holdings and attribution lost to a file whose ABSENCE would
+    have cost nothing.
+
+    UNREADABLE IS: gone, unopenable, unparseable, or shaped like something other than a
+    profiles file. All four are one condition from a caller's point of view — *this corpus
+    declares curated profiles it cannot read* — and the reason says which. The old inline
+    parse guarded exactly one of the four, `is_file()`, which is the only one that never
+    raised.
+
+    SHAPE IS CHECKED AT BOTH LEVELS because `.get` is called at both: a document that
+    parses to a list or a string has no `.get`, and neither has a `profiles:` key holding
+    a list, one level down where `curated.get(slug)` reaches. A file that holds a mapping
+    with a missing or null `profiles` key IS read and curates nothing — that is an overlay
+    saying nothing, which is a corpus's prerogative.
+
+    Per-slug values are NOT shape-checked: what a corpus curates about a body is its own
+    editorial content, and this reader has no standing to refuse it.
+    """
+    if not profiles_path:
+        return ProfilesRead(None, None)
+    data, problem = _read_declared_yaml(Path(profiles_path))
+    if problem:
+        return ProfilesRead(None, problem)
+    if not isinstance(data, dict):
+        return ProfilesRead(None, (f"could not be read as curated profiles: expected a "
+                                   f"mapping with a {_PROFILES_KEY!r} key, got "
+                                   f"{type(data).__name__}"))
+    profiles = data.get(_PROFILES_KEY) or {}
+    if not isinstance(profiles, dict):
+        return ProfilesRead(None, (f"could not be read as curated profiles: "
+                                   f"{_PROFILES_KEY!r} must be a mapping of registry slug "
+                                   f"to notes, got {type(profiles).__name__}"))
+    return ProfilesRead(dict(profiles), None)
 
 
 def _parse_registry_slugs(path: Path, key: str) -> frozenset[str]:
