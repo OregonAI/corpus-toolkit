@@ -19,8 +19,17 @@ it can break you.
 
 ### Fixed — `search_corpus(issuing_body=...)` takes a registry slug too, and says which it matched
 
-**Additive: a caller passing a frontmatter string is unaffected, and an unfiltered search is
-byte-identical.** The filter was an exact match on the free-text `issuing_body`
+**One response-shape change, stated first because the rest of this entry is additive.** A
+body-filtered search that matches NOTHING used to return `[]` and now returns a one-element
+list holding a `no_hits` record (below) — so a client that counts `len()` on a search it
+filtered by issuing body sees 1 where it saw 0. That is the whole of the behaviour change:
+a frontmatter search that MATCHES is unchanged hit for hit, an unfiltered search is
+byte-identical in both directions, and no other tool moves. **Whether that warrants a major
+bump is a release decision, not this entry's**: the shape changed on one path of one tool,
+the contract's Versioning rule reads "additive tools/fields stay v1; changed semantics bump
+v2", and the call belongs to whoever cuts the tag.
+
+The filter was an exact match on the free-text `issuing_body`
 **frontmatter** field and nothing else. Every other tool that takes a body takes a
 **registry slug** — `issuing_body_profile(slug)` resolves one, `documents_by_agency(slug)`
 requires one — so a caller holding a slug passed it here and got `[]`, which is
@@ -55,6 +64,13 @@ could not be read (the note says which — a broken path is a fault, no registry
 Reporting the second as the first would tell a caller its slug is wrong on every corpus with
 no registry to be wrong against.
 
+**A registry NAME is filtered as frontmatter text, not resolved to its slug.** "Not a slug"
+is never reported as "not a body": `issuing_body_profile` also takes a name, so a caller can
+hold one, and a registry name overlaps a document's free-text `issuing_body` routinely —
+resolving names would hijack the reading that already works for the callers who were always
+right. The value is also **stripped once** before either match, as `documents_by_agency`
+already strips its slug, so a padded value stops missing a row the corpus does hold.
+
 **A value that is both a slug and some document's frontmatter string resolves to the slug**,
 and the hit says so. The slug is the identity every other tool takes, so a caller holding one
 got it from a slug-shaped tool; there is no parameter to force the other reading, because a
@@ -67,7 +83,9 @@ answer is labelled a frontmatter answer with a note naming the backend rather th
 a slug answer. `**kwargs` deliberately does not count: a backend that swallows the keyword
 returns an *unfiltered* result, and an unfiltered result labelled "filtered by slug" is a
 wrong answer rather than a missing one. `FileBackend` implements it, so a file-backed corpus
-does nothing. The slug filter holds on the semantic branch as well as the keyword one — a
+does nothing, while an `api` or `hybrid` corpus — which cannot use `FileBackend` at all and
+therefore supplies `plugins.retrieval_module` — keeps the behaviour it has today until it
+names the parameter. The slug filter holds on the semantic branch as well as the keyword one — a
 filter only one ranker honours stops filtering the moment a corpus configures semantic
 search.
 

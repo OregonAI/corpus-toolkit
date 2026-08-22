@@ -71,13 +71,28 @@ then — a search that passes no `issuing_body` is unchanged, key for key:
 
 `registry_checked` is a second field because `matched` cannot carry two answers.
 `matched: "issuing_body"` **with** `registry_checked: true` means checked, and
-the value names no body in the registry. The same `matched` with
+the value is not a registry **slug**. The same `matched` with
 `registry_checked: false` means the question was never asked — this corpus
-declares no registry, or declares one that could not be read (the `note` says
+declares no registry, or declares one that is not there to read (the `note` says
 which, because a broken path is a fault and no registry is a choice). Serving
 the second as the first would tell a caller its slug is wrong on every corpus
 that has no registry to be wrong against — the collapse `slug_in_registry: null`
-already exists to prevent below.
+already exists to prevent below. A registry that IS present and does not parse
+reaches neither: it raises out of the config read before the filter resolves
+(corpus-toolkit#136).
+
+**"Not a slug" is not "not a body", and only the first is ever claimed.**
+`issuing_body_profile` also takes a registry **name**, so a caller may hold one.
+A name reaching `search_corpus` is filtered as frontmatter text and reported as
+such; it is deliberately not resolved to its slug, because a registry name and a
+document's free-text `issuing_body` overlap routinely — "Employment Department"
+is plausibly both — so resolving names would hijack the reading that already
+works for the callers who were always right. Turning a name into a slug is
+`issuing_body_profile`'s job, and it hands back a slug to pass here.
+
+The value is **stripped once** before either match, and the stripped value is
+what is filtered and echoed — the same rule `documents_by_agency` applies to its
+slug, and the reason a padded value no longer misses a row the corpus does hold.
 
 **A body-filtered search with no matches never answers with a bare `[]`.** It
 answers with exactly one record that is **not a hit** — no `id`, no `path`, no
@@ -105,7 +120,13 @@ unfiltered result labelled "filtered by slug" is a wrong answer rather than a
 missing one. The built-in `FileBackend` implements it, so a file-backed corpus
 needs to do nothing.
 
-Additive on every path a corpus already used, so this stays contract v1.
+**Everything above is additive except one shape change, named here rather than left to be
+discovered**: a search filtered by `issuing_body` that matches nothing returns that
+one-element list instead of `[]`. A search that matches, and any search that passes no
+`issuing_body`, is unchanged key for key. Contract v1 covers the additions; the shape
+change is a semantics change on one path of one tool, and whether it is worth a v2 —
+which every corpus and the gateway would have to move together — is a release decision
+recorded with the tag, not one this page makes on its own.
 
 ### `get_document(id, part?)`
 Full document by id, including frontmatter and the provenance block. API

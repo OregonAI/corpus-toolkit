@@ -821,11 +821,12 @@ class CorpusFramework:
     def _backend_takes_slug_filter(self) -> bool:
         """Does this backend's `search` NAME the `issuing_body_slug` keyword?
 
-        ASKED OF THE SIGNATURE, NEVER ASSUMED. `RetrievalBackend` is a public seam and
+        ASKED OF THE SIGNATURE, NEVER ASSUMED. `RetrievalBackend` is a public seam, and
         every corpus-supplied adapter in service was written before this parameter existed
-        (`oregon-legislature` and `oregon-budget` each ship one); passing a keyword such a
-        `search` does not name is a TypeError on every body-filtered query -- a live corpus
-        broken by a pin bump, which is the failure mode AGENTS.md calls public surface.
+        -- an `api` or `hybrid` corpus cannot use `FileBackend`, which reads Markdown off
+        disk, so it necessarily ships one. Passing a keyword such a `search` does not name
+        is a TypeError on every body-filtered query: a live corpus broken by a pin bump,
+        which is the failure AGENTS.md means by public surface.
 
         `**kwargs` DOES NOT COUNT, deliberately. A backend that swallows the keyword and
         ignores it returns an UNFILTERED result, and this framework would then label it
@@ -857,11 +858,21 @@ class CorpusFramework:
 
         `registry_checked` IS THE SECOND FIELD BECAUSE `matched` CANNOT CARRY TWO
         ANSWERS. `matched: "issuing_body"` after a registry lookup means "checked, and it
-        names no body"; the same value from a corpus with no registry means the question
-        was never asked. Serving the second as the first tells a caller its slug is wrong
-        on every corpus that has no registry to be wrong against -- the collapse
+        is not a registry SLUG"; the same value from a corpus with no registry means the
+        question was never asked. Serving the second as the first tells a caller its slug
+        is wrong on every corpus that has no registry to be wrong against -- the collapse
         `documents_by_agency`'s `slug_in_registry: null` already exists to prevent, and
         which CONTEXT.md puts above the rest of the vocabulary.
+
+        "NOT A SLUG" IS NOT "NOT A BODY", AND THIS IS CAREFUL TO CLAIM ONLY THE FIRST.
+        `issuing_body_profile` also takes a registry NAME, so a caller can hold one; a
+        name reaching here is filtered as frontmatter text and reported as such. It is
+        deliberately NOT resolved to its slug: a registry name and a document's free-text
+        `issuing_body` overlap ROUTINELY -- "Employment Department" is plausibly both --
+        so resolving names would hijack the reading that works today for the callers who
+        were already right, which is the one thing this change must not do. Turning a name
+        into a slug is `issuing_body_profile`'s job, and it hands back the slug to pass
+        here.
         """
         known = self.config.issuing_body_slugs
         if known is not None and value in known:
@@ -885,9 +896,16 @@ class CorpusFramework:
         # means the answer is QUALIFIED -- something a caller has to act on.
         if known is not None:
             return {"value": value, "matched": "issuing_body", "registry_checked": True}
-        # Declared-and-unreadable is a FAULT and declaring none is a CHOICE, and a caller
-        # can act on the first. `issuing_body_slugs` answers None for both.
-        why = ("declares an issuing-body registry that could not be read"
+        # A DECLARED REGISTRY THAT IS NOT THERE is a FAULT; declaring none is a CHOICE,
+        # and a caller can act on the first. `issuing_body_slugs` answers None for both,
+        # so the config is what tells them apart.
+        #
+        # A registry that IS there and does not PARSE reaches neither branch: it raises
+        # out of `issuing_body_slugs` before this runs (corpus-toolkit#136). That is a
+        # third outcome this field does not cover, and saying so here is cheaper than a
+        # reader inferring from `registry_checked: false` that every read failure lands
+        # softly.
+        why = ("declares an issuing-body registry that is not there to read"
                if self.config.issuing_body_registry
                else "declares no issuing-body registry")
         return {"value": value, "matched": "issuing_body", "registry_checked": False,

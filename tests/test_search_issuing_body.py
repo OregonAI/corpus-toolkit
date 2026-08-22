@@ -163,12 +163,18 @@ def test_a_hit_says_which_of_the_two_the_filter_matched(corpus):
 
 def test_an_unfiltered_search_is_untouched(corpus):
     """The blast radius is the parameter under repair and nothing else. A caller that
-    passes no `issuing_body` gets the hit shape it always got, key for key."""
-    hits = _fw(corpus).search_corpus("permit")
+    passes no `issuing_body` gets the hit shape it always got, key for key -- and an
+    unfiltered search that matches nothing still gets a bare `[]`, because there is no
+    second reading of a filter nobody applied and so nothing to disambiguate. The
+    `no_hits` record exists for the ambiguity, not for emptiness."""
+    fw = _fw(corpus)
+
+    hits = fw.search_corpus("permit")
 
     assert len(hits) == 3
     assert set(hits[0]) == {"id", "title", "citation", "doc_type",
                             "issuing_body", "path", "snippet"}
+    assert fw.search_corpus("zzzznosuchterm") == []
 
 
 def test_an_empty_answer_says_which_of_the_two_it_looked_for(corpus):
@@ -362,3 +368,18 @@ def test_a_backend_that_swallows_the_keyword_is_not_credited_with_filtering(corp
 
     assert hits[0]["issuing_body_filter"]["matched"] == "issuing_body", (
         "a backend that ignored the keyword was reported as having filtered on the slug")
+
+
+def test_a_registry_name_is_filtered_as_text_and_not_resolved_to_its_slug(corpus):
+    """"NOT A SLUG" IS NOT "NOT A BODY", and only the first is ever claimed.
+
+    `issuing_body_profile` also takes a registry NAME, so a caller can be holding one. A
+    name is filtered as frontmatter text — deliberately, because a registry name and a
+    document's free-text `issuing_body` overlap ROUTINELY (here "Employment Department" is
+    both), so resolving names to slugs would hijack the reading that already works for the
+    callers who were already right. Turning a name into a slug is `issuing_body_profile`'s
+    job; it hands back the slug to pass here."""
+    hits = _fw(corpus).search_corpus("permit", issuing_body="Employment Department")
+
+    assert [h["id"] for h in hits] == ["pol-3"]
+    assert hits[0]["issuing_body_filter"]["matched"] == "issuing_body"
