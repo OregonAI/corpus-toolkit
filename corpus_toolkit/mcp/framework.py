@@ -1265,7 +1265,12 @@ class CorpusFramework:
         # of it guarded absence, the one failure mode that never raised (corpus-toolkit#143).
         # An unreadable overlay is REPORTED below and costs nothing else: the registry
         # identity, holdings and attribution in this response come from other files.
-        curated = self.config.issuing_body_profiles_read
+        #
+        # NOT NAMED `curated`, WHICH IS WHAT IT HELD BEFORE. This is the READ — an overlay
+        # that may not have one — and `curated` is the notes for one body, which is what
+        # the response key holds. Keeping the old name for the new thing is how the two
+        # get confused at the next edit.
+        profiles_read = self.config.issuing_body_profiles_read
 
         # STRIPPED ONCE, AND THE STRIPPED VALUE IS WHAT IS USED. `"  slug  "` otherwise
         # missed the exact-match branch, fell into the substring fallback, matched nothing,
@@ -1301,7 +1306,7 @@ class CorpusFramework:
             **self._envelope(),
             "slug": slug,
             "registry": entries[slug],
-            "curated": curated.for_slug(slug),
+            "curated": profiles_read.for_slug(slug),
             "in_repo": docs or _NO_HOLDINGS[attribution["complete"]],
             # WHAT THE COUNT COULD SEE. `in_repo` is a count of documents attributed to
             # this body, and attribution is per-document: a corpus can hold documents

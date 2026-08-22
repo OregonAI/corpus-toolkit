@@ -25,7 +25,6 @@ fix. The registry may be perfectly readable while the overlay is not, so an unre
 overlay must not degrade the answer into "that body is not registered" — the registry
 identity, holdings and attribution are served, and the response states the limit.
 """
-import io
 import json
 import os
 import subprocess

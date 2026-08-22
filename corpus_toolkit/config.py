@@ -727,6 +727,16 @@ class ProfilesRead(NamedTuple):
 
     @property
     def readable(self) -> bool:
+        """Whether there is an overlay to lay over the registry.
+
+        FALSE COVERS BOTH "DECLARES NONE" AND "DECLARES ONE IT CANNOT READ", the same way
+        `CorpusConfig.issuing_body_slugs` is None for both: neither has an overlay to
+        serve. They are NOT the same finding — one is a choice and the other a fault — so
+        a caller that reports the difference asks `CorpusConfig.issuing_body_profiles_fault`,
+        which is None for the choice and names the file and the reason for the fault.
+        `if not read.readable: warn(...)` on its own would warn every corpus that simply
+        declares no overlay.
+        """
         return self.profiles is not None
 
     def for_slug(self, slug: str):
@@ -1075,14 +1085,18 @@ def read_issuing_body_registry(registry_path, key: str) -> RegistryRead:
     return RegistryRead(list(entries), None)
 
 
-PROFILES_KEY = "profiles"
+_PROFILES_KEY = "profiles"
 """The one key a curated issuing-body profiles file holds its overlay under.
 
 NOT A CONFIG KEY, deliberately, unlike `issuing_body_registry_key`. The registry's key is
 declarable because corpora arrived with registries already keyed their own way; the profiles
 file is a shape this toolkit defined, `corpus-template` documents as
-`{profiles: {slug: {...}}}`, and every corpus that has one writes that way. A name spelled
-in two places is what a constant is for."""
+`{profiles: {slug: {...}}}`, and every corpus that has one writes that way.
+
+UNDERSCORED, so it is not surface a corpus repo can pin. AGENTS.md counts anything reachable
+from a corpus repo as public whatever it is prefixed with, but this name has never been
+reachable and does not become so by being extracted from the three f-strings and the lookup
+in `read_issuing_body_profiles` that had to agree on it."""
 
 
 def read_issuing_body_profiles(profiles_path) -> ProfilesRead:
@@ -1116,12 +1130,12 @@ def read_issuing_body_profiles(profiles_path) -> ProfilesRead:
         return ProfilesRead(None, problem)
     if not isinstance(data, dict):
         return ProfilesRead(None, (f"could not be read as curated profiles: expected a "
-                                   f"mapping with a {PROFILES_KEY!r} key, got "
+                                   f"mapping with a {_PROFILES_KEY!r} key, got "
                                    f"{type(data).__name__}"))
-    profiles = data.get(PROFILES_KEY) or {}
+    profiles = data.get(_PROFILES_KEY) or {}
     if not isinstance(profiles, dict):
         return ProfilesRead(None, (f"could not be read as curated profiles: "
-                                   f"{PROFILES_KEY!r} must be a mapping of registry slug "
+                                   f"{_PROFILES_KEY!r} must be a mapping of registry slug "
                                    f"to notes, got {type(profiles).__name__}"))
     return ProfilesRead(dict(profiles), None)
 
