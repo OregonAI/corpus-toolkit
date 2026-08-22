@@ -407,6 +407,10 @@ def test_the_operator_is_told_at_startup_which_overlay_is_broken(tmp_path):
     assert "plugins.issuing_body_profiles" in said, said
     assert "_meta/profiles.yml" in said, said
     assert "could not be read" in said, said
+    # SAID ONCE. "The operator is told" and "the operator is told on every code path that
+    # touches the config" are different lines, and the second one trains an operator to
+    # scroll past startup — the same reason this is not printed for a corpus that reads.
+    assert said.count("plugins.issuing_body_profiles") == 1, said
 
 
 def test_the_server_still_starts_with_an_overlay_it_cannot_read(tmp_path):
