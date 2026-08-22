@@ -131,7 +131,17 @@ def build_server(config):
         documents. Optional filters: doc_type, issuing_body. mode: 'hybrid'
         (default, keyword+semantic when this corpus has semantic search
         configured), 'keyword' (BM25 only), 'semantic' (vector only, falls
-        back to keyword if unavailable)."""
+        back to keyword if unavailable).
+
+        `issuing_body` accepts EITHER an issuing-body registry slug (the same
+        identity issuing_body_profile and documents_by_agency take) OR the
+        free-text `issuing_body` frontmatter string, which often names a
+        sub-unit. A value that is a registry slug is filtered as one; anything
+        else is filtered as frontmatter text. Every hit carries
+        `issuing_body_filter` saying which matched, and a body-filtered search
+        with no matches returns one `no_hits` record saying what was searched
+        for — never a bare empty list, which cannot tell "this body has nothing
+        here" from "you passed the other kind of string"."""
         return fw.search_corpus(query, doc_type or None, issuing_body or None, limit, mode)
 
     @mcp.tool()
