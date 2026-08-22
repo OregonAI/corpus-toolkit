@@ -60,5 +60,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ./.toolkit
-      - name: Relationship graph integrity
+      # ALSO the corpus-level config checks — front door, issuing-body registry, extra
+      # schemas. The flag skips the per-document schema pass, not the corpus's
+      # configuration, so a corpus whose CI is trimmed to this workflow is still gated on
+      # the facts every MCP response carries (corpus-toolkit#139).
+      - name: Relationship graph and corpus configuration
         run: corpus-validate-frontmatter --config _meta/corpus.yml --check-relationships

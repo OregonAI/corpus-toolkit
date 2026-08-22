@@ -12,6 +12,7 @@ those.
 import contextlib
 import io
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -377,6 +378,92 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
 
         self.assertEqual(code, 0, out)
         self.assertNotIn("authoritative_source", out)
+
+
+class TestCheckRelationshipsChecksTheConfigToo(ValidateTestCase):
+    """corpus-toolkit#139 — `--check-relationships` ran NO corpus-level config check.
+
+    `_run_relationships_only` returned before `_check_config` was ever called, so the path
+    the `check-links` workflow runs gated no front door, no registry readability, no
+    slug-less registry rows and no declared name fields. Harmless only because a second
+    workflow runs the full command; the moment a corpus's CI is trimmed to the link check,
+    or someone reaches for this flag as "the cheap validate", a green run has checked
+    nothing about the corpus's configuration.
+
+    The choice recorded at the flag: the flag narrows WHICH DOCUMENTS are checked, not
+    WHETHER THE CORPUS IS CONFIGURED. The join gate went the same way for the same reason
+    (corpus-toolkit#3).
+    """
+
+    def test_a_missing_front_door_fails_the_relationships_path_too(self):
+        """THE GATE, ON THE PATH THAT SKIPPED IT. #141 made this a hard error on the full
+        command; a corpus that fails there and passes here has two answers to one
+        question."""
+        self.write_corpus()
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate("--check-relationships")
+
+        self.assertEqual(code, 1, f"--check-relationships passed with no front door:\n{out}")
+        self.assertIn("corpus.authoritative_source is not set", out)
+
+    def test_an_unreadable_registry_fails_the_relationships_path_too(self):
+        """The other half of what was skipped (corpus-toolkit#129/#136): a declared registry
+        this corpus cannot read is an error on the full command, and a document's issuing
+        body goes unchecked on every path — including this one."""
+        self.write_corpus(authoritative_source="https://sos.oregon.gov/archives/")
+        self.write_doc("spending-100", "Spending 100")
+        (self.root / "_meta" / "registry.yml").write_text("entries: [ {slug: a\n")
+        cfg = self.root / "_meta" / "corpus.yml"
+        cfg.write_text(cfg.read_text()
+                       + 'plugins:\n  issuing_body_registry: "_meta/registry.yml"\n'
+                         '  issuing_body_registry_key: "entries"\n')
+
+        code, out = self.validate("--check-relationships")
+
+        self.assertEqual(code, 1, f"--check-relationships passed on a broken registry:\n{out}")
+        self.assertIn("could not be read", out)
+
+    def test_a_corpus_that_is_configured_still_passes_the_relationships_path(self):
+        """THE GUARD MUST NOT FIRE ON A HEALTHY CORPUS. Every corpus's `check-links`
+        workflow runs this command; a config check that reported something for all of them
+        would turn nine CIs red and be reverted, which is the same as not shipping it."""
+        self.write_corpus(authoritative_source="https://sos.oregon.gov/archives/")
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate("--check-relationships")
+
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("ERROR", out)
+
+    def test_the_green_run_says_the_configuration_was_checked(self):
+        """A GREEN RUN MUST SAY WHAT IT CHECKED. The complaint in #139 is that
+        "relationship graph consistent" reads as a full pass to someone who reached for
+        this flag as the cheap validate. Now the summary names both halves."""
+        self.write_corpus(authoritative_source="https://sos.oregon.gov/archives/")
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate("--check-relationships")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("corpus configuration", out)
+
+    def test_the_config_is_checked_even_when_no_content_file_changed(self):
+        """`--changed` with nothing to validate returns early, and a corpus-level fact does
+        not depend on which files a PR touched — the full command checks the config on that
+        same no-op run. A gate that fires on one branch and not the other is the "guard that
+        cannot fire" AGENTS.md files as a defect."""
+        self.write_corpus()
+        self.write_doc("spending-100", "Spending 100")
+        for argv in (["git", "init", "-q"], ["git", "add", "-A"],
+                     ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                      "commit", "-qm", "corpus"]):
+            subprocess.run(argv, cwd=self.root, check=True)
+
+        code, out = self.validate("--check-relationships", "--changed", "HEAD")
+
+        self.assertEqual(code, 1, f"a no-op relationships run checked no config:\n{out}")
+        self.assertIn("corpus.authoritative_source is not set", out)
 
 
 if __name__ == "__main__":

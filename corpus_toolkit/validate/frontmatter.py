@@ -8,8 +8,12 @@ oregon-policy-repo/src/validate_frontmatter.py; Oregon-specific hardcoding
 (CONTENT_DIRS, DIR_DOC_TYPE, the agency registry file) replaced by config-
 driven equivalents — see docs/reference-architecture.md and MIGRATION.md.
 
-  --check-relationships   run ONLY the relationship-graph resolution (used by
-                          the check-links reusable workflow; no --schema needed)
+  --check-relationships   skip the per-document schema checks: run the
+                          relationship-graph and join resolution plus the
+                          corpus-level config checks (used by the check-links
+                          reusable workflow; no --schema needed). The config
+                          checks are NOT skipped — see the flag's definition in
+                          main() for why (corpus-toolkit#139)
   --changed [REF]         validate only files changed vs REF (merge-base with
                           origin/main if omitted)
   -j N / --jobs N         parallelize per-file checks across N processes
@@ -591,7 +595,26 @@ def _check_extra_schemas(config, r):
                 r.error(rel, f"missing: {e}")
 
 
-def _run_relationships_only(config, paths, r):
+def _check_corpus_config(config, r, registry):
+    """EVERY corpus-level check, as one thing, because both entry points run all of them.
+
+    Two call sites that each list the checks are two lists to keep in agreement, and this
+    module has already paid for that once: `--check-relationships` returned before
+    `_check_config` was reached, so the path `check-links.yml` runs gated no front door, no
+    registry, no name fields and no declared extra schemas (corpus-toolkit#139).
+    """
+    _check_config(config, r, registry)
+    _check_extra_schemas(config, r)
+
+
+def _run_relationships_only(config, paths, r, registry):
+    """The `--check-relationships` path: the relationship graph, the joins, AND the
+    corpus-level configuration.
+
+    WHY THE CONFIG CHECK RUNS HERE — see the flag's definition in `main` for the decision
+    and its reasoning. In short: the flag narrows which DOCUMENTS are checked, not whether
+    the corpus is CONFIGURED, and the config findings are not per-document.
+    """
     docs = {}
     for p in paths:
         try:
@@ -605,7 +628,12 @@ def _run_relationships_only(config, paths, r):
     for rel, level, msg in (_relationship_findings(paths, universe, config)
                             + _join_findings(paths, universe, config)):
         (r.error if level == "error" else r.warn)(rel, msg)
-    r.finish(f"OK: relationship graph consistent across {len(paths)} content file(s).")
+    _check_corpus_config(config, r, registry)
+    # THE SUMMARY SAYS WHAT WAS CHECKED. #139's complaint was that a green
+    # "relationship graph consistent" reads as a full pass to someone who reached for this
+    # flag as the cheap validate; naming both halves is what makes the green run readable.
+    r.finish(f"OK: relationship graph consistent across {len(paths)} content file(s), "
+             f"and corpus configuration checked.")
 
 
 def main():
@@ -614,8 +642,38 @@ def main():
     ap.add_argument("--schema", help="path to a frontmatter JSON schema. Defaults to the "
                     "one bundled with this package, which is what CI validates against — "
                     "pass this only to validate against a different schema.")
+    # THE DECISION, RECORDED WHERE THE FLAG IS DEFINED (corpus-toolkit#139).
+    #
+    # This flag ran NO corpus-level config check at all: `_run_relationships_only`
+    # returned before `_check_config` was reached, so the path `check-links.yml` runs
+    # gated no front door, no registry readability, no slug-less registry rows, no
+    # declared name fields and no extra schemas. It was harmless only because a SECOND
+    # workflow runs the full command — a property of one workflow file, not of this tool.
+    #
+    # THE CHOICE: run the config check here too, rather than printing that it was skipped.
+    #
+    #   * The flag narrows WHICH DOCUMENTS are checked, not WHETHER THE CORPUS IS
+    #     CONFIGURED. None of the config findings is per-document, and none of them gets
+    #     cheaper by looking at fewer files.
+    #   * The join gate went this way for exactly this reason (corpus-toolkit#3): "leaving
+    #     it out of that path would mean the gate exists in a command no corpus's CI
+    #     actually invokes."
+    #   * It costs one YAML read that the config load has already done.
+    #   * The config check stopped being advisory: #141 made a missing or placeholder
+    #     front door a hard ERROR and #129 added the registry findings. Skipping all of it
+    #     is a bigger claim now than when this path was written.
+    #   * The alternative — print "no config was checked" — leaves a corpus whose CI is
+    #     trimmed to the link check with no gate at all, and this repo does not ship a
+    #     guard that cannot fire (AGENTS.md).
+    #
+    # WHAT IT COSTS: this command can now fail for a reason that is not a relationship.
+    # That is the point, and the help text says so rather than leaving "only" to imply
+    # otherwise.
     ap.add_argument("--check-relationships", action="store_true",
-                    help="run only the relationship-graph resolution check")
+                    help="skip the per-document schema checks: run the relationship-graph "
+                         "and join resolution checks plus the corpus-level config checks "
+                         "(front door, issuing-body registry, extra schemas) — the "
+                         "corpus-level facts are gated on every entry point")
     ap.add_argument("--changed", nargs="?", const="", metavar="REF",
                     help="validate only files changed vs REF (default: merge-base with origin/main)")
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1,
@@ -623,28 +681,34 @@ def main():
     args = ap.parse_args()
 
     config = config_mod.load(args.config)
+    r = Reporter()
+    # ONE READ, EVERY QUESTION. The per-file checks want the slug set; the config check
+    # wants the entries themselves. Reading the file twice is how two answers about one
+    # registry start to disagree (config.RegistryRead carries the same warning).
+    registry = _read_registry(config)
+
     scoped = args.changed is not None
     if scoped:
         paths = changed_content_files(config, args.changed or None)
         if not paths:
             print("No changed content files to validate.")
             if args.check_relationships:
+                # A CORPUS-LEVEL FACT DOES NOT DEPEND ON WHICH FILES A PR TOUCHED, and the
+                # full command already checks the config on this same no-op run. A gate
+                # that fires on one branch of one flag and not the other is the "guard
+                # that cannot fire" AGENTS.md files as a defect.
+                _check_corpus_config(config, r, registry)
+                r.finish("OK: no changed content files; corpus configuration checked.")
                 return
     else:
         paths = list(content_files(config))
 
-    r = Reporter()
-
     if args.check_relationships:
-        _run_relationships_only(config, paths, r)
+        _run_relationships_only(config, paths, r, registry)
         return
 
     doc_schema = json.loads(open(args.schema).read()) if args.schema else bundled_schema()
     doc_schema = schema_with_extensions(doc_schema, config)
-    # ONE READ, EVERY QUESTION. The per-file checks want the slug set; the config check
-    # wants the entries themselves. Reading the file twice is how two answers about one
-    # registry start to disagree (config.RegistryRead carries the same warning).
-    registry = _read_registry(config)
 
     docs = {}
     # The fork-pool, the 50-file threshold and the chunk size live in repo.map_documents —
@@ -664,8 +728,7 @@ def main():
                             + _join_findings(paths, universe, config)):
         (r.error if level == "error" else r.warn)(rel, msg)
 
-    _check_config(config, r, registry)
-    _check_extra_schemas(config, r)
+    _check_corpus_config(config, r, registry)
 
     scope = f"{len(paths)} changed" if scoped else f"{len(paths)}"
     r.finish(f"OK: {scope} content file(s) validated across {', '.join(config.content_dirs)}.")

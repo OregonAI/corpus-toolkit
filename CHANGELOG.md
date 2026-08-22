@@ -17,6 +17,41 @@ it can break you.
 
 ## Unreleased
 
+### Changed — `--check-relationships` now checks the corpus configuration too (corpus-toolkit#139)
+
+**This can turn a `check-links` run red, and that is the point.**
+`corpus-validate-frontmatter --check-relationships` returned before `_check_config` was
+ever reached, so the path `check-links.yml` runs gated **no** corpus-level fact: not the
+front door, not whether the issuing-body registry can be read, not registry rows with no
+slug, not a declared `plugins.issuing_body_name_fields` no entry carries, not
+`plugins.extra_schema_checks`. It ran the relationship graph and the joins and reported
+`OK`.
+
+**Nothing turns red today**, because `validate-frontmatter.yml` runs the full command on
+every PR for every corpus, so these findings already ran somewhere. That is a property of
+one workflow file rather than of this tool: the moment a corpus's CI is trimmed to the
+link check, or someone reaches for this flag as the cheap local validate, a green run had
+checked nothing about the corpus's configuration — and since #141 a missing front door is
+a hard error, so what was skipped is now load-bearing.
+
+**The choice, recorded at the flag** (`main()` in `validate/frontmatter.py`): the flag
+narrows **which documents** are checked, not **whether the corpus is configured**. None of
+the config findings is per-document and none gets cheaper by looking at fewer files, and
+the join gate went the same way for the same reason (#3 — "leaving it out of that path
+would mean the gate exists in a command no corpus's CI actually invokes"). The alternative
+considered and rejected was printing "no config was checked": honest, and it leaves a
+trimmed CI with no gate at all.
+
+**The summary line changed** on this path, and says what it checked: `OK: relationship
+graph consistent across N content file(s), and corpus configuration checked.` A `--changed`
+run with no changed content files checks the config too — a corpus-level fact does not
+depend on which files a PR touched, and the full command already checked it on that same
+no-op run.
+
+**Unchanged: the full command.** Same checks, same order, same output. Both entry points
+now call one `_check_corpus_config`, so they cannot drift apart again.
+
+
 ### Fixed — a registry this corpus cannot read is an answer, not a traceback (corpus-toolkit#136)
 
 **No corpus needs to do anything, and one class of tool crash stops happening.**
