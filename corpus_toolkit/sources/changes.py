@@ -35,11 +35,24 @@ from frontmatter and spot-checks a scan sees a clean result and gets permanent d
 on every text-layer PDF, now with a populated "previous" hash that reads as a genuine
 upstream change.
 
+AN UNSEEDED SOURCE FILES NO TICKET (corpus-toolkit#145). `sha256: ''` compares unequal to
+everything, so such a source reported CHANGED on every run and used to file
+`Source changed: <id>` with an EMPTY previous hash — a drift report about a comparison
+that never happened — and to spend a slot of the issue budget doing it, pushing genuine
+drift out of a capped run. ADR 0010's rule that an uncompared source is not a changed
+source held for the group finding and not for the tickets; it now holds for both. The
+source is still counted, still in the group breakdown and still in `changed-sources.tsv`
+with an empty `old` column. What replaces the ticket is a stderr line NAMING those ids
+and `--record-baseline`, a CI annotation, and a non-zero exit — because removing the
+tickets and saying nothing more would report could-not-check as nothing-to-report, which
+is the same rule broken the other way round.
+
 Exit codes: 0 on a run that could actually detect drift. 1 when a fetch fails under
 `--strict`, when failures are systemic (>20%), when the issue cap truncated the report
-(a capped run is not a clean run), when no in-scope source has a baseline at all, when
-the scope came out empty so nothing was checked, when `--record-baseline` refused a
-rewrite it could not account for, and — regardless of `--strict` — when a source declaring
+(a capped run is not a clean run), when ANY in-scope source has no recorded baseline (it
+was not compared, and outside `--record-baseline` it never will be until somebody seeds
+it), when the scope came out empty so nothing was checked, when `--record-baseline` refused
+a rewrite it could not account for, and — regardless of `--strict` — when a source declaring
 `watch` returned a document missing a declared path or one that will not parse as json.
 Those two are unconditional because the bytes ARRIVED: this is not upstream being briefly
 unreachable, and the source stays uncompared on every run until somebody looks. The common
@@ -641,9 +654,22 @@ class ChangedSource(NamedTuple):
     new: str
 
 
-def _issue_order(changed: list[ChangedSource],
-                 per_group: dict[str, dict]) -> list[ChangedSource]:
-    """The changed sources, ordered smallest-drifting-group first (corpus-toolkit#69).
+def _issue_order(changed: list[ChangedSource]) -> list[ChangedSource]:
+    """The sources a ticket may be filed for, ordered smallest-drifting-group first (#69).
+
+    THE ONE GATE ON THE TICKET-OPENING PATH, and the reason the filter lives here rather
+    than at the call site: `MAX_ISSUES_PER_RUN` decides HOW MANY issues a run files and
+    this decides WHICH, so a source this function does not return can neither get a ticket
+    nor spend a slot. A caller cannot forget it.
+
+    AN UNSEEDED SOURCE IS NOT A CHANGED SOURCE (ADR 0010, corpus-toolkit#145). A source
+    with `sha256: ''` compares unequal to everything, so it reports CHANGED on every run
+    and used to file `Source changed: <id>` with an EMPTY previous hash — a drift report
+    about a comparison that never happened, which is could-not-check served as a finding.
+    The group drift finding already filtered on a recorded baseline; the tickets did not,
+    and that asymmetry was the defect. It is still counted, still in the group breakdown
+    and still in `changed-sources.tsv` with an empty `old` column; what it no longer gets
+    is a ticket asserting upstream drift, and `main` says so on its own line instead.
 
     `MAX_ISSUES_PER_RUN` decides HOW MANY issues a run files; this decides WHICH. The
     budget used to be spent in manifest iteration order, so whichever group the loop
@@ -671,7 +697,21 @@ def _issue_order(changed: list[ChangedSource],
     MAX_ISSUES_PER_RUN` sources unreported and still exits non-zero; the dropped ones are
     now the tail of the largest group instead of an arbitrary prefix.
     """
-    return sorted(changed, key=lambda c: (per_group[c.group]["changed"], c.group))
+    ticketable = [c for c in changed if c.old]
+    # COUNTED OFF `ticketable`, not read from `per_group["changed"]` and not derived from
+    # it either. Two reasons, and the second is the one that bites. First, the sort key is
+    # "how many tickets will this group buy", and after the filter that is no longer the
+    # group's changed count: a group of 484 unseeded sources and 2 genuinely drifted ones
+    # buys two tickets and is the small, human-actionable shape this ordering exists to
+    # file first — sorting it at 486 would starve it exactly the way corpus-toolkit#69
+    # starved `oar`. Second, `per_group["changed"] - per_group["unseeded"]` is the
+    # subtraction the per-group tally already warns about: an unseeded source whose fetch
+    # then failed never reached `changed` at all, so subtracting it over-subtracts. The
+    # list IS the tickets; counting it cannot disagree with itself.
+    per_group_ticketable: dict[str, int] = {}
+    for c in ticketable:
+        per_group_ticketable[c.group] = per_group_ticketable.get(c.group, 0) + 1
+    return sorted(ticketable, key=lambda c: (per_group_ticketable[c.group], c.group))
 
 
 class GroupFinding(NamedTuple):
@@ -799,8 +839,7 @@ def _open_group_finding(group: str, changed_ids: list[str], compared: int,
     return _file_once(f"Group drifted: {group}", body, f"group {group}")
 
 
-def _drifting_groups_in_spend_order(changed: list[ChangedSource],
-                                    per_group: dict[str, dict]) -> list[str]:
+def _drifting_groups_in_spend_order(changed: list[ChangedSource]) -> list[str]:
     """Every group that drifted, in the order `_issue_order` spends the budget on them.
 
     DERIVED from `_issue_order` rather than re-deriving its sort key, because the caller
@@ -808,7 +847,7 @@ def _drifting_groups_in_spend_order(changed: list[ChangedSource],
     drifted from the first would print an authoritative-looking account of an order nobody
     used — the failure mode the rest of this file's reporting exists to prevent.
     """
-    return list(dict.fromkeys(c.group for c in _issue_order(changed, per_group)))
+    return list(dict.fromkeys(c.group for c in _issue_order(changed)))
 
 
 def main():
@@ -871,6 +910,11 @@ def main():
     fetched: dict[tuple[str, str], str] = {}
     in_scope: set[tuple[str, str]] = set()
     n_total = n_unseeded = 0
+    # NAMED, not only counted. Since corpus-toolkit#145 an unseeded source files no ticket,
+    # so this list is the whole of what the run says about it and `1 of 3 have no recorded
+    # baseline` does not tell an operator which manifest entry to go and seed. In manifest
+    # order, so the ids line up with the file the remedy edits.
+    unseeded_ids: list[str] = []
     # FILTER FIRST, THEN VALIDATE, THEN FETCH. A mistyped `watch` must stop the run before
     # the first request rather than however many minutes into the crawl the bad source
     # happens to sit -- but only for groups this run was told to check. Validating on yield
@@ -918,6 +962,7 @@ def main():
         if not old:
             n_unseeded += 1
             stats["unseeded"] += 1
+            unseeded_ids.append(sid)
         fmt = _format_for(url, s.get("format"))
         # Counted BEFORE the fetch, so the pattern report can tell "no HTML/XML source was
         # ever in scope" (a fact about the manifest) from "every one of them failed" (a fact
@@ -1016,6 +1061,24 @@ def main():
     # A run with no baseline at all cannot detect drift: every source compares unequal to
     # `''`, so 100% "changed" is a fact about the manifest, not about upstream. Measured,
     # never inferred — ERF was told to go look for empty baselines it did not have.
+    # THE SOURCES A TICKET MAY BE FILED FOR, computed once and used everywhere the run
+    # talks about what it reported: the spend loop, the cap arithmetic, the summary line
+    # and the workflow output. Computing it twice is how the three "not compared" counts
+    # of corpus-toolkit#67 came to disagree with each other.
+    ticketable = _issue_order(changed)
+
+    # A run with no baseline at all cannot detect drift: every source compares unequal to
+    # `''`, so 100% "changed" is a fact about the manifest, not about upstream. Measured,
+    # never inferred — ERF was told to go look for empty baselines it did not have.
+    #
+    # STILL ITS OWN CONCEPT after corpus-toolkit#145, and deliberately so. The filter in
+    # `_issue_order` now suppresses every ticket this predicate used to suppress, so it no
+    # longer decides anything about individual filings — but it is not the same statement.
+    # It is a diagnosis of the RUN ("this detected seeding, not drift"), where the filter
+    # is a fact about one source, and it is what backs the refusal message, the annotation
+    # and `changed=false` on a corpus that has never been seeded at all. Folding it into
+    # the per-source rule would delete a report of the whole-corpus condition and leave an
+    # operator to infer it from N identical per-source lines.
     inert = bool(n_total) and n_unseeded == n_total and not args.record_baseline
     # And a run that checked NOTHING — an empty group filter, a typo'd `--group`, a
     # manifest whose `sources:` is empty — is not a clean run either. This used to be
@@ -1025,12 +1088,16 @@ def main():
     nothing_checked = n_total == 0
 
     if args.github_output:
-        # `changed` drives whatever the calling workflow does next. On an inert run every
-        # source "changed" against an empty baseline, which is not a finding, so it must
-        # not fire downstream work; the unseeded count rides along so a workflow can react
-        # to the seeding condition itself.
+        # `changed` drives whatever the calling workflow does next. An unseeded source
+        # "changed" against an empty baseline, which is not a finding, so it must not fire
+        # downstream work; the unseeded count rides along so a workflow can react to the
+        # seeding condition itself. `ticketable` rather than `changed and not inert`
+        # because the inert test only caught the WHOLLY unseeded corpus — one seeded source
+        # anywhere switched it off, and a partly-seeded run then fired the workflow off
+        # sources nothing had compared (corpus-toolkit#145). `ticketable` is empty in both
+        # cases and needs no second predicate to say so.
         with open(args.github_output, "a") as f:
-            f.write(f"changed={'true' if changed and not inert else 'false'}\n")
+            f.write(f"changed={'true' if ticketable else 'false'}\n")
             f.write(f"unseeded={n_unseeded}\n")
 
     opened = attempted = 0
@@ -1045,7 +1112,7 @@ def main():
     findings = _group_drift_findings(changed, per_group)
     findings_attempted = findings_opened = 0
     filed_findings: list[str] = []
-    if args.open_issues and changed and not inert:
+    if args.open_issues and ticketable and not inert:
         _ensure_label()
         # BEFORE the individual tickets, and out of the same budget (ADR 0010). Before,
         # because `_issue_order` spends smallest-drifting-group-first and therefore reaches
@@ -1062,7 +1129,7 @@ def main():
             if _open_group_finding(f.group, f.ids, f.compared, f.in_scope):
                 findings_opened += 1
                 filed_findings.append(f.group)
-        for c in _issue_order(changed, per_group):
+        for c in ticketable:
             if attempted + findings_attempted >= MAX_ISSUES_PER_RUN:
                 capped = True
                 break
@@ -1120,11 +1187,26 @@ def main():
                       f"{len(recorded['refused'])} manifest entr(ies) could not be "
                       f"recorded; this run exits non-zero.")
     if n_unseeded and not args.record_baseline:
+        # THE OTHER HALF OF corpus-toolkit#145, and the reason the ticket filter is not the
+        # whole fix. Those sources used to be mentioned by the (wrong) tickets filed for
+        # them; suppressing the tickets and saying nothing more would trade "could not
+        # check reported as drift" for "could not check reported as absent", which is the
+        # rule of CONTEXT.md broken in the other direction. So the ids are named here, the
+        # remedy is named beside them, the annotation below puts it where CI looks, and the
+        # exit status carries it out of the log entirely.
+        shown = ", ".join(unseeded_ids[:20]) + ("…" if n_unseeded > 20 else "")
         print(f"{n_unseeded} of {n_total} in-scope source(s) have NO recorded baseline. A "
               f"source with `sha256: ''` can never compare equal, so it reports CHANGED "
-              f"every run and its drift means nothing. Seed them with "
+              f"every run and its drift means nothing. NO `Source changed:` ticket was "
+              f"filed for them and they spent none of the issue budget — an uncompared "
+              f"source is not a changed source (ADR 0010) — so this line is the only "
+              f"report they get: {shown}. Seed them with "
               f"`corpus-detect-changes --config {args.config} --record-baseline`.",
               file=sys.stderr)
+        _annotate("Sources have no recorded baseline and were not compared",
+                  f"{n_unseeded} of {n_total} in-scope source(s) were never compared to "
+                  f"anything and file no drift ticket: {shown}. Seed with "
+                  f"corpus-detect-changes --record-baseline.")
     for pat, hits, removed in zip(patterns, pattern_hits, pattern_bytes):
         shown = pat.pattern.decode("utf-8", "replace")
         share = removed / normalizable_bytes if normalizable_bytes else 0.0
@@ -1182,8 +1264,15 @@ def main():
                       f"{n_total} of {n_total} sources have no recorded baseline; no "
                       f"issues filed. Seed with corpus-detect-changes --record-baseline.")
         else:
+            # THE DENOMINATOR IS WHAT THE RUN WAS ENTITLED TO FILE, not everything that
+            # compared unequal. `2 opened, 0 failed, of 3 changed source(s)` invites the
+            # subtraction that says one filing went missing, which is the
+            # corpus-toolkit#53 confusion this line exists to prevent, reinstated by
+            # understating instead of overstating. The sources left out are named on their
+            # own line above, with their remedy.
             print(f"{opened} issue(s) opened or already open, "
-                  f"{attempted - opened} failed, of {len(changed)} changed source(s).")
+                  f"{attempted - opened} failed, of {len(ticketable)} changed source(s) "
+                  f"with a recorded baseline.")
             # SAID OUT LOUD, because a new kind of issue appearing in the tracker that the
             # run's own log never mentions is the corpus-toolkit#53 shape one level up.
             # Attempted and opened are both here for the same reason they are on the line
@@ -1197,7 +1286,11 @@ def main():
                         "about why, and the individual tickets stand alongside it "
                         "(ADR 0010).")
         if capped:
-            dropped = len(changed) - attempted
+            # `ticketable`, not `changed`: a source with no recorded baseline was never a
+            # candidate for a ticket, so counting it here inflates the one number an
+            # operator uses to judge how much of the report is missing and points them at
+            # the cap for a condition the cap had nothing to do with.
+            dropped = len(ticketable) - attempted
             print(f"STOPPED after {MAX_ISSUES_PER_RUN} — {dropped} changed source(s) were "
                   f"not reported, and THIS RUN EXITS NON-ZERO because a capped run is not "
                   f"a clean run (corpus-toolkit#67).", file=sys.stderr)
@@ -1216,7 +1309,7 @@ def main():
             # "no issue for a group that drifted" is also exactly what the silent-reporting
             # failure of corpus-toolkit#53 looks like from the outside, and an operator
             # cannot tell those apart from the breakdown alone.
-            spend_order = _drifting_groups_in_spend_order(changed, per_group)
+            spend_order = _drifting_groups_in_spend_order(changed)
             print("BUDGET SPENT SMALLEST-GROUP-FIRST (corpus-toolkit#69): groups were "
                   "reported in ascending order of drift count — ties broken by group name, "
                   "then by manifest order within a group — so a small genuine finding files "
@@ -1255,9 +1348,16 @@ def main():
                       "which is corpus-toolkit#53 and has nothing to do with the cap.",
                       file=sys.stderr)
             if n_unseeded:
+                # NO LONGER A SUSPECT FOR THE CAP, and this used to name it as one. Since
+                # corpus-toolkit#145 an unseeded source files no ticket and spends no
+                # slot, so the sources that exhausted the budget here all had a baseline
+                # and the drift is the drift. Still said, because they were not compared.
                 print(f"MEASURED: {n_unseeded} of {n_total} in-scope source(s) have no "
-                      f"recorded baseline and therefore drift every run. Seed with "
-                      f"`--record-baseline` before raising the cap.", file=sys.stderr)
+                      f"recorded baseline. They are NOT the cause of this cap — an "
+                      f"unseeded source files no ticket and spends no slot — but they "
+                      f"were not compared either, and are named on their own line above. "
+                      f"Seed them with `--record-baseline`; raising the cap will not "
+                      f"reach them.", file=sys.stderr)
             else:
                 print(f"MEASURED: 0 of {n_total} in-scope source(s) are missing a "
                       f"baseline, so an unrecorded baseline is NOT the cause here — this "
@@ -1328,12 +1428,22 @@ def main():
     # CI is the documented remedy for #68 reporting success having done nothing. Drift
     # itself is still a signal, not an error.
     refused_write = bool(recorded and recorded["refused"])
+    # AN UNSEEDED SOURCE WAS NOT COMPARED, and since corpus-toolkit#145 it files no ticket
+    # either, so the exit status is what carries it out of a log nobody reads. Same
+    # unconditional treatment as a missing watched path: the bytes arrived and the
+    # comparison did not happen, and it will not happen on any future run until somebody
+    # seeds it. NOT narrowed to "unseeded was the only finding" — whether a source was
+    # compared is a fact about that source, and gating the signal on whether some other
+    # source happened to drift would make it appear and disappear for unrelated reasons.
+    # `--record-baseline` is exempt: that run is the remedy, and a remedy that reports
+    # failure for the condition it just fixed never reports done.
+    unchecked_baseline = bool(n_unseeded) and not args.record_baseline
     # `watch_failed` is unconditional, unlike `failed`, which needs --strict. Upstream being
     # briefly unreachable is ordinary; a source that was fetched successfully and still
     # could not be compared is not, and it stays uncompared on every subsequent run until
     # somebody looks. Could-not-check is never reported as nothing-to-report (CONTEXT.md).
     sys.exit(1 if (failed and args.strict) or watch_failed or unreadable
-             or systemic or capped or inert
+             or systemic or capped or inert or unchecked_baseline
              or nothing_checked or refused_write else 0)
 
 
