@@ -20,6 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from corpus_toolkit import config as config_mod                  # noqa: E402
+from corpus_toolkit.mcp.framework import CorpusFramework         # noqa: E402
 from corpus_toolkit.validate import frontmatter as fm_mod        # noqa: E402
 
 CORPUS_YML = """\
@@ -195,6 +197,75 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
                           f"the unset error no longer carries {fragment!r} ({guards}), "
                           f"so a corpus reading it cannot act on it:\n{out}")
 
+    # EVERY DISTINCT front door the nine live corpora declare, read off
+    # `/home/dzinck/*/_meta/corpus.yml` on 2026-08-22 — eight strings, not nine, because
+    # oregon-budget and oregon-legislature both declare `olis.oregonlegislature.gov`.
+    # Kept as LITERALS rather than read off disk so the guard runs anywhere: what it
+    # protects is the rule, not those checkouts.
+    LIVE_FRONT_DOORS = (
+        "https://www.oregonlegislature.gov/bills_laws/",              # ERF
+        "https://www.ecfr.gov/",                                      # federal-reference
+        "https://sos.oregon.gov/audits/pages/state-audits.aspx",      # oregon-audits
+        "https://olis.oregonlegislature.gov/",                        # budget + legislature
+        "https://www.oregon.gov/das/hr/pages/lru.aspx",               # collective-bargaining
+        "https://oregoncounties.org/counties/",                       # oregon-counties
+        "https://www.oregonlegislature.gov/lfo/Pages/KPM.aspx",       # oregon-kpm
+        "https://sos.oregon.gov/archives/records-management/Pages/default.aspx",  # retention
+    )
+
+    # NOT a live corpus's value — a constructed near-miss, kept apart from the measured
+    # list above so neither claims the other's provenance. Its PATH says example and its
+    # host does not, which is what a substring check gets wrong.
+    PATH_SAYS_EXAMPLE = "https://sos.oregon.gov/archives/example-schedules"
+
+    def _overview(self):
+        """`corpus_overview` for the corpus this test just wrote to disk."""
+        cfg = config_mod.load(self.root / "_meta" / "corpus.yml")
+        return CorpusFramework(cfg).corpus_overview()
+
+    def test_the_gate_and_the_running_server_say_the_same_sentence(self):
+        """corpus-toolkit#140. The two readers of this field are `corpus-validate-
+        frontmatter` and `corpus_overview`, and the defect was that they answered the same
+        question differently: CI refused `https://REPLACE-ME.invalid/...` while the server
+        carried it on every response without a word.
+
+        Asserted as SENTENCE IDENTITY rather than as two independent wordings, because
+        two wordings is the state this came from — one fact declared twice with nothing
+        gating agreement has been the shape of five defects in this repo. If either caller
+        re-inlines its own prose, this fails."""
+        for source in ('"https://REPLACE-ME.invalid/where-the-official-text-lives"',
+                       '"https://sos.oregon.example/archives"', None):
+            with self.subTest(authoritative_source=source):
+                self.write_corpus(authoritative_source=source)
+                self.write_doc("spending-100", "Spending 100")
+
+                code, out = self.validate()
+                warning = self._overview().get("config_warning")
+
+                self.assertEqual(code, 1, out)
+                self.assertIsNotNone(
+                    warning, f"corpus_overview served {source} without a config_warning")
+                self.assertIn(warning, out,
+                              f"the gate and the server disagree about {source}:\n"
+                              f"server: {warning}\ngate:\n{out}")
+
+    def test_a_real_front_door_produces_no_warning_anywhere(self):
+        """The half of this that is easiest to fake. A predicate that fires on every
+        corpus satisfies "the placeholder is named" and destroys the field, so every
+        distinct front door the nine live corpora declare is checked against BOTH readers,
+        plus the constructed `.../example-schedules` whose PATH says example and whose
+        host does not."""
+        for url in (*self.LIVE_FRONT_DOORS, self.PATH_SAYS_EXAMPLE):
+            with self.subTest(url=url):
+                self.write_corpus(authoritative_source=f'"{url}"')
+                self.write_doc("spending-100", "Spending 100")
+
+                code, out = self.validate()
+
+                self.assertEqual(code, 0, f"the gate refused a real front door {url}:\n{out}")
+                self.assertNotIn("config_warning", self._overview(),
+                                 f"corpus_overview warned about a real front door {url}")
+
     def test_a_non_url_authoritative_source_is_an_error(self):
         """Convention 1 says the field IS a URL, so a caller will try to follow it —
         a plausible-looking non-URL is worse than the omission."""
@@ -338,6 +409,18 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
             self.assertIn(fragment, out,
                           f"the template warning no longer carries {fragment!r} "
                           f"({guards}):\n{out}")
+
+    def test_the_template_exemption_does_not_cover_a_value_someone_typed(self):
+        """The exemption is for the two states an unedited template is legitimately in —
+        no front door, or the placeholder it ships. A value that is not a URL is not one of
+        them: somebody chose it, and a caller follows this field. It has been an error
+        since v1.10.0 and stays one here, template or not."""
+        self.write_template(authoritative_source='"Oregon Secretary of State"')
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1, f"the template exemption swallowed a non-URL:\n{out}")
+        self.assertIn("must be a URL", out)
 
     def test_a_template_that_holds_a_document_is_a_corpus_and_fails(self):
         """The exemption cannot become the way to keep a placeholder: a repo that forked

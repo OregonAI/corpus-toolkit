@@ -601,6 +601,20 @@ the hook and registering nothing is likewise an error rather than a no-op.
    plus a `config_warning` on `corpus_overview` — an absent key would read as
    "the server did not look", which is not what happened.
 
+   **`config_warning` fires on ANY fault in the declared front door, not only
+   on its absence** (corpus-toolkit#140). A value that is present and cannot
+   answer — a host under an RFC 2606 reserved name, a value that is not a URL —
+   used to pass silently because it is truthy, so the tool an agent calls first
+   to learn what it is talking to said nothing while every response carried a
+   dead pointer. The **declared value still ships** in the slot: `null` is the
+   documented "this corpus declares none", and emitting it for a corpus that
+   configured the field wrongly would erase the difference between the two and
+   with it the only fact that tells an operator what to fix. The warning names
+   the value and why it cannot be a front door; the slot keeps carrying it.
+   `corpus_overview` is the only tool that carries this warning — a config
+   complaint on every response would be noise proportional to traffic rather
+   than to the problem.
+
    **Declaring one is a repo gate, not a runtime one** (corpus-toolkit#11).
    `corpus-validate-frontmatter` fails a corpus that declares no
    `corpus.authoritative_source`, and fails one whose host is a name RFC 2606

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import re
+import urllib.parse
 from pathlib import Path
 from typing import NamedTuple
 
@@ -234,6 +235,24 @@ class CorpusConfig:
             return self.issuing_body_registry.relative_to(self.root)
         except ValueError:
             return self.issuing_body_registry
+
+    @property
+    def front_door_fault(self) -> "FrontDoorFault | None":
+        """What is wrong with this corpus's `corpus.authoritative_source`, or None.
+
+        THE PROPERTY, NOT THE MODULE FUNCTION, IS WHAT CALLERS WANT: the validator and
+        `corpus_overview` both hold a config, and both used to answer this question their
+        own way — which is how the running server ended up carrying the template's
+        placeholder in silence while CI refused it (corpus-toolkit#140). Same shape as
+        `issuing_body_registry_fault` above, and for the same reason.
+
+        NOT CHECKED AT LOAD, DELIBERATELY. `load()` keeps `str | None` and a server keeps
+        starting: a pin bump must not take down a corpus that was legal when it deployed,
+        and `authoritative_source: null` is a documented response value. Refusing is a
+        repo gate; this property is how the runtime gets to SAY something without becoming
+        one.
+        """
+        return front_door_fault(self.authoritative_source)
 
     @property
     def issuing_body_registry_fault(self) -> str | None:
@@ -636,6 +655,171 @@ class RegistryRead(NamedTuple):
         """The rows that are entries — the ones a field can be read off at all. `entries`
         is what the file holds; `without_slug` counts the difference."""
         return [e for e in (self.entries or []) if isinstance(e, dict)]
+
+
+# ---------------------------------------------------------------- the front door
+#
+# ONE DECLARATION, TWO READERS, AND THAT IS THE WHOLE POINT (corpus-toolkit#140).
+# `corpus-validate-frontmatter` gates the repo and `corpus_overview` tells a live agent
+# what it is talking to; they are asking the SAME question about the SAME field, and the
+# defect that brought this here was that they answered it differently — the validator
+# refused `https://REPLACE-ME.invalid/...` while the running server carried it on every
+# response without a word. Both now read the sentence below, so neither can drift from
+# the other; this is the `issuing_body_registry_fault` arrangement (corpus-toolkit#136)
+# applied to the field next door, and `mcp` importing a private helper out of `validate`
+# would have been the arrangement #136 removed.
+
+# RFC 2606 reserves these names so they can never belong to anyone: §2 sets aside the
+# top-level domains, §3 the second-level `example.*` names, both for documentation and
+# examples. A corpus's front door can never legitimately live under one, which is what
+# makes "this is a placeholder, not an answer" checkable without guessing at intent —
+# `corpus-template` ships `https://REPLACE-ME.invalid/where-the-official-text-lives`
+# precisely because `.invalid` cannot resolve.
+_RESERVED_TLDS = ("test", "example", "invalid", "localhost")
+_RESERVED_DOMAINS = ("example.com", "example.net", "example.org")
+
+# The template's marker, kept as a NAMED BACKSTOP to the RFC 2606 rule rather than as the
+# rule itself. The general rule is the reserved names — an author who edits the path and
+# leaves the host still ships a dead pointer, which a `REPLACE-ME` match alone would miss
+# — but the reverse edge is real too: swap `.invalid` for a live TLD, or drop it, and
+# `https://REPLACE-ME.oregon.gov/...` is off the reserved list while still being the
+# template's unfilled line.
+_TEMPLATE_MARKER = "replace-me"
+
+# The value's actionable half, shared by every finding about the field — validator and
+# running server alike — so that a corpus meeting it for the first time is told the same
+# thing however it got here.
+#
+# PRIVATE, LIKE EVERY HELPER IN THIS SECTION. AGENTS.md makes anything a corpus repo can
+# reach public surface that cannot be renamed, and the only names this section needs to
+# expose are `FrontDoorFault` and `front_door_fault` — every other name here has exactly
+# one caller, inside this module.
+_HOW_TO_SET_THE_FRONT_DOOR = (
+    "Set it to this corpus's front door: the one page a reader opens to reach its "
+    "official text — one line under `corpus:` in _meta/corpus.yml, e.g. "
+    '`authoritative_source: "https://sos.oregon.gov/archives/records/"`. It need not '
+    "cover every publisher — a corpus spanning several declares its best single entry "
+    "point, and get_document answers per document from that document's source_url.")
+
+
+class FrontDoorFault(NamedTuple):
+    """What is wrong with a `corpus.authoritative_source`, and the sentence that says so.
+
+    `exempt_while_uninstantiated` is the ONE thing a caller needs beyond the sentence, and
+    it is carried here rather than re-derived from the message so that no caller has to
+    match on prose to pick a severity. It answers: may an uninstantiated `corpus-template`
+    — `corpus.id` still `{{CORPUS_ID}}` and no documents — report this as a warning rather
+    than an error?
+
+    TRUE FOR EXACTLY THE TWO STATES AN UNEDITED TEMPLATE IS LEGITIMATELY IN: no value at
+    all, and the placeholder the template itself ships. Those it cannot avoid until someone
+    fills the field in. Every other fault is a value somebody CHOSE, and the exemption
+    covers the template's own starting state, not whatever a fork typed over it — widening
+    it past those two states would turn a state-based exemption into a way to keep a bad
+    front door.
+
+    `corpus-validate-frontmatter` is the only reader of the flag; the MCP layer has one
+    severity and reads only the message.
+    """
+    message: str
+    exempt_while_uninstantiated: bool
+
+
+def _front_door_host(url: str) -> str:
+    """`url`'s host, normalised — lowercased and with a trailing dot stripped.
+
+    Raises ValueError exactly where `urllib.parse.urlsplit` does: `https://[oops` is an
+    "Invalid IPv6 URL". Callers decide what to say about that; this function will not
+    swallow it, because a value convention 1 promises is a URL and is not one is a
+    finding, never a shrug.
+    """
+    return (urllib.parse.urlsplit(url).hostname or "").rstrip(".").lower()
+
+
+def _reserved_name(host: str) -> str | None:
+    """The RFC 2606 reserved name `host` sits under, or the template's marker, or None.
+
+    Takes the HOST, never the URL text. A substring match on `example` or `invalid` would
+    reject `https://sos.oregon.gov/archives/example-schedules` — a real front door whose
+    path happens to say example — and would miss nothing a host check misses.
+
+    An empty host (`https:///x`, or a value the caller could not parse) returns None: the
+    callers own the message for a value that is not a usable URL.
+
+    WHERE THIS RULE STOPS: an address literal is not a NAME, so `http://127.0.0.1:8000`
+    is not reserved here. It is refused, under its own rule and its own message, by
+    `address_literal` below — RFC 2606 does not cover it, and folding it in under that
+    citation would make the citation wrong (corpus-toolkit#138).
+    """
+    if not host:
+        return None
+    labels = host.split(".")
+    if labels[-1] in _RESERVED_TLDS:
+        return "." + labels[-1]
+    second_level = ".".join(labels[-2:])
+    if second_level in _RESERVED_DOMAINS:
+        return second_level
+    # LAST, so the template's own `REPLACE-ME.invalid` is explained by the general rule
+    # (the reserved name is the reason it can never resolve); the marker only has to speak
+    # for the hosts that rule no longer covers.
+    return "REPLACE-ME" if _TEMPLATE_MARKER in labels else None
+
+
+def front_door_fault(value: str | None) -> FrontDoorFault | None:
+    """Why `value` cannot be a corpus's front door, or None where no rule here refuses it.
+
+    None IS THE ABSENCE OF A FINDING, NOT A CLAIM THAT THE URL IS GOOD. Nothing here
+    fetches anything; a host that is a name, spelled plausibly, and long dead reads as None
+    and always will. Callers may say "nothing about this value says it cannot be a front
+    door" and must not say "this front door works".
+
+    EVERY WAY THIS FIELD CAN FAIL, IN ONE PLACE, because the caller that enumerates a
+    SUBSET is the bug this function was extracted to end. `corpus_overview` used to ask
+    only "is it missing?", so a corpus serving the template's placeholder was told
+    nothing at all; a caller that re-lists the interesting kinds re-opens that gap at a
+    new offset the next time a way is added. Callers ask "is anything wrong", and read
+    `exempt_while_uninstantiated` only to choose how loudly to say it.
+
+    ORDER IS NARROWING, AND THE MESSAGES DEPEND ON IT: is there a value, is it a URL, can
+    it be parsed, does it name a host, and only then what that host is. Each branch may
+    assume everything above it, which is why the reserved-name rule can talk about a host
+    without hedging about whether there is one.
+    """
+    text = str(value or "")
+    if not text:
+        return FrontDoorFault((
+            "corpus.authoritative_source is not set — MCP responses carry "
+            "`authoritative_source: null`, so an agent is told to verify at source "
+            "without being told where to start (response convention 1). "
+            + _HOW_TO_SET_THE_FRONT_DOOR), True)
+    if not text.startswith(("http://", "https://")):
+        # A non-URL here is worse than nothing: convention 1 says the field IS a URL, so a
+        # caller will try to follow it.
+        return FrontDoorFault(
+            f"corpus.authoritative_source must be a URL, got {value!r}", False)
+    try:
+        host = _front_door_host(text)
+    except ValueError as e:
+        return FrontDoorFault((
+            f"corpus.authoritative_source is {text!r}, which starts like a URL but "
+            f"cannot be parsed as one ({type(e).__name__}: {e}). Response convention 1 "
+            f"says this field IS a URL and a caller will try to follow it. "
+            + _HOW_TO_SET_THE_FRONT_DOOR), False)
+    if not host:
+        # `https:///schedules` clears the `https://` branch above and names nowhere to go.
+        return FrontDoorFault(
+            f"corpus.authoritative_source is {text!r}, which names no host, so it points "
+            f"nowhere. " + _HOW_TO_SET_THE_FRONT_DOOR, False)
+    if (name := _reserved_name(host)):
+        why = ("the marker corpus-template leaves for you to replace"
+               if name == "REPLACE-ME" else
+               "a name RFC 2606 reserves so that it can never be a real host")
+        return FrontDoorFault((
+            f"corpus.authoritative_source is {text!r}, whose host carries {name} — {why}. "
+            f"It parses as a URL, so nothing downstream refuses it: every MCP response "
+            f"carries it and tells an agent to verify somewhere that cannot answer. This "
+            f"is a placeholder, not a front door. " + _HOW_TO_SET_THE_FRONT_DOOR), True)
+    return None
 
 
 def read_issuing_body_registry(registry_path, key: str) -> RegistryRead:

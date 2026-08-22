@@ -17,6 +17,34 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — `corpus_overview` names a front door that cannot answer (corpus-toolkit#140)
+
+**Nothing to change; one new sentence may appear in one tool's response.** `corpus_overview`
+attached its `config_warning` on exactly one condition — `corpus.authoritative_source`
+missing. A corpus serving `https://REPLACE-ME.invalid/where-the-official-text-lives`, the
+value `corpus-template` ships, is truthy, so no warning fired and every object-shaped
+response carried that URL as if it were an answer while the one tool an agent is told to
+call first said nothing was wrong. An omission had a voice; the same defect with a URL in
+front of it had silence.
+
+`corpus_overview` now warns whenever there is **anything** wrong with the declared front
+door, not when it is missing. The declared value **still ships** in the envelope: `null` is
+the documented "this corpus declares none", and emitting it here would collapse a corpus
+configured wrongly into an unconfigured one and delete the one fact an operator needs —
+which placeholder is in the file.
+
+**Still not a repo gate at runtime** (corpus-toolkit#141). `config.load()` keeps
+`authoritative_source: str | None` and a server still starts on any value, because a pin
+bump must not take down a corpus that was legal when it deployed. What changed is that the
+runtime may now *say* something. A warning is not a refusal.
+
+The rule itself moved: `validate/frontmatter._reserved_name` and the wording of every
+finding about this field are now `config.front_door_fault`, which the validator and the MCP
+framework both read. This is the `issuing_body_registry_fault` arrangement
+(corpus-toolkit#136) applied to the field next door — the two readers of one field can no
+longer answer differently, which is the whole of #140. Zero live corpora are affected; all
+nine declare a real https front door.
+
 ### Added — a drift run may file one group drift finding (corpus-toolkit#132, ADR 0010)
 
 **On a capped run this costs you tickets: one slot per finding.** `MAX_ISSUES_PER_RUN` is
