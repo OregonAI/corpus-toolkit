@@ -186,17 +186,33 @@ def test_user_agent_keeps_its_shape():
     assert m.group("v") != "1.1", "the frozen literal is back"
 
 
-def test_the_distribution_is_the_one_in_this_checkout():
-    """Guards the comparison above from being satisfied by SOME OTHER install.
+def test_the_code_under_test_is_the_one_in_this_checkout():
+    """The OTHER half of the identity question, and the half nothing else asks.
 
-    `importlib.metadata` searches sys.path, so a stray site-packages copy can answer for a
-    name this checkout also provides — which is how the stale 1.14.0 metadata was reached in
-    the first place, from a `.dist-info` written when the editable install was made.
+    `in_tree_distribution` settles that the METADATA belongs to this checkout. It says
+    nothing about where `corpus_toolkit` ITSELF came from, and `importlib.metadata` and
+    `import` search sys.path independently. A site-packages copy shadowing this checkout
+    yields a `USER_AGENT` built somewhere else while the metadata and `pyproject.toml`
+    agree perfectly — every other assertion in this file green, and the operator reading
+    their access log told a version the running code is not. That is the exact failure
+    this module exists to prevent, one level up from the one it was catching.
 
-    That identity question is now decided before the comparison, by `in_tree_distribution`,
-    rather than after it by a version that happened to disagree (corpus-toolkit#146).
+    Measured before this guard existed: a tree holding these tests, with the package
+    resolved from a DIFFERENT checkout, reported `9 passed, 2 skipped` (corpus-toolkit#152).
+
+    DELIBERATELY NOT BEHIND `in_tree_distribution`'s skip. Import provenance does not
+    depend on install metadata, so gating it there would make it inert in exactly the
+    environment where a shadowing import is most likely — a worktree, where that guard
+    skips. Ungated is also safe: a worktree imports its own source, so `imported` is its
+    own root, which was measured in both a worktree and the main checkout before this was
+    written. This assertion answers a question the environment can always answer.
     """
-    assert_metadata_matches_this_checkout(in_tree_distribution())
+    imported = pathlib.Path(remote.__file__).resolve().parent.parent
+    assert imported == REPO_ROOT, (
+        f"corpus_toolkit was imported from {imported}, not from this checkout at "
+        f"{REPO_ROOT}. Every version assertion in this file can still pass in that state, "
+        f"because metadata and pyproject are consulted independently of the import — so "
+        f"USER_AGENT would name a version the running code is not.")
 
 
 def test_uninstalled_reports_unknown_rather_than_a_number(monkeypatch):

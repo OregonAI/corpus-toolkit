@@ -17,6 +17,31 @@ it can break you.
 
 ## Unreleased
 
+### Internal — the suite now asserts WHERE `corpus_toolkit` was imported from (corpus-toolkit#152)
+
+**Nothing here changes anything a corpus can observe**: test-only, no runtime behaviour, no
+schema, no MCP contract, no version.
+
+`#146` settled that the *metadata* answering `importlib.metadata` belongs to this checkout.
+Nothing asserted that the *code* does, and `import` and `importlib.metadata` search
+`sys.path` independently — so a site-packages copy shadowing this checkout produced a
+`USER_AGENT` built somewhere else while metadata and `pyproject.toml` agreed perfectly, and
+every assertion in the file stayed green. Measured before the guard existed: a tree holding
+these tests with the package resolved from a different checkout reported `9 passed, 2
+skipped`.
+
+`test_the_distribution_is_the_one_in_this_checkout` had become a duplicate of the first
+assertion in `test_user_agent_names_the_version_this_source_declares` — two tests, one fact,
+identical failure messages — because the identity question it was named for now happens
+before the comparison. It is renamed to `test_the_code_under_test_is_the_one_in_this_checkout`
+and given the assertion its name always promised.
+
+**Deliberately not behind `in_tree_distribution`'s skip.** Import provenance does not depend
+on install metadata, and gating it there would make it inert in exactly the environment where
+a shadowing import is most likely — a worktree, where that guard skips. A worktree imports
+its own source, so the ungated check passes there; that was measured in both a worktree and
+the main checkout before it was written.
+
 ### Internal — `test_user_agent.py` no longer fails in a git worktree (corpus-toolkit#146)
 
 **Nothing here changes anything a corpus can observe**, and no bump is involved: test-only,
