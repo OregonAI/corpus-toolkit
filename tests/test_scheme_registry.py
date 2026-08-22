@@ -10,6 +10,7 @@ scheme recognized this format" about a corpus that recognizes it perfectly well.
 
 Stdlib unittest only, matching the rest of tests/.
 """
+import re
 import shutil
 import sys
 import tempfile
@@ -128,6 +129,79 @@ class TestIsolationBetweenCorpora(SchemeRegistryTestCase):
         register_scheme("adhoc", r"ADHOC\s+(?P<num>\d+)", "adhoc-{num}")
 
         self.assertEqual([s[0] for s in self.framework(cfg).schemes], ["adhoc"])
+
+
+COMPILED_CITATIONS_PY = """\
+import re
+from corpus_toolkit.mcp.framework import register_scheme
+
+# The corpus keeps its citation patterns COMPILED because it matches with them itself.
+EO_C = re.compile(r"(?:Executive\\s+Order|EO)\\s+(?P<num>\\d+-\\d+)", re.I)
+
+register_scheme("eo", EO_C, "eo-{num}")
+"""
+
+GRAPH_JSON = (
+    '{"nodes": [{"id": "eo-23-04", "title": "Executive Order 23-04", '
+    '"doc_type": "executive_order"}], "edges": []}')
+
+
+class TestCompiledPatternFlagsSurvive(SchemeRegistryTestCase):
+    """A compiled pattern registers AS ITSELF, flags included (corpus-toolkit#134).
+
+    The seam is the SERVED resolver — `resolve_citation` on the framework the server
+    answers from — not the pattern object the corpus happens to hold. Asserting on the
+    local object proves only that `re` works.
+    """
+
+    def _compiled_corpus(self) -> Path:
+        root = self.tmp / "compiled"
+        cfg = make_corpus(root)
+        (root / "src" / "citations.py").write_text(COMPILED_CITATIONS_PY)
+        (root / "_meta" / "graph.json").write_text(GRAPH_JSON)
+        return cfg
+
+    def test_lowercase_citation_resolves_through_the_served_resolver(self):
+        out = self.framework(self._compiled_corpus()).resolve_citation("executive order 23-04")
+
+        self.assertEqual([m["id"] for m in out["matches"]], ["eo-23-04"],
+                         f"the re.I the corpus compiled into its pattern was dropped: {out}")
+
+    def test_a_string_pattern_is_compiled_exactly_as_before(self):
+        """BACKWARD COMPATIBILITY. A corpus passing a string gets what it always got: the
+        pattern compiled with no flags, so an inline `(?i)` is honoured and a bare string
+        is case-sensitive. This is the matrix that pushed `executive-regulatory-frameworks`
+        into passing `EO_C.pattern` and losing `re.I` on five of its six schemes.
+        """
+        root = self.tmp / "strings"
+        cfg = make_corpus(root)
+        (root / "src" / "citations.py").write_text(
+            'import re\n'
+            'from corpus_toolkit.mcp.framework import register_scheme\n'
+            'EO_C = re.compile(r"(?:Executive\\s+Order|EO)\\s+(?P<num>\\d+-\\d+)", re.I)\n'
+            'register_scheme("eo", EO_C.pattern, "eo-{num}")\n'
+            'register_scheme("eo-inline", "(?i)" + EO_C.pattern, "eo-{num}")\n')
+        (root / "_meta" / "graph.json").write_text(GRAPH_JSON)
+        f = self.framework(cfg)
+
+        self.assertEqual([m["id"] for m in f.resolve_citation("EO 23-04")["matches"]],
+                         ["eo-23-04"], "a string caller must behave exactly as before")
+        self.assertEqual([m["id"] for m in f.resolve_citation("executive order 23-04")["matches"]],
+                         ["eo-23-04"], "an inline (?i) in a string pattern must still apply")
+
+    def test_a_bytes_pattern_is_refused_at_registration(self):
+        """A compiled BYTES pattern cannot match a citation string, and `pattern.search(c)`
+        would raise `TypeError` on every resolve — inside a live server, for every
+        citation, with the registration long past. Same policy as `_load_backend`: an
+        unusable plug-in object fails where it is plugged in, not on a later query.
+        """
+        with self.assertRaises(TypeError) as e:
+            register_scheme("bytes", re.compile(rb"EO\s+(?P<num>\d+-\d+)"), "eo-{num}")
+
+        self.assertIn("str", str(e.exception))
+        self.assertEqual([s[0] for s in self.framework(make_corpus(
+            self.tmp / "bytes", citation_module=False)).schemes], [],
+            "a refused scheme must not land in the registry")
 
 
 if __name__ == "__main__":

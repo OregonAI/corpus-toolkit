@@ -17,6 +17,40 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — `register_scheme` accepts a compiled pattern, flags and all
+
+**No action required; every existing (string) call is unchanged. A corpus whose citation
+patterns carry flags should now pass the compiled object rather than its `.pattern`.**
+
+`register_scheme(name, pattern, ...)` typed and documented `pattern` as `str`, so a corpus
+that keeps its citation patterns compiled — the natural shape, since it matches with them
+itself — had exactly one call available: `register_scheme("eo", EO_C.pattern)`.
+`re.compile()` over a pattern's source text keeps **none** of the flags the original was
+compiled with, and the loss is silent: the scheme registers, the server starts, and
+citations stop matching in whatever way the flag governed.
+
+`executive-regulatory-frameworks` registers six schemes and lost `re.I` on five of them
+that way (`ORS_C`, `OAR_RULE_C`, `OAR_DIV_C`, `EO_C`, `NUMS_C`); only `OR_CONST_C` matched
+case-insensitively, because an inline `(?i)` had been added to it by hand when this was
+first hit. So `resolve_citation("executive order 23-04")` came back `unresolved` while
+`"EO 23-04"` resolved, and nothing in the response said the difference was case rather
+than content.
+
+```python
+EO_C = re.compile(r"(?:Executive\s+Order|EO)\s+(?P<num>\d+-\d+)", re.I)
+
+register_scheme("eo", EO_C)            # flags survive by construction
+register_scheme("eo", EO_C.pattern)    # case-sensitive, as it always was
+```
+
+The parameter is now `str | re.Pattern`: a string is compiled exactly as before (no flags,
+inline `(?i)` honoured), and a compiled pattern is used **as itself**. A compiled *bytes*
+pattern is refused at registration with a `TypeError` naming the scheme — it can only ever
+raise `TypeError` on a citation str, and it would have done so on every resolve inside a
+live server. The guard runs through the served resolver, not the local pattern object.
+(corpus-toolkit#134)
+
+
 ### Fixed — the drift issue budget is no longer spent in manifest order
 
 **No action required, and the cap does not move.** `MAX_ISSUES_PER_RUN` is still 25 and a

@@ -102,10 +102,51 @@ _COLLECTING: list | None = None
 _SCHEME_CACHE: dict[tuple[str, str], list] = {}
 
 
-def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
-                    resolver=None, corpus: str | None = None) -> None:
+def _compiled(name: str, pattern) -> "re.Pattern":
+    """This scheme's pattern as a compiled object: A COMPILED PATTERN IS USED AS ITSELF.
+
+    THE TRAP THIS CLOSES (corpus-toolkit#134). The parameter used to be typed and
+    documented `str`, so a corpus holding its citation patterns compiled — the natural
+    shape, since it matches with them itself — had one call it could write:
+    `register_scheme("eo", EO_C.pattern)`. `re.compile()` over a pattern's SOURCE TEXT
+    keeps none of the flags the original was compiled with, and the loss is silent: the
+    scheme registers, the server starts, and citations stop matching in whatever way the
+    flag governed. `executive-regulatory-frameworks` lost `re.I` on five of its six schemes
+    that way, so `resolve_citation("executive order 23-04")` came back `unresolved` while
+    `"EO 23-04"` resolved — a difference of case that reads to an agent as a difference of
+    content.
+
+    Passing the object through is what makes the flags survive BY CONSTRUCTION rather than
+    by every corpus remembering to inline `(?i)` in its source text.
+
+    A STRING IS UNAFFECTED: still `re.compile(pattern)`, no flags, inline `(?i)` honoured
+    exactly as before. Widening the accepted type is additive — every existing corpus call
+    is a string call.
+
+    A compiled BYTES pattern is refused here rather than at query time. `pattern.search(c)`
+    against a citation string raises TypeError for EVERY citation, inside a live server,
+    with the registration long since past — the same reason `_load_backend` validates its
+    plug-in object at startup instead of on the first query.
+    """
+    if not isinstance(pattern, re.Pattern):
+        return re.compile(pattern)
+    if not isinstance(pattern.pattern, str):
+        raise TypeError(
+            f"register_scheme({name!r}): pattern is a compiled BYTES pattern, which cannot "
+            f"match a citation str — every resolve would raise TypeError. Compile it from "
+            f"a str pattern.")
+    return pattern
+
+
+def register_scheme(name: str, pattern: "str | re.Pattern", id_template: str | None = None,
+                    *, resolver=None, corpus: str | None = None) -> None:
     """Register a citation format: `pattern` is matched against the trimmed
-    citation string. Two ways to turn a match into candidate document id(s):
+    citation string.
+
+    `pattern` is EITHER a string, compiled here with no flags, OR AN ALREADY-COMPILED
+    PATTERN, USED AS GIVEN — flags and all. Pass the compiled object whenever the pattern
+    carries flags; that is the only form in which they survive registration
+    (corpus-toolkit#134). Two ways to turn a match into candidate document id(s):
 
     - `id_template`: formatted with the match's named groups (falls back to
       positional groups) to produce ONE candidate id.
@@ -136,7 +177,7 @@ def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
     `url`. Default None = resolve locally, exactly as before."""
     if id_template is None and resolver is None:
         raise ValueError("register_scheme requires id_template or resolver")
-    entry = (name, re.compile(pattern), id_template, resolver, corpus)
+    entry = (name, _compiled(name, pattern), id_template, resolver, corpus)
     # A CorpusFramework installs a collector around its citation_module import, so the
     # schemes land on that instance instead of a process-wide list. The global remains
     # for direct callers and tests. Corpus code is unchanged: it still imports and calls

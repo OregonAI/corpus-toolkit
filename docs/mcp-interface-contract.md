@@ -59,6 +59,20 @@ Map a citation string ("ORS 276A.300", "OAR 166-300-0015", "HB 2049",
 org registry. Never guess: unresolvable → explicit `unresolved` with the
 schemes attempted.
 
+**A scheme's pattern may be a string or an already-compiled pattern, and a
+compiled one is used as it is.** A corpus registers its formats with
+`register_scheme(name, pattern, ...)` from its `plugins.citation_module`; a
+string is compiled with no flags, so inline `(?i)` applies and nothing else
+does. Pass the **compiled object** whenever the pattern carries flags —
+`register_scheme("eo", EO_C)`, not `register_scheme("eo", EO_C.pattern)` — as
+`re.compile()` over a pattern's source text keeps none of them and the loss is
+silent: the scheme registers, the server starts, and citations stop matching in
+whatever way the flag governed (`resolve_citation("executive order 23-04")`
+`unresolved` while `"EO 23-04"` resolves — a difference of case reaching an
+agent as a difference of content). Additive: every string call behaves exactly
+as before. A compiled *bytes* pattern is refused at registration, because it
+could only ever raise on a citation str.
+
 Remote resolution (toolkit v1.1.0, additive — still contract v1): a
 citation scheme registered with `corpus="<sibling id>"` resolves against
 that sibling's compact `_meta/corpus-index.json` (see below) instead of the
