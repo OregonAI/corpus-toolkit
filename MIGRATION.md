@@ -541,8 +541,11 @@ plugins:
 
 Order is the order they are tried, and it decides which field a candidate reports as the one
 that matched. A field's value may be a string **or a list of strings** (matched element-wise),
-so an alias list needs no second key. A field naming no column in your registry is not
-rejected — see corpus-toolkit#129 — so check the spelling against the registry yourself.
+so an alias list needs no second key. A field naming no column in your registry does not
+fail the load — a corpus mid-migration declares the column its registry is about to grow —
+but `corpus-validate-frontmatter` now warns, naming the field and the registry it was
+checked against (corpus-toolkit#129), so a typo shows up in CI rather than as a body nobody
+can find.
 
 **Two things change for every corpus, whether or not you declare anything.**
 

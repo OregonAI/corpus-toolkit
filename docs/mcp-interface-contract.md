@@ -59,6 +59,20 @@ Map a citation string ("ORS 276A.300", "OAR 166-300-0015", "HB 2049",
 org registry. Never guess: unresolvable → explicit `unresolved` with the
 schemes attempted.
 
+**A scheme's pattern may be a string or an already-compiled pattern, and a
+compiled one is used as it is.** A corpus registers its formats with
+`register_scheme(name, pattern, ...)` from its `plugins.citation_module`; a
+string is compiled with no flags, so inline `(?i)` applies and nothing else
+does. Pass the **compiled object** whenever the pattern carries flags —
+`register_scheme("eo", EO_C)`, not `register_scheme("eo", EO_C.pattern)` — as
+`re.compile()` over a pattern's source text keeps none of them and the loss is
+silent: the scheme registers, the server starts, and citations stop matching in
+whatever way the flag governed (`resolve_citation("executive order 23-04")`
+`unresolved` while `"EO 23-04"` resolves — a difference of case reaching an
+agent as a difference of content). Additive: every string call behaves exactly
+as before. A compiled *bytes* pattern is refused at registration, because it
+could only ever raise on a citation str.
+
 Remote resolution (toolkit v1.1.0, additive — still contract v1): a
 citation scheme registered with `corpus="<sibling id>"` resolves against
 that sibling's compact `_meta/corpus-index.json` (see below) instead of the
@@ -199,6 +213,21 @@ corpus without a graph answers the first row above.
   `issuing_body_registry` to name columns of — each of those otherwise degrades
   into "matches nothing", which is indistinguishable from a body that is not
   there.
+
+  **Whether a declared field exists in the registry is checked by
+  `corpus-validate-frontmatter`, and reported rather than fatal.** A field no
+  registry entry carries — `oar_nmae` — is shape-valid, so it loads and serves
+  while every free-text query against it matches nothing. It is not a load
+  error because a mid-migration corpus legitimately declares the column its
+  registry is about to grow, so the finding surfaces where corpus-level config
+  findings already do: a `warning` from the validator, next to a missing
+  `corpus.authoritative_source`, naming the field and the registry it was
+  checked against. A field carried by *some* entries is a partly-populated
+  column and is not reported. A registry that could not be read reports the
+  read failure as an **error** and says the fields went unchecked, and a
+  registry holding no entries is reported as an empty registry rather than as a
+  misspelled field — "could not check" is never served as "is not there"
+  (response convention 5).
 
   **Uniqueness is per body, not per name.** A query hitting a body's `name`, its
   `oar_name` and two of its aliases is one hit, not four; otherwise a wider net

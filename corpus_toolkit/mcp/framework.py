@@ -32,7 +32,7 @@ from pathlib import Path
 
 import yaml
 
-from corpus_toolkit.config import CorpusConfig
+from corpus_toolkit.config import CorpusConfig, name_values
 from corpus_toolkit.plugins import load_module
 from corpus_toolkit.mcp.backends import (
     BIG_DOC_BYTES, REQUIRED_BACKEND_METHODS, FileBackend, RetrievalBackend,
@@ -102,10 +102,58 @@ _COLLECTING: list | None = None
 _SCHEME_CACHE: dict[tuple[str, str], list] = {}
 
 
-def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
-                    resolver=None, corpus: str | None = None) -> None:
+def _compiled(name: str, pattern) -> "re.Pattern":
+    """This scheme's pattern as a compiled object: A COMPILED PATTERN IS USED AS ITSELF.
+
+    THE TRAP THIS CLOSES (corpus-toolkit#134). The parameter used to be typed and
+    documented `str`, so a corpus holding its citation patterns compiled — the natural
+    shape, since it matches with them itself — read the signature and wrote the one call it
+    said was available: `register_scheme("eo", EO_C.pattern)`. `re.compile()` over a
+    pattern's SOURCE TEXT keeps none of the flags the original was compiled with, and the
+    loss is silent: the scheme registers, the server starts, and citations stop matching in
+    whatever way the flag governed. `executive-regulatory-frameworks` lost `re.I` on five of
+    its six schemes that way (ERF#202), so `resolve_citation("executive order 23-04")` came
+    back `unresolved` while `"EO 23-04"` resolved — a difference of case that reads to an
+    agent as a difference of content.
+
+    BE PRECISE ABOUT WHAT CHANGED, because the old line already tolerated this by accident:
+    `re.compile()` hands a compiled pattern straight back, flags intact, so passing the
+    object worked at runtime before this function existed. What did NOT exist was any
+    reason for a corpus to believe it: the annotation said `str`, the docstring said `str`,
+    and no test held the behaviour, so it was one normalization away from silently
+    reverting — `re.compile(pattern.pattern)` is the obvious tidy-up and drops every flag.
+    The type, this explicit branch and the guard in tests/test_scheme_registry.py are what
+    turn an accident into the contract: flags survive BY CONSTRUCTION rather than by every
+    corpus remembering to inline `(?i)` in its source text.
+
+    A STRING IS UNAFFECTED: still `re.compile(pattern)`, no flags, inline `(?i)` honoured
+    exactly as before. Widening the accepted type is additive — every existing corpus call
+    is a string call.
+
+    A compiled BYTES pattern is refused here rather than at query time. `pattern.search(c)`
+    against a citation string raises TypeError for EVERY citation, inside a live server,
+    with the registration long since past — the same reason `_load_backend` validates its
+    plug-in object at startup instead of on the first query.
+    """
+    if not isinstance(pattern, re.Pattern):
+        return re.compile(pattern)
+    if not isinstance(pattern.pattern, str):
+        raise TypeError(
+            f"register_scheme({name!r}): pattern is a compiled BYTES pattern, which cannot "
+            f"match a citation str — every resolve would raise TypeError. Compile it from "
+            f"a str pattern.")
+    return pattern
+
+
+def register_scheme(name: str, pattern: "str | re.Pattern", id_template: str | None = None,
+                    *, resolver=None, corpus: str | None = None) -> None:
     """Register a citation format: `pattern` is matched against the trimmed
-    citation string. Two ways to turn a match into candidate document id(s):
+    citation string.
+
+    `pattern` is EITHER a string, compiled here with no flags, OR AN ALREADY-COMPILED
+    PATTERN, USED AS GIVEN — flags and all. Pass the compiled object whenever the pattern
+    carries flags; that is the only form in which they survive registration
+    (corpus-toolkit#134). Two ways to turn a match into candidate document id(s):
 
     - `id_template`: formatted with the match's named groups (falls back to
       positional groups) to produce ONE candidate id.
@@ -136,7 +184,7 @@ def register_scheme(name: str, pattern: str, id_template: str | None = None, *,
     `url`. Default None = resolve locally, exactly as before."""
     if id_template is None and resolver is None:
         raise ValueError("register_scheme requires id_template or resolver")
-    entry = (name, re.compile(pattern), id_template, resolver, corpus)
+    entry = (name, _compiled(name, pattern), id_template, resolver, corpus)
     # A CorpusFramework installs a collector around its citation_module import, so the
     # schemes land on that instance instead of a process-wide list. The global remains
     # for direct callers and tests. Corpus code is unchanged: it still imports and calls
@@ -218,16 +266,14 @@ def _name_match(entry: dict, fields, query: str) -> tuple[str, str] | None:
     to fix: a later caller passing raw text matches nothing and looks like a body that is
     not there.
 
-    A field's value may be a STRING or a LIST of strings (ERF's curated `aliases`), and a
-    list is matched element-wise. Anything else in a registry cell is skipped rather than
-    coerced: a registry is hand-maintained, and `str(None)` matching "none" is a match
-    nobody wrote.
+    Which cells can carry a name — a string, or a list matched element-wise, and nothing
+    coerced — is `config.name_values`, shared with the validator so that a field this
+    matcher can never hit is the same field the validator reports.
     """
     q = query.lower()
     for field in fields:
-        value = entry.get(field)
-        for name in (value if isinstance(value, (list, tuple)) else [value]):
-            if isinstance(name, str) and q in name.lower():
+        for name in name_values(entry, field):
+            if q in name.lower():
                 return field, name
     return None
 

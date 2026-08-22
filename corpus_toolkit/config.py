@@ -489,6 +489,27 @@ def _validated_corpus_string(raw, field: str, *, default=None):
 _ABSENT = object()
 
 
+def name_values(entry, field: str) -> list[str]:
+    """The strings in registry `entry`'s `field` that a name query can match.
+
+    ONE DEFINITION OF "A CELL THAT CAN CARRY A NAME", because two callers assert about it
+    and they must agree: `framework._name_match` decides whether a query hits a body, and
+    `validate/frontmatter._check_config` reports a declared name field that reaches no
+    matchable cell in the whole registry. A validator that checked only for the KEY would
+    pass a registry whose every `oar_name` is null while every query against it still
+    matched nothing — the check reporting a different condition than the one that bites.
+
+    A value may be a STRING or a LIST of strings (ERF's curated `aliases`). Anything else
+    in a registry cell — a number, a null, a mapping — is skipped rather than coerced: a
+    registry is hand-maintained, and `str(None)` matching "none" is a match nobody wrote.
+    """
+    if not isinstance(entry, dict):
+        return []
+    value = entry.get(field)
+    return [v for v in (value if isinstance(value, (list, tuple)) else [value])
+            if isinstance(v, str)]
+
+
 def _registry_slugs_at_load(registry_path, key: str):
     """The registry's slugs during `load()`, or None when there is no registry to read.
 
@@ -606,12 +627,16 @@ def _validated_name_fields(raw, *, registry) -> tuple[str, ...]:
         unmatchable.
       * a non-string or blank entry: names no column, and quietly drops out of the list.
 
-    NOT CHECKED, DELIBERATELY: whether a declared field appears in any registry entry. A
-    corpus mid-migration legitimately declares the field its registry is about to grow (ERF
-    declared `oar_name` while ADR 0003 was still copying titles into it), so failing the
-    load there would refuse to start a corpus whose config is correct and merely early. It
-    does leave a config typo — `oar_nmae` — silent; that is corpus-toolkit#129's question of
-    where a *reported* rather than *fatal* config finding should surface.
+    NOT CHECKED HERE, DELIBERATELY: whether a declared field appears in any registry entry.
+    A corpus mid-migration legitimately declares the field its registry is about to grow (ERF
+    declared `oar_name` while ADR 0003 was still copying titles into it), so failing the load
+    there would refuse to start a corpus whose config is correct and merely early.
+
+    It IS checked, and reported rather than fatal, by `corpus-validate-frontmatter`:
+    `validate/frontmatter._check_name_fields` warns when a declared field reaches no name in
+    the registry, next to the missing-`authoritative_source` warning that is the other
+    corpus-level config finding (corpus-toolkit#129). So a typo — `oar_nmae` — is no longer
+    silent, without this loader refusing a config that is correct and merely early.
     """
     if raw is _ABSENT:
         return ("name",)

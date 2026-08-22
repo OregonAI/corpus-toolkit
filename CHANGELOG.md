@@ -17,6 +17,94 @@ it can break you.
 
 ## Unreleased
 
+### Added — the validator reports a name field the registry does not carry
+
+**Reported, not fatal: a corpus mid-migration keeps loading and keeps serving.** New
+`corpus-validate-frontmatter` warning when a field listed in
+`plugins.issuing_body_name_fields` reaches no name in the issuing-body registry it names
+columns of.
+
+The declaration is checked at load for SHAPE — empty list, bare string, non-string entry,
+no registry to name columns of — and was not checked against the registry itself, so
+`oar_nmae` loaded clean, served clean, and made every free-text `issuing_body_profile`
+query against that field match nothing. Matching nothing is exactly what a body the corpus
+does not hold looks like.
+
+It stays out of the loader deliberately: ERF declared `oar_name` between ERF#166 and
+ERF#168, while the column was still being populated, and refusing that load would break a
+config that is correct and merely early. So it surfaces where corpus-level config findings
+already surface — the same function that reports a missing `corpus.authoritative_source`,
+in the command every corpus runs on every PR:
+
+```
+warning _meta/corpus.yml: plugins.issuing_body_name_fields: no entry in
+_meta/agency-registry.yml carries a name in 'oar_nmae' — checked 189 entries, ...
+```
+
+Not `corpus_overview`'s `config_warning`: that channel reaches an AGENT holding an answer,
+and a registry column an agent cannot fix would be noise on every conversation.
+
+**Four conditions, kept apart, because three of them otherwise read as "that body is not
+here".** A field carried by *some* entries is a partly-populated column and is not
+reported. A field whose every cell is null or numeric IS reported, because `name_values` —
+now shared by the matcher and the validator — skips cells that are not strings, so a check
+for the key alone would pass while every query still matched nothing. A registry that could
+not be read is never reported as a registry lacking a field: that is an **error** naming
+the read failure and saying the fields went unchecked. And a registry holding **no entries
+at all** is reported as an empty registry rather than as a misspelled field — a column
+claim about a registry with no rows accuses an author of a typo they did not make.
+
+A corpus that declares nothing gets the same finding worded for the state it is in:
+`issuing_body_name_fields defaults to ['name'], and this corpus declares no override`.
+
+**Also fixed: a broken registry no longer ends the validator in a traceback.** A
+`plugins.issuing_body_registry` naming a missing file raised `FileNotFoundError` out of the
+registry load before any finding was printed, and an entry with no `slug` raised
+`KeyError`. Both are now named errors against the registry path — the run still fails, with
+a message naming the file and, for a slug-less row, how many rows are affected — and the
+per-document slug checks skip rather than report every document's slug as unregistered.
+(corpus-toolkit#129)
+
+### Fixed — `register_scheme` accepts a compiled pattern, flags and all
+
+**No action required; every existing (string) call is unchanged. A corpus whose citation
+patterns carry flags should now pass the compiled object rather than its `.pattern`.**
+
+`register_scheme(name, pattern, ...)` typed and documented `pattern` as `str`, so a corpus
+that keeps its citation patterns compiled — the natural shape, since it matches with them
+itself — had exactly one call available: `register_scheme("eo", EO_C.pattern)`.
+`re.compile()` over a pattern's source text keeps **none** of the flags the original was
+compiled with, and the loss is silent: the scheme registers, the server starts, and
+citations stop matching in whatever way the flag governed.
+
+`executive-regulatory-frameworks` registers six schemes and lost `re.I` on five of them
+that way (`ORS_C`, `OAR_RULE_C`, `OAR_DIV_C`, `EO_C`, `NUMS_C`); only `OR_CONST_C` matched
+case-insensitively, because an inline `(?i)` had been added to it by hand when this was
+first hit. So `resolve_citation("executive order 23-04")` came back `unresolved` while
+`"EO 23-04"` resolved, and nothing in the response said the difference was case rather
+than content.
+
+```python
+EO_C = re.compile(r"(?:Executive\s+Order|EO)\s+(?P<num>\d+-\d+)", re.I)
+
+register_scheme("eo", EO_C)            # flags survive by construction
+register_scheme("eo", EO_C.pattern)    # case-sensitive, as it always was
+```
+
+The parameter is now `str | re.Pattern`: a string is compiled exactly as before (no flags,
+inline `(?i)` honoured), and a compiled pattern is used **as itself**. Precisely: passing a
+compiled pattern already worked at runtime, because `re.compile()` returns one unchanged —
+but nothing said so. The annotation said `str`, the docstring said `str`, and no test held
+the behaviour, so a corpus had no reason to write that call and one obvious tidy-up
+(`re.compile(pattern.pattern)`) would have dropped every flag again. This release makes it
+the contract rather than an accident: declared type, explicit branch, and a guard that runs
+through the served resolver. A compiled *bytes*
+pattern is refused at registration with a `TypeError` naming the scheme — it can only ever
+raise `TypeError` on a citation str, and it would have done so on every resolve inside a
+live server. The guard runs through the served resolver, not the local pattern object.
+(corpus-toolkit#134)
+
+
 ### Fixed — the drift issue budget is no longer spent in manifest order
 
 **No action required, and the cap does not move.** `MAX_ISSUES_PER_RUN` is still 25 and a

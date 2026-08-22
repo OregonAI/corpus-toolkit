@@ -91,7 +91,7 @@ def test_a_string_authoritative_source_still_reaches_the_url_validator(tmp_path)
     reachable" criterion with no guard anywhere in the suite — so a future change that
     pre-empts the validator at load time, precisely the regression this issue closes, would
     ship green."""
-    from corpus_toolkit.validate.frontmatter import _check_config
+    from corpus_toolkit.validate.frontmatter import _check_config, _read_registry
 
     cfg = _load(tmp_path, authoritative_source="not-a-url")
     assert cfg.authoritative_source == "not-a-url"      # load accepts it...
@@ -100,7 +100,7 @@ def test_a_string_authoritative_source_still_reaches_the_url_validator(tmp_path)
     class _Reporter:
         def error(self, rel, msg): errors.append(msg)
         def warn(self, rel, msg): pass
-    _check_config(cfg, _Reporter())                     # ...and the validator judges it
+    _check_config(cfg, _Reporter(), _read_registry(cfg))   # ...and the validator judges it
 
     assert any("must be a URL" in m and "not-a-url" in m for m in errors), errors
 
