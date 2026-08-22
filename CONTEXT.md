@@ -61,6 +61,13 @@ propagation matrix targeting a repository that does not exist (corpus-toolkit#83
 **Corpora manifest** — the one machine-readable source the tooling lists generate from and the
 runtime lists are checked against.
 
+**Group drift finding** — one drift issue naming a source group in which EVERY compared source
+changed in a single run. It states that they changed together and asserts nothing about why:
+the tool observes bytes, not causes, and one whole-group event on record was an inert run with
+empty baselines rather than a change at all (ADR 0010). It accompanies the individual source
+tickets and never replaces them.
+_Avoid_: bulk finding, group issue — both read as a diagnosis of the group
+
 ## Contracts
 
 **Corpus contract** — `docs/mcp-interface-contract.md`. Seven tools, the response conventions,
