@@ -59,6 +59,11 @@ filter states a fact about one **source**. The group drift finding is untouched,
 does not address the duplicate tickets a bulk-drifting group still files (ADR 0010 is
 explicit that it does not).
 
+Two private helpers of `corpus_toolkit.sources.changes` changed shape — `_issue_order` is
+now `_tickets_in_spend_order` and no longer takes the per-group tally, and
+`_drifting_groups_in_spend_order` lost the same parameter. Both are underscore-private to
+that CLI module and nothing outside it calls them, but AGENTS.md treats anything a corpus
+repo can reach as public surface, so it is named here rather than left silent.
 
 ### Fixed — a curated `issuing_body_profiles` file that cannot be read no longer raises out of `issuing_body_profile` (corpus-toolkit#143)
 

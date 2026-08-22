@@ -590,6 +590,16 @@ class AnUnseededSourceIsNotAChangedSourceTest(_DriftRun):
                       "recorded baseline", err)
         self.assertIn("::warning title=Drift detection is inert::", out)
         self.assertEqual(code, 1)
+        # UNCHANGED means nothing added either. The per-source naming below is the
+        # partly-seeded run's report; here the refusal already speaks for the whole
+        # corpus, and listing 4 of 4 ids — 3,447 of 3,447 in the founding case — adds
+        # length, a second annotation and no information.
+        self.assertIn("4 of 4 in-scope source(s) have NO recorded baseline. A source with "
+                      "`sha256: ''` can never compare equal, so it reports CHANGED every "
+                      "run and its drift means nothing. Seed them with", err)
+        self.assertNotIn("counties-0", err)
+        self.assertEqual(out.count("::warning title="), 1,
+                         f"the wholly-unseeded run gained a second annotation:\n{out}")
 
     def test_the_run_does_not_count_unseeded_sources_as_tickets_it_failed_to_file(self):
         """`2 opened, 0 failed, of 3 changed source(s)` invites the subtraction that says
@@ -616,6 +626,46 @@ class AnUnseededSourceIsNotAChangedSourceTest(_DriftRun):
         self.assertIn("not the cause", err.lower(),
                       "the capped run blamed the unseeded sources for a cap they no "
                       "longer spend a slot of")
+
+    def test_the_allocation_line_counts_a_group_by_what_it_could_file(self):
+        """`mixed (24/24 of 35)` invites the reader to subtract eleven tickets the budget
+        supposedly lost, when six were dropped by the cap and five were never candidates.
+        This block exists to tell a cap apart from the silent-reporting failure of
+        corpus-toolkit#53; a denominator that counts uncompared sources puts them back
+        together."""
+        self.group("mixed", changes.MAX_ISSUES_PER_RUN + 5, baseline="stale",
+                   file_stem="mixed_a")
+        self.group("mixed", 5, baseline=None, start=changes.MAX_ISSUES_PER_RUN + 5,
+                   file_stem="mixed_b")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("STOPPED after", err)
+        self.assertIn("mixed (24/24 of 30)", err)
+
+    def test_the_tsv_still_carries_the_unseeded_source_with_an_empty_old_column(self):
+        """The ticket is what goes away, not the record. `changed-sources.tsv` is read by
+        corpus repos and its four columns are public surface (corpus-toolkit#53), and an
+        empty `old` column is self-describing where a ticket body was not. A preservation
+        guard — dropping the row would be the over-suppression this fix must not become."""
+        self.group("counties", 1, baseline=None)
+        self.group("oar", 1, baseline="stale")
+        self.run_cli("--open-issues")
+        rows = [r.split("\t") for r in
+                (self.root / "changed-sources.tsv").read_text().splitlines()]
+        self.assertEqual([r[0] for r in rows], ["counties-0", "oar-0"])
+        self.assertEqual(rows[0][2], "", "the unseeded row lost its empty `old` column")
+
+    def test_more_unseeded_sources_than_the_line_can_name_still_reach_the_operator(self):
+        """The issue's own case is a 152-source unseeded group, and this report is now the
+        only channel those sources have. Truncating at twenty matches every other listing
+        in this file, so the line has to say how many it did not name and where the rest
+        are — `changed-sources.tsv` carries every one of them, with the empty previous-hash
+        column that says what happened."""
+        self.group("counties", 25, baseline=None)
+        self.group("oar", 2, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("counties-19", err)
+        self.assertIn("first 20 of 25", err)
+        self.assertIn("changed-sources.tsv", err)
 
     def test_the_unseeded_report_reaches_ci_where_stderr_does_not(self):
         """A notice on stderr sat unread near line 3,870 of a 3,900-line log while drift

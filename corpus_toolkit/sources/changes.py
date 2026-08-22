@@ -126,7 +126,7 @@ ISSUE_LABEL = "source-change"
 # 618 issues buries it. See OregonAI/oregon-collective-bargaining#14 for the case that
 # motivated this.
 #
-# HOW MANY, not which: `_issue_order` decides which sources the budget buys
+# HOW MANY, not which: `_tickets_in_spend_order` decides which sources the budget buys
 # (corpus-toolkit#69). The two are separate on purpose — the cap is the guardrail and does
 # not move, while the allocation is a policy about whose drift is worth a ticket first.
 MAX_ISSUES_PER_RUN = 25
@@ -654,7 +654,21 @@ class ChangedSource(NamedTuple):
     new: str
 
 
-def _issue_order(changed: list[ChangedSource]) -> list[ChangedSource]:
+def _count_by_group(entries: list[ChangedSource]) -> dict[str, int]:
+    """How many of `entries` fall in each group.
+
+    ONE DEFINITION, because the sort key that spends the budget and the denominator that
+    reports the spend have to be the same count. Two tallies three lines apart is the
+    corpus-toolkit#67 `not compared` disagreement — an operator reading one number and
+    counting a different one on the next line, with no way to tell which was wrong.
+    """
+    out: dict[str, int] = {}
+    for c in entries:
+        out[c.group] = out.get(c.group, 0) + 1
+    return out
+
+
+def _tickets_in_spend_order(changed: list[ChangedSource]) -> list[ChangedSource]:
     """The sources a ticket may be filed for, ordered smallest-drifting-group first (#69).
 
     THE ONE GATE ON THE TICKET-OPENING PATH, and the reason the filter lives here rather
@@ -662,14 +676,11 @@ def _issue_order(changed: list[ChangedSource]) -> list[ChangedSource]:
     this decides WHICH, so a source this function does not return can neither get a ticket
     nor spend a slot. A caller cannot forget it.
 
-    AN UNSEEDED SOURCE IS NOT A CHANGED SOURCE (ADR 0010, corpus-toolkit#145). A source
-    with `sha256: ''` compares unequal to everything, so it reports CHANGED on every run
-    and used to file `Source changed: <id>` with an EMPTY previous hash — a drift report
-    about a comparison that never happened, which is could-not-check served as a finding.
-    The group drift finding already filtered on a recorded baseline; the tickets did not,
-    and that asymmetry was the defect. It is still counted, still in the group breakdown
-    and still in `changed-sources.tsv` with an empty `old` column; what it no longer gets
-    is a ticket asserting upstream drift, and `main` says so on its own line instead.
+    AN UNSEEDED SOURCE IS NOT A CHANGED SOURCE, the rule `_was_compared` states and ADR
+    0010 decided (corpus-toolkit#145). Such a source is still counted, still in the group
+    breakdown and still in `changed-sources.tsv` with an empty `old` column; what it no
+    longer gets is a ticket asserting upstream drift, and `main` says so on its own line
+    instead.
 
     `MAX_ISSUES_PER_RUN` decides HOW MANY issues a run files; this decides WHICH. The
     budget used to be spent in manifest iteration order, so whichever group the loop
@@ -697,7 +708,7 @@ def _issue_order(changed: list[ChangedSource]) -> list[ChangedSource]:
     MAX_ISSUES_PER_RUN` sources unreported and still exits non-zero; the dropped ones are
     now the tail of the largest group instead of an arbitrary prefix.
     """
-    ticketable = [c for c in changed if c.old]
+    ticketable = [c for c in changed if _was_compared(c)]
     # COUNTED OFF `ticketable`, not read from `per_group["changed"]` and not derived from
     # it either. Two reasons, and the second is the one that bites. First, the sort key is
     # "how many tickets will this group buy", and after the filter that is no longer the
@@ -708,10 +719,25 @@ def _issue_order(changed: list[ChangedSource]) -> list[ChangedSource]:
     # subtraction the per-group tally already warns about: an unseeded source whose fetch
     # then failed never reached `changed` at all, so subtracting it over-subtracts. The
     # list IS the tickets; counting it cannot disagree with itself.
-    per_group_ticketable: dict[str, int] = {}
-    for c in ticketable:
-        per_group_ticketable[c.group] = per_group_ticketable.get(c.group, 0) + 1
+    per_group_ticketable = _count_by_group(ticketable)
     return sorted(ticketable, key=lambda c: (per_group_ticketable[c.group], c.group))
+
+
+def _was_compared(c: ChangedSource) -> bool:
+    """Whether this source was compared to a recorded baseline at all.
+
+    ADR 0010'S PER-SOURCE RULE, in one place. "An uncompared source is not a changed
+    source" is read twice — once to decide whether a ticket may be filed for it
+    (corpus-toolkit#145) and once to decide whether it counts towards a group drift
+    finding — and the two readings have to be the same reading. They were not: the finding
+    filtered on a recorded baseline and the tickets did not, and a source with `sha256:
+    ''` therefore filed `Source changed: <id>` with an empty previous hash while being
+    excluded from the finding in the same run.
+
+    `old` is the hash the manifest recorded, so an empty one means the fetched bytes were
+    compared against nothing. It is a fact about the manifest, not about upstream.
+    """
+    return bool(c.old)
 
 
 class GroupFinding(NamedTuple):
@@ -752,9 +778,7 @@ def _group_drift_findings(changed: list[ChangedSource],
     """
     by_group: dict[str, list[str]] = {}
     for c in changed:
-        # A source with no recorded baseline compares unequal to `''` and reports CHANGED
-        # every run: it was never compared to anything, so it is not evidence of drift.
-        if c.old:
+        if _was_compared(c):
             by_group.setdefault(c.group, []).append(c.id)
     out = []
     for g, ids in sorted(by_group.items()):
@@ -840,14 +864,14 @@ def _open_group_finding(group: str, changed_ids: list[str], compared: int,
 
 
 def _drifting_groups_in_spend_order(changed: list[ChangedSource]) -> list[str]:
-    """Every group that drifted, in the order `_issue_order` spends the budget on them.
+    """Every group that drifted, in the order the budget is spent on them.
 
-    DERIVED from `_issue_order` rather than re-deriving its sort key, because the caller
+    DERIVED from `_tickets_in_spend_order` rather than re-deriving its sort key: the caller
     uses this to narrate an allocation the run already made. A second copy of the key that
     drifted from the first would print an authoritative-looking account of an order nobody
     used — the failure mode the rest of this file's reporting exists to prevent.
     """
-    return list(dict.fromkeys(c.group for c in _issue_order(changed)))
+    return list(dict.fromkeys(c.group for c in _tickets_in_spend_order(changed)))
 
 
 def main():
@@ -1058,21 +1082,18 @@ def main():
         recorded = _record_baselines(config, fetched, in_scope, args.record_baseline,
                                      uncompared=uncompared_counts)
 
-    # A run with no baseline at all cannot detect drift: every source compares unequal to
-    # `''`, so 100% "changed" is a fact about the manifest, not about upstream. Measured,
-    # never inferred — ERF was told to go look for empty baselines it did not have.
     # THE SOURCES A TICKET MAY BE FILED FOR, computed once and used everywhere the run
     # talks about what it reported: the spend loop, the cap arithmetic, the summary line
     # and the workflow output. Computing it twice is how the three "not compared" counts
     # of corpus-toolkit#67 came to disagree with each other.
-    ticketable = _issue_order(changed)
+    ticketable = _tickets_in_spend_order(changed)
 
     # A run with no baseline at all cannot detect drift: every source compares unequal to
     # `''`, so 100% "changed" is a fact about the manifest, not about upstream. Measured,
     # never inferred — ERF was told to go look for empty baselines it did not have.
     #
     # STILL ITS OWN CONCEPT after corpus-toolkit#145, and deliberately so. The filter in
-    # `_issue_order` now suppresses every ticket this predicate used to suppress, so it no
+    # `_tickets_in_spend_order` suppresses every ticket this predicate used to suppress, so
     # longer decides anything about individual filings — but it is not the same statement.
     # It is a diagnosis of the RUN ("this detected seeding, not drift"), where the filter
     # is a fact about one source, and it is what backs the refusal message, the annotation
@@ -1115,7 +1136,7 @@ def main():
     if args.open_issues and ticketable and not inert:
         _ensure_label()
         # BEFORE the individual tickets, and out of the same budget (ADR 0010). Before,
-        # because `_issue_order` spends smallest-drifting-group-first and therefore reaches
+        # because the spend order is smallest-drifting-group-first and therefore reaches
         # the largest group last — a finding queued behind the tickets is precisely the
         # finding that never files, which is the case corpus-toolkit#132 was opened about.
         # Out of the same budget, because a cap that some issues are exempt from is not a
@@ -1186,7 +1207,7 @@ def main():
             _annotate("Baseline recording refused",
                       f"{len(recorded['refused'])} manifest entr(ies) could not be "
                       f"recorded; this run exits non-zero.")
-    if n_unseeded and not args.record_baseline:
+    if n_unseeded and not args.record_baseline and not inert:
         # THE OTHER HALF OF corpus-toolkit#145, and the reason the ticket filter is not the
         # whole fix. Those sources used to be mentioned by the (wrong) tickets filed for
         # them; suppressing the tickets and saying nothing more would trade "could not
@@ -1194,19 +1215,43 @@ def main():
         # rule of CONTEXT.md broken in the other direction. So the ids are named here, the
         # remedy is named beside them, the annotation below puts it where CI looks, and the
         # exit status carries it out of the log entirely.
-        shown = ", ".join(unseeded_ids[:20]) + ("…" if n_unseeded > 20 else "")
+        #
+        # THE PARTLY-SEEDED RUN ONLY, which is what `not inert` is doing. On a wholly
+        # unseeded run the refusal below already speaks for the whole corpus and names the
+        # same remedy; naming 3,447 of 3,447 ids beneath it adds a second annotation, a
+        # great deal of length and no information, and that run's messaging is deliberately
+        # left exactly as it was. Which sources is the missing fact only when some of them
+        # were seeded and some were not.
+        #
+        # TRUNCATED, like every other listing in this file, and it says so rather than
+        # trailing an unexplained `…`: at 3,447 unseeded sources this sentence would
+        # otherwise claim to be their only report while naming 20 of them. The complete
+        # list is `changed-sources.tsv`, where each carries the empty previous-hash column
+        # that says what happened to it.
+        shown_unseeded = ", ".join(unseeded_ids[:20])
+        if n_unseeded > 20:
+            shown_unseeded += f" (first 20 of {n_unseeded}; all of them are in "
+            shown_unseeded += "changed-sources.tsv, with an empty previous-hash column)"
         print(f"{n_unseeded} of {n_total} in-scope source(s) have NO recorded baseline. A "
               f"source with `sha256: ''` can never compare equal, so it reports CHANGED "
               f"every run and its drift means nothing. NO `Source changed:` ticket was "
               f"filed for them and they spent none of the issue budget — an uncompared "
               f"source is not a changed source (ADR 0010) — so this line is the only "
-              f"report they get: {shown}. Seed them with "
+              f"report they get: {shown_unseeded}. Seed them with "
               f"`corpus-detect-changes --config {args.config} --record-baseline`.",
               file=sys.stderr)
         _annotate("Sources have no recorded baseline and were not compared",
                   f"{n_unseeded} of {n_total} in-scope source(s) were never compared to "
-                  f"anything and file no drift ticket: {shown}. Seed with "
+                  f"anything and file no drift ticket: {shown_unseeded}. Seed with "
                   f"corpus-detect-changes --record-baseline.")
+    elif n_unseeded and not args.record_baseline:
+        # UNCHANGED WORDING, deliberately: this is the wholly-unseeded run's line and the
+        # acceptance criterion for corpus-toolkit#145 is that its messaging does not move.
+        print(f"{n_unseeded} of {n_total} in-scope source(s) have NO recorded baseline. A "
+              f"source with `sha256: ''` can never compare equal, so it reports CHANGED "
+              f"every run and its drift means nothing. Seed them with "
+              f"`corpus-detect-changes --config {args.config} --record-baseline`.",
+              file=sys.stderr)
     for pat, hits, removed in zip(patterns, pattern_hits, pattern_bytes):
         shown = pat.pattern.decode("utf-8", "replace")
         share = removed / normalizable_bytes if normalizable_bytes else 0.0
@@ -1310,15 +1355,22 @@ def main():
             # failure of corpus-toolkit#53 looks like from the outside, and an operator
             # cannot tell those apart from the breakdown alone.
             spend_order = _drifting_groups_in_spend_order(changed)
+            ticketable_by_group = _count_by_group(ticketable)
             print("BUDGET SPENT SMALLEST-GROUP-FIRST (corpus-toolkit#69): groups were "
                   "reported in ascending order of drift count — ties broken by group name, "
                   "then by manifest order within a group — so a small genuine finding files "
                   "ahead of a bulk one and what was dropped is the tail of the largest "
                   "group(s), NOT a delivery failure and not manifest order. Per group, "
                   "issues opened/attempted of sources changed: "
+                  # THE SAME DENOMINATOR THE SPEND ORDER SORTED ON. `per_group['changed']`
+                  # counts unseeded sources, which are neither in this order nor
+                  # candidates for a ticket, so a group of 3 unseeded and 2 drifted
+                  # sources sorted at 2 and printed `of 5` — a sequence that reads
+                  # descending under a sentence asserting ascending order, inviting the
+                  # subtraction that says three filings went missing.
                   + ", ".join(f"{g} ({opened_by_group.get(g, 0)}/"
                               f"{attempted_by_group.get(g, 0)} of "
-                              f"{per_group[g]['changed']})" for g in spend_order)
+                              f"{ticketable_by_group[g]})" for g in spend_order)
                   + ".", file=sys.stderr)
             # TWO DIFFERENT FINDINGS, and the earlier version of this block called both of
             # them "not reported at all". A group the budget never reached is this
