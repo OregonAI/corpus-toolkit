@@ -17,6 +17,72 @@ it can break you.
 
 ## Unreleased
 
+### Changed — a corpus without a front door no longer validates (corpus-toolkit#11)
+
+**This can turn your CI red on the next pin bump, and that is the point.**
+`corpus-validate-frontmatter` now FAILS a corpus that declares no
+`corpus.authoritative_source`, where it used to warn. Every object-shaped MCP response
+carries that field and every response tells an agent this copy is non-authoritative and to
+verify at source; without the field the agent is never told where. #6 added the key and
+asked for exactly this promotion "so new corpora cannot ship without one"; it waited
+because the corpora had not adopted it yet.
+
+**Nothing turns red today.** All nine live corpora declare one — measured, not assumed:
+`executive-regulatory-frameworks`, `federal-reference`, `oregon-audits`, `oregon-budget`,
+`oregon-collective-bargaining`, `oregon-counties`, `oregon-kpm`, `oregon-legislature`,
+`oregon-records-retention`. (#11's own title said "all four corpora must declare one —
+today zero do", which was wrong in both halves; the three that were still missing landed
+before this change so that no corpus meets it as a surprise.)
+
+**A placeholder is refused too, and that is the half that would otherwise have leaked.**
+`corpus-template` ships
+`authoritative_source: "https://REPLACE-ME.invalid/where-the-official-text-lives"` — it is
+URL-shaped on purpose, because a bare `{{...}}` is not a URL and has been an error since
+v1.10.0. An omission-only check passes it, so a corpus that forked the template and never
+edited the line would have shipped green while every one of its responses pointed an agent
+at a host that cannot exist. The rule is the **reserved names of RFC 2606** — the `.test`,
+`.example`, `.invalid` and `.localhost` TLDs, plus `example.com`/`.net`/`.org` — rather
+than a string match on `REPLACE-ME`, because a corpus that edits the path and leaves the
+host is shipping the same dead pointer. The check reads the URL's HOST, so a real front
+door with `example` in its path is untouched. A host still carrying the template's
+`REPLACE-ME` marker is refused too — the reverse edge, where the reserved name is edited
+away and the marker is not — and so are two values that used to slip past the URL check
+that precedes all of this: `https:///schedules`, which names no host, and
+`https://[oops`, on which `urllib.parse.urlsplit` RAISES, ending the whole run in a
+traceback that named neither the file nor the key.
+
+**The template still validates itself**, or every corpus would start life from a template
+that fails. While `corpus.id` is still the unfilled `{{CORPUS_ID}}` **and** the repo holds
+no documents, both findings are reported as warnings, with a third warning naming that
+state — so it is never silent. Both halves are load-bearing: filling in the id is step 1 of
+the replication guide, adding a document is what makes a repo a corpus, and either one
+turns the warnings back into errors. The exemption is corpus-wide, not `--changed`-scoped,
+so a PR that touches no content file cannot borrow it.
+
+**Unchanged:** the loader still types the field `str | None` and a server still starts
+without one, still emitting the documented `authoritative_source: null` plus
+`corpus_overview`'s `config_warning`. This is a repo gate, never a runtime one — a corpus
+that was legal when it deployed must not be taken down by a pin bump. A value that is not a
+URL at all remains the error it has been since v1.10.0.
+
+**Whether this warrants a major bump is a release decision, not this entry's.** AGENTS.md
+says breaking changes bump the major version, and a corpus that has not adopted the key
+goes from green to red on a pin bump. The precedent in this file runs the other way — the
+v1.10.0 non-URL error and #3's dangling-`document_id` promotion both shipped as minors, and
+no major bump exists here — so the call belongs to whoever cuts the tag.
+
+**If this fails your corpus:** add one line under `corpus:` in `_meta/corpus.yml` naming
+the one page a reader opens to reach your official text. One URL is enough for a corpus
+spanning several publishers — `get_document` answers per document from that document's own
+`source_url`.
+
+Also: the release gate's own scratch corpus was carrying the template's `.invalid`
+placeholder, unnoticed, since the template stopped using a `{{AUTHORITATIVE_SOURCE_URL}}`
+placeholder. `contract_smoke.py` now fills in a real front door the way a human
+instantiating the template would, and fails loudly if the template stops carrying exactly
+one `authoritative_source:` line to fill.
+
+
 ### Fixed — `search_corpus(issuing_body=...)` takes a registry slug too, and says which it matched
 
 **One response-shape change, stated first because the rest of this entry is additive.** A

@@ -579,9 +579,24 @@ the hook and registering nothing is likewise an error rather than a no-op.
    page, the legislature's bill site). `get_document` overrides it with the
    document's own `source_url`, which is the more precise answer to the same
    question. A corpus that declares none gets `authoritative_source: null`
-   plus a `config_warning` on `corpus_overview`, and a warning from
-   `corpus-validate-frontmatter` — an absent key would read as "the server
-   did not look", which is not what happened. **That `null` is load-bearing**:
+   plus a `config_warning` on `corpus_overview` — an absent key would read as
+   "the server did not look", which is not what happened.
+
+   **Declaring one is a repo gate, not a runtime one** (corpus-toolkit#11).
+   `corpus-validate-frontmatter` fails a corpus that declares no
+   `corpus.authoritative_source`, and fails one whose host is a name RFC 2606
+   reserves (`.test`, `.example`, `.invalid`, `.localhost`, and
+   `example.com`/`.net`/`.org`) — those can never be a real front door, and one
+   of them is what `corpus-template` ships as its unfilled placeholder, which
+   parses as a URL and would otherwise sail through. A host still carrying the
+   template's `REPLACE-ME` marker fails as well, for the case where the
+   reserved name was edited away and the marker was not, as do a URL that
+   names no host and one that cannot be parsed. The exception is the
+   template itself: while `corpus.id` is still the unfilled `{{CORPUS_ID}}`
+   **and** the repo holds no documents, both findings are warnings, so the
+   template validates while no corpus can hide behind it. The **server** still
+   starts either way and still emits `null`, because a corpus that was legal
+   when it deployed must not be taken down by a pin bump. **That `null` is load-bearing**:
    it is a documented value, not a missing one, and anything that validates
    this field must accept it (`config.py` types it `str | None`). Treating it
    as a required string is what broke every corpus at once in v1.24.0 — see

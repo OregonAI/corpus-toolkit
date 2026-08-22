@@ -11,6 +11,14 @@ large-scale ingestion).
   schema_version: 1, contract_version: 1, toolkit pin (e.g. v1.0.0).
 - Find/replace `{{CORPUS_*}}` placeholders in README, AGENTS.md, llms.txt,
   DISCLAIMER.md.
+- **Replace `corpus.authoritative_source`**, which the template ships as
+  `https://REPLACE-ME.invalid/where-the-official-text-lives`. It is NOT a
+  `{{...}}` placeholder — it is URL-shaped so the template can validate
+  itself — so the find/replace above will not catch it, and
+  `corpus-validate-frontmatter` refuses both the placeholder and an absent
+  value once this repo has a name and its first document
+  (corpus-toolkit#11). Name the one page a reader opens to reach your
+  official text; one URL is enough for a corpus spanning publishers.
 - Set repo topics: `civic-corpus`, jurisdiction, archetype.
 - Add row to the org registry README.
 

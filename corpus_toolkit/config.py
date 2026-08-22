@@ -65,10 +65,14 @@ class CorpusConfig:
     # back here only when it has none. So a corpus spanning publishers declares its best
     # single entry point rather than a list, and `str | None` is the settled type.
     #
-    # Optional here rather than required because four corpora already ship
-    # without one and a hard load failure would take their servers down on a pin bump;
-    # `corpus-validate-frontmatter` reports the omission instead, and corpus_overview
-    # says so on the response.
+    # `str | None` HERE, AND A HARD ERROR IN THE VALIDATOR (corpus-toolkit#11). The two
+    # are not in tension, they are different jobs: `corpus-validate-frontmatter` gates the
+    # REPO — a corpus cannot merge without a front door, and cannot merge one whose host
+    # is an RFC 2606 reserved name (the template's unfilled placeholder) — while `load()`
+    # keeps serving whatever is on disk. A loader that refused would take a running
+    # server DOWN on a pin bump, over a config that was legal when it was deployed, and
+    # `authoritative_source: null` is a documented response value that convention 1
+    # requires every response model to admit. Refuse it in CI, never at runtime.
     authoritative_source: str | None
     schema_version: int
     contract_version: int
