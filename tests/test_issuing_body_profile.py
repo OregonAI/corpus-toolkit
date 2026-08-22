@@ -234,13 +234,17 @@ def _rule(i: int, mode: str, agency: str | None) -> str:
                        agency=f'agency: "{agency}"\n' if agency else "")
 
 
+# A REAL front door rather than the `.invalid` fixtures elsewhere in this file: this
+# config is fed to `corpus-validate-frontmatter` below, and since corpus-toolkit#11 an
+# RFC 2606 reserved host in THIS field is an error (it is the template's unfilled
+# placeholder). The value is never fetched — nothing in the toolkit follows it.
 DECLARING_FIELD = """
     corpus:
       id: test-corpus
       name: Test Corpus
       jurisdiction: oregon
       archetype: document
-      authoritative_source: "https://example.invalid/official"
+      authoritative_source: "https://sos.oregon.gov/archives/"
     content_roots:
       - path: agencies
         scoped: true

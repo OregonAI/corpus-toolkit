@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import urllib.parse
 
 import jsonschema
 import yaml
@@ -323,6 +324,70 @@ def _read_registry(config) -> RegistryRead:
     return RegistryRead([e for e in entries if isinstance(e, dict)], None)
 
 
+# RFC 2606 reserves these names so they can never belong to anyone: §2 sets aside the
+# top-level domains, §3 the second-level `example.*` names, both for documentation and
+# examples. A corpus's front door can never legitimately live under one, which is what
+# makes "this is a placeholder, not an answer" checkable without guessing at intent —
+# `corpus-template` ships `https://REPLACE-ME.invalid/where-the-official-text-lives`
+# precisely because `.invalid` cannot resolve.
+_RESERVED_TLDS = ("test", "example", "invalid", "localhost")
+_RESERVED_DOMAINS = ("example.com", "example.net", "example.org")
+
+# The value's actionable half, shared by every finding about the field so that a corpus
+# meeting it for the first time is told the same thing however it got here.
+_HOW_TO_SET_THE_FRONT_DOOR = (
+    "Set it to this corpus's front door: the one page a reader opens to reach its "
+    "official text — one line under `corpus:` in _meta/corpus.yml, e.g. "
+    '`authoritative_source: "https://sos.oregon.gov/archives/records/"`. It need not '
+    "cover every publisher — a corpus spanning several declares its best single entry "
+    "point, and get_document answers per document from that document's source_url.")
+
+
+# `{{CORPUS_ID}}` and friends — corpus-template's unfilled find/replace placeholders
+# (docs/replication-guide.md step 1).
+_UNFILLED_PLACEHOLDER = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
+
+
+def _uninstantiated_template(config) -> bool:
+    """Is this corpus.yml still corpus-template's, rather than a corpus's?
+
+    TWO CONDITIONS, AND BOTH ARE LOAD-BEARING. The id is still the unfilled
+    `{{CORPUS_ID}}` — step 1 of the replication guide replaces it, and a served corpus
+    cannot keep it (it is the MCP server name and the `corpus` field of every response) —
+    AND the repo holds no documents, because a repo that forked the template and started
+    ingesting is a corpus whatever its config still says. Either half alone would be an
+    exemption a real corpus could sit in: an empty repo mid-setup has a name, and a
+    populated one that never edited its config is the exact "shipped the template
+    unedited" case corpus-toolkit#11 exists to catch.
+
+    CORPUS-WIDE, not the `--changed` scope: under `--changed` a PR touching no content
+    file would otherwise look like an empty repo and suspend the gate on every corpus.
+    """
+    if not _UNFILLED_PLACEHOLDER.search(str(config.id or "")):
+        return False
+    return next(iter(content_files(config)), None) is None
+
+
+def _reserved_name(url: str) -> str | None:
+    """The RFC 2606 reserved name `url`'s HOST sits under, or None.
+
+    Reads the host, never the URL text. A substring match on `example` or `invalid` would
+    reject `https://sos.oregon.gov/archives/example-schedules` — a real front door whose
+    path happens to say example — and would miss nothing a host check misses.
+
+    A URL with no host (`https:///x`) returns None: that is the non-URL case, and the
+    check above it already owns the message for a value that is not a URL.
+    """
+    host = (urllib.parse.urlsplit(url).hostname or "").rstrip(".").lower()
+    if not host:
+        return None
+    labels = host.split(".")
+    if labels[-1] in _RESERVED_TLDS:
+        return "." + labels[-1]
+    second_level = ".".join(labels[-2:])
+    return second_level if second_level in _RESERVED_DOMAINS else None
+
+
 def _check_config(config, r, registry):
     """Corpus-level config checks — things the per-document schema cannot see.
 
@@ -331,13 +396,25 @@ def _check_config(config, r, registry):
     "call this first" tool told every agent the copy was non-authoritative and to "verify
     at source" without ever saying where the source is.
 
-    WARN, NOT ERROR, and deliberately so. Every existing corpus omits the key, and a hard
-    failure here would turn all four CIs red on the next toolkit pin bump — punishing them
-    for a gap in the shared layer. Promote it to an error once they have all declared one;
-    tracked in corpus-toolkit#11. A corpus adopts it by adding one line under `corpus:` in
-    `_meta/corpus.yml`:
+    ERROR, NOT WARNING, SINCE corpus-toolkit#11. It shipped as a warning because every
+    corpus then omitted the key and a hard failure would have turned their CIs red on the
+    next pin bump — punishing them for a gap in the shared layer. That condition is spent:
+    all nine live corpora declare one (the last three landed the day this changed), so the
+    gate now falls only on a corpus that has not adopted it, which is what #6 asked for —
+    "so new corpora cannot ship without one". A corpus adopts it by adding one line under
+    `corpus:` in `_meta/corpus.yml`:
 
         authoritative_source: "https://www.oregonlegislature.gov/bills_laws/Pages/ORS.aspx"
+
+    THREE STATES, NOT TWO, because a value can be present and still answer nothing. A
+    missing key and a value under an RFC 2606 reserved name are the same defect wearing
+    different clothes: every MCP response carries the field, so both end with an agent
+    told to verify at a place that does not exist. The reserved-name half is not
+    hypothetical — it is what `corpus-template` ships, on purpose (see
+    `_uninstantiated_template`), and an omission-only check would wave through a corpus
+    that forked the template and never edited the line. A value that is not a URL at all
+    stays the error it has been since v1.10.0, and stays one even for the template: a
+    caller follows this field, and a non-URL is the one shape nothing downstream can use.
 
     The message says FRONT DOOR rather than "the URL where the official text lives", and the
     difference is not cosmetic: the second phrasing reads as a promise that every document in
@@ -350,19 +427,35 @@ def _check_config(config, r, registry):
     (corpus-toolkit#70, and the contract's response convention 1).
     """
     rel = config.config_path.relative_to(config.root)
+    value = str(config.authoritative_source or "")
+    template = _uninstantiated_template(config)
+    if template:
+        # SAID EVERY TIME, so the exemption is never silent — a repo sitting in this state
+        # is told what it is and what it costs, whether or not it has a front door yet.
+        r.warn(rel, f"corpus.id is still the template's unfilled placeholder "
+                    f"{config.id!r} and this repo holds no documents, so this is "
+                    f"corpus-template rather than a corpus. Findings about "
+                    f"corpus.authoritative_source below are WARNINGS for that reason "
+                    f"alone; each becomes an error the moment either half changes — when "
+                    f"you fill in corpus.id, or when the first document lands.")
+    say = r.warn if template else r.error
     if not config.authoritative_source:
-        r.warn(rel, "corpus.authoritative_source is not set — MCP responses will carry "
-                    "`authoritative_source: null`, so an agent is told to verify at "
-                    "source without being told where to start (response convention 1). "
-                    "Set it to this corpus's front door: the one page a reader opens to "
-                    "reach its official text. It need not cover every publisher — a "
-                    "corpus spanning several declares its best single entry point, and "
-                    "get_document answers per document from that document's source_url.")
-    elif not str(config.authoritative_source).startswith(("http://", "https://")):
+        say(rel, "corpus.authoritative_source is not set — MCP responses will carry "
+                 "`authoritative_source: null`, so an agent is told to verify at source "
+                 "without being told where to start (response convention 1). "
+                 + _HOW_TO_SET_THE_FRONT_DOOR)
+    elif not value.startswith(("http://", "https://")):
         # A non-URL here is worse than nothing: convention 1 says the field IS a URL, so a
         # caller will try to follow it.
         r.error(rel, f"corpus.authoritative_source must be a URL, got "
                      f"{config.authoritative_source!r}")
+    elif (reserved := _reserved_name(value)):
+        say(rel, f"corpus.authoritative_source is {value!r}, whose host is under "
+                 f"{reserved}, a name RFC 2606 reserves so that it can never be a real "
+                 f"host. It parses as a URL, so nothing downstream refuses it: every MCP "
+                 f"response would carry it and tell an agent to verify at a host that "
+                 f"cannot exist. This is a placeholder — corpus-template ships one — not "
+                 f"a front door. " + _HOW_TO_SET_THE_FRONT_DOOR)
     _check_registry(config, r, rel, registry)
 
 

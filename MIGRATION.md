@@ -274,7 +274,10 @@ broken behaviour first.
 2. Add one line to `_meta/corpus.yml` under `corpus:`:
    `authoritative_source: "<URL of the official text>"`. Until you do,
    validation warns and `corpus_overview` carries `authoritative_source: null`
-   with a `config_warning`; nothing fails.
+   with a `config_warning`; nothing fails. **(Superseded — that warning is an
+   ERROR since corpus-toolkit#11, together with a placeholder value under an
+   RFC 2606 reserved host. Every live corpus declares one; see the CHANGELOG
+   entry for the version you are pinning.)**
 3. If this corpus ships `joins:`, run `corpus-validate-frontmatter` locally
    before bumping — a dangling `document_id` is now an **error**. `{dataset,
    key}` integrity remains yours; wire your own `--check` into the `generated`

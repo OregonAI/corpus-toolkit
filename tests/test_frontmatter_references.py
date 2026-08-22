@@ -102,7 +102,7 @@ class TestJoinReferentialIntegrity(ValidateTestCase):
              "    key: fund-100\n")
 
     def test_a_dangling_document_id_fails_the_gate(self):
-        self.write_corpus(authoritative_source="https://example.org/budget")
+        self.write_corpus(authoritative_source="https://sos.oregon.gov/archives/")
         self.write_doc("appropriation-100", "Appropriation 100",
                        self.JOINS.format(target="does-not-exist"))
 
@@ -113,7 +113,7 @@ class TestJoinReferentialIntegrity(ValidateTestCase):
         self.assertIn("'does-not-exist' does not resolve", out)
 
     def test_a_resolvable_document_id_passes(self):
-        self.write_corpus(authoritative_source="https://example.org/budget")
+        self.write_corpus(authoritative_source="https://sos.oregon.gov/archives/")
         self.write_doc("spending-100", "Spending 100")
         self.write_doc("appropriation-100", "Appropriation 100",
                        self.JOINS.format(target="spending-100"))
@@ -127,7 +127,7 @@ class TestJoinReferentialIntegrity(ValidateTestCase):
         """--check-relationships is what the check-links reusable workflow runs. A join
         is a reference; leaving it out of that path would mean the gate exists in a
         command no corpus's CI actually invokes."""
-        self.write_corpus(authoritative_source="https://example.org/budget")
+        self.write_corpus(authoritative_source="https://sos.oregon.gov/archives/")
         self.write_doc("appropriation-100", "Appropriation 100",
                        self.JOINS.format(target="does-not-exist"))
 
@@ -140,7 +140,7 @@ class TestJoinReferentialIntegrity(ValidateTestCase):
         """The resolution universe must stay corpus-wide even when validation is scoped.
         Otherwise a one-file PR fails on joins that are perfectly valid — the same
         mistake _all_content_ids was written to prevent for relationships."""
-        self.write_corpus(authoritative_source="https://example.org/budget")
+        self.write_corpus(authoritative_source="https://sos.oregon.gov/archives/")
         self.write_doc("spending-100", "Spending 100")
         joined = self.root / "documents" / "appropriation-100.md"
         joined.write_text(DOC.format(id="appropriation-100", title="Appropriation 100",
@@ -156,19 +156,19 @@ class TestJoinReferentialIntegrity(ValidateTestCase):
 class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
     """corpus-toolkit#6, part 3."""
 
-    def test_a_missing_authoritative_source_is_reported_but_does_not_fail(self):
-        """Deliberately a warning: all four live corpora omit it today and a hard
-        failure would redden their CI on the next pin bump. It must still be SAID."""
+    def test_a_missing_authoritative_source_fails_the_gate(self):
+        """corpus-toolkit#11 — was a warning while the live corpora had not adopted the
+        key; every one of them now declares one, so the omission is an error and a new
+        corpus cannot ship without a front door."""
         self.write_corpus()
         self.write_doc("spending-100", "Spending 100")
 
         code, out = self.validate()
 
-        self.assertEqual(code, 0, out)
-        self.assertIn("warning", out)
+        self.assertEqual(code, 1, f"gate passed on a missing authoritative_source:\n{out}")
         self.assertIn("corpus.authoritative_source is not set", out)
 
-    def test_the_warning_says_what_to_write_and_that_one_url_is_enough(self):
+    def test_the_message_says_what_to_write_and_that_one_url_is_enough(self):
         """corpus-toolkit#70. The wording IS the fix here — this message is where most
         corpora meet the field — so it is asserted rather than left to review, and the
         assertion covers ACTIONABILITY rather than vocabulary. Pinning the phrase "front
@@ -183,7 +183,7 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
 
         code, out = self.validate()
 
-        self.assertEqual(code, 0, out)
+        self.assertEqual(code, 1, out)
         for fragment, guards in (("corpus.authoritative_source is not set", "which key"),
                                  ("Set it to", "an instruction to act"),
                                  ("front door", "what the value means"),
@@ -191,7 +191,7 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
                                  ("get_document", "where precision comes from"),
                                  ("source_url", "and the field it comes from")):
             self.assertIn(fragment, out,
-                          f"the unset warning no longer carries {fragment!r} ({guards}), "
+                          f"the unset error no longer carries {fragment!r} ({guards}), "
                           f"so a corpus reading it cannot act on it:\n{out}")
 
     def test_a_non_url_authoritative_source_is_an_error(self):
@@ -204,6 +204,129 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
 
         self.assertEqual(code, 1, f"gate passed on a non-URL authoritative_source:\n{out}")
         self.assertIn("must be a URL", out)
+
+    def test_the_templates_unedited_placeholder_fails_the_gate(self):
+        """corpus-toolkit#11. The literal value corpus-template ships. It PARSES as a URL,
+        so an omission-only check waves it through and every MCP response then tells an
+        agent to verify at a host RFC 2606 guarantees can never exist — the failure this
+        gate exists to prevent, merely relocated."""
+        self.write_corpus(
+            authoritative_source='"https://REPLACE-ME.invalid/where-the-official-text-lives"')
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1, f"gate passed on the template placeholder:\n{out}")
+        self.assertIn("RFC 2606", out)
+        self.assertIn("Set it to", out)
+
+    def test_every_rfc2606_reserved_name_fails_the_gate(self):
+        """The rule is the reserved NAMES, not a `REPLACE-ME` string match: a corpus that
+        edits the path and leaves the host is still shipping a dead pointer, and each of
+        these is a host no corpus's official text can ever live under."""
+        for url in ("https://REPLACE-ME.invalid/where-the-official-text-lives",
+                    "https://sos.oregon.example/archives",
+                    "http://records.test/schedules",
+                    "https://localhost/official",
+                    "https://corpus.localhost:8080/official",
+                    "https://example.com/official",
+                    "https://www.example.net/official",
+                    "https://example.org/budget"):
+            with self.subTest(url=url):
+                self.write_corpus(authoritative_source=f'"{url}"')
+                self.write_doc("spending-100", "Spending 100")
+
+                code, out = self.validate()
+
+                self.assertEqual(code, 1, f"gate passed on {url}:\n{out}")
+                self.assertIn("RFC 2606", out)
+
+    def test_a_real_host_whose_path_says_example_is_not_a_placeholder(self):
+        """The check reads the HOST, not the URL text. A substring match would reject
+        `https://sos.oregon.gov/archives/example-schedules` — a real front door."""
+        self.write_corpus(
+            authoritative_source='"https://sos.oregon.gov/archives/example-schedules"')
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("RFC 2606", out)
+
+    # ---- the template must still validate itself (corpus-toolkit#11) ----
+    #
+    # `corpus-template` ships the `.invalid` placeholder deliberately: a bare
+    # `{{AUTHORITATIVE_SOURCE_URL}}` is not a URL, and since v1.10.0 that is an error, so
+    # the template could not pass its own CI. Making the placeholder an error too would
+    # break it the same way — and a template that does not validate is a template every
+    # corpus starts life failing. What separates the two states is that the template is
+    # not a corpus yet: its `corpus.id` is still the unfilled `{{CORPUS_ID}}` and it holds
+    # no documents. Filling the id is step one of the replication guide, and adding the
+    # first document is what makes a repo a corpus; either one turns these back into
+    # errors.
+
+    TEMPLATE_SOURCE = '"https://REPLACE-ME.invalid/where-the-official-text-lives"'
+
+    def write_template(self, *, authoritative_source=TEMPLATE_SOURCE):
+        """corpus.yml as corpus-template ships it: unfilled id, placeholder front door."""
+        extra = (f"  authoritative_source: {authoritative_source}\n"
+                 if authoritative_source is not None else "")
+        (self.root / "_meta" / "corpus.yml").write_text(
+            CORPUS_YML.format(extra=extra).replace("id: budget", 'id: "{{CORPUS_ID}}"'))
+
+    def test_the_uninstantiated_template_still_validates(self):
+        self.write_template()
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 0, f"the template fails its own CI:\n{out}")
+        self.assertIn("warning", out)
+        self.assertIn("{{CORPUS_ID}}", out)
+        self.assertIn("RFC 2606", out)
+
+    def test_the_template_warning_says_when_it_becomes_an_error(self):
+        """A warning a reader cannot act on is how the template ships broken to a corpus."""
+        self.write_template()
+
+        code, out = self.validate()
+
+        for fragment, guards in (("corpus.id", "which key is unfilled"),
+                                 ("no documents", "the other half of the condition"),
+                                 ("error", "what happens next")):
+            self.assertIn(fragment, out,
+                          f"the template warning no longer carries {fragment!r} "
+                          f"({guards}):\n{out}")
+
+    def test_a_template_that_holds_a_document_is_a_corpus_and_fails(self):
+        """The exemption cannot become the way to keep a placeholder: a repo that forked
+        the template, added documents and never edited corpus.yml is a corpus shipping a
+        dead front door, which is exactly what #11 is about."""
+        self.write_template()
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1, f"gate passed on a corpus with documents:\n{out}")
+        self.assertIn("RFC 2606", out)
+
+    def test_a_named_corpus_with_no_documents_still_fails(self):
+        """The other half: an empty repo that has filled in its id is a corpus being set
+        up, not the template, and it must not ship a placeholder front door."""
+        self.write_corpus(authoritative_source=self.TEMPLATE_SOURCE)
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1, f"gate passed on a named corpus:\n{out}")
+        self.assertIn("RFC 2606", out)
+
+    def test_an_unfilled_id_is_reported_even_with_a_real_front_door(self):
+        """The state is never silent — it is what suspends two errors."""
+        self.write_template(authoritative_source='"https://sos.oregon.gov/archives/"')
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("{{CORPUS_ID}}", out)
 
     def test_a_real_url_is_silent(self):
         self.write_corpus(authoritative_source="https://sos.oregon.gov/archives/")

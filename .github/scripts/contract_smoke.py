@@ -89,8 +89,10 @@ PLACEHOLDERS = {
     "DOC_TYPE": "schedule",
     "CORPUS_SCOPE_DESCRIPTION": "a scratch corpus built by the toolkit release gate",
     "OWNER-PLACEHOLDER": "OregonAI/maintainers",
-    # Must be a real URL: corpus-validate-frontmatter errors on a non-URL here, which is
-    # itself something worth exercising on every release.
+    # Must be a real URL, and no longer a `{{...}}` substitution: the template ships a
+    # URL-SHAPED `.invalid` placeholder (see fill_front_door), because a bare placeholder
+    # is not a URL and corpus-validate-frontmatter has errored on a non-URL here since
+    # v1.10.0. This value is what fill_front_door writes over it.
     "AUTHORITATIVE_SOURCE_URL": "https://sos.oregon.gov/archives/records/Pages/default.aspx",
 }
 
@@ -147,6 +149,33 @@ def instantiate(template: Path, dest: Path) -> None:
         raise GateFailure("instantiate: template placeholders left unfilled — this "
                           "script's PLACEHOLDERS map has drifted from the template:\n    "
                           + "\n    ".join(leftovers))
+    fill_front_door(dest)
+
+
+def fill_front_door(dest: Path) -> None:
+    """Give the scratch corpus a real `corpus.authoritative_source`, as a human would.
+
+    NOT A `{{...}}` PLACEHOLDER, which is why it needs its own step. The template ships
+    `https://REPLACE-ME.invalid/where-the-official-text-lives` — URL-shaped so the
+    template can validate itself, under a host RFC 2606 guarantees can never resolve. A
+    corpus that has a name and holds documents may not ship that value
+    (corpus-toolkit#11), and this gate instantiates exactly such a corpus. Leaving it
+    would gate every release on a corpus no corpus is allowed to be.
+
+    Loud on drift, like the leftover-placeholder check above: if the template stops
+    carrying exactly one `authoritative_source:` line, this gate stops filling it in and
+    would otherwise go quietly back to testing the placeholder.
+    """
+    cy = dest / "_meta" / "corpus.yml"
+    text = cy.read_text(encoding="utf-8")
+    filled, n = re.subn(
+        r"(?m)^(\s*authoritative_source:).*$",
+        lambda m: f'{m.group(1)} "{PLACEHOLDERS["AUTHORITATIVE_SOURCE_URL"]}"', text)
+    if n != 1:
+        raise GateFailure(f"instantiate: the template's corpus.yml carries {n} "
+                          f"`authoritative_source:` lines, expected exactly 1 — this "
+                          f"script can no longer fill in the corpus's front door")
+    cy.write_text(filled, encoding="utf-8")
 
 
 def write_document(dest: Path) -> None:
