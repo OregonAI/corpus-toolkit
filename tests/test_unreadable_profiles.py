@@ -25,6 +25,8 @@ fix. The registry may be perfectly readable while the overlay is not, so an unre
 overlay must not degrade the answer into "that body is not registered" — the registry
 identity, holdings and attribution are served, and the response states the limit.
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -96,9 +98,20 @@ MALFORMED = "profiles: { das: {note: a\n"
 GOOD_PROFILES = json.dumps({"profiles": {DAS: {"note": "The state's central service agency."}}})
 
 
-def _corpus(tmp_path: Path, profiles: str | None, *, declare: bool = True) -> Path:
+def _corpus(tmp_path: Path, profiles: str | None, *, declare: bool = True,
+            content: bool = True) -> Path:
+    """A corpus with a readable registry and whatever `profiles` says about the overlay.
+
+    `content=False` LEAVES THE DOCUMENTS OUT, for the validator guards below. The seam
+    they test is the corpus-level config check, which runs whether or not the corpus holds
+    documents, and this fixture's one policy does not satisfy the bundled frontmatter
+    schema — so a run over it exits non-zero on `main` already, and a guard asserting
+    "the validator fails" would pass without the config check existing at all. Keeping the
+    content out is what makes the exit code mean this finding.
+    """
     (tmp_path / "policies").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "policies" / "p-1.md").write_text(DOC)
+    if content:
+        (tmp_path / "policies" / "p-1.md").write_text(DOC)
     (tmp_path / "_meta").mkdir(exist_ok=True)
     config = textwrap.dedent(CONFIG).strip() + "\n"
     if not declare:
@@ -302,3 +315,151 @@ def test_the_fault_sentence_is_declared_once_and_is_not_the_registrys(tmp_path):
     assert "_meta/profiles.yml" in fault, fault
     assert config.issuing_body_registry_fault is None, (
         "the registry here reads perfectly; a broken overlay must not be reported as one")
+
+
+# ---- the operator's two surfaces: CI, and the server's startup line -------------------
+#
+# THE FAULT REACHED ONE READER, AND IT WAS THE WRONG ONE (corpus-toolkit#150).
+# `issuing_body_registry_fault` is read by the validator (a CI error), by `build_server`
+# (one stderr line to the operator) and by the per-call notes. After corpus-toolkit#143
+# `issuing_body_profiles_fault` was read by the per-call note ALONE — so a malformed
+# overlay merged through a green CI, deployed, and served every body with silently empty
+# curated data until somebody read one tool response closely.
+#
+# The decision is full parity with the registry: declaring the key is optional, but a
+# DECLARED file that cannot be read is a config defect. Not fatal at load — the loader is
+# deliberately tolerant so a pin mismatch degrades rather than dies.
+
+
+def _validate(root: Path) -> subprocess.CompletedProcess:
+    """Run the validator the way a corpus's CI does, from the corpus root.
+
+    THIS interpreter and THIS checkout, pinned: `python3` plus a bare cwd would run
+    whichever `corpus_toolkit` happened to be importable there, so the guard could pass
+    against an install that does not contain the code under test.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "corpus_toolkit.validate.frontmatter",
+         "--config", "_meta/corpus.yml"],
+        cwd=root, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
+
+
+def test_an_unreadable_profiles_file_fails_the_validator(tmp_path):
+    """THE BUG, AT THE GATE. A corpus could commit a malformed overlay and merge it on
+    green: the validator never asked the config whether the file it declared could be
+    read, so the one check that runs on every PR passed without checking anything."""
+    out = _validate(_corpus(tmp_path, MALFORMED, content=False))
+
+    assert out.returncode != 0, out.stdout + out.stderr
+    assert "FAILED" in out.stdout, out.stdout
+
+
+def test_the_validator_finding_names_the_profiles_file_and_its_key(tmp_path):
+    """"SOMETHING IS WRONG" IS NOT A FINDING. The operator has to know which file to open
+    and which key declared it — and it is NOT the registry's key or the registry's file.
+    The registry here reads perfectly; naming it would send the fix to the wrong file."""
+    out = _validate(_corpus(tmp_path, MALFORMED, content=False))
+
+    assert "plugins.issuing_body_profiles" in out.stdout, out.stdout
+    assert "_meta/profiles.yml" in out.stdout, out.stdout
+    assert "could not be read" in out.stdout, out.stdout
+    assert "plugins.issuing_body_registry" not in out.stdout, out.stdout
+    assert "_meta/registry.yml" not in out.stdout, out.stdout
+
+
+def test_a_corpus_whose_overlay_reads_fine_gets_no_finding(tmp_path):
+    """THE GUARD MUST NOT FIRE ON A WORKING CORPUS. A finding printed for every corpus that
+    declares an overlay is a finding every maintainer learns to scroll past, and a gate
+    that refuses a correct config is worse than no gate — a blanket "report the overlay"
+    would satisfy both guards above and check nothing."""
+    out = _validate(_corpus(tmp_path, GOOD_PROFILES, content=False))
+
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "issuing_body_profiles" not in out.stdout, out.stdout
+
+
+def test_a_corpus_declaring_no_overlay_is_not_told_about_one(tmp_path):
+    """DECLARING NONE IS A CHOICE, NOT A FAULT — the rule the registry follows, and the
+    reason this can be an error at all. A corpus with no `plugins.issuing_body_profiles`
+    key must validate exactly as it did before, with nothing said about a file it never
+    claimed to have."""
+    out = _validate(_corpus(tmp_path, None, declare=False, content=False))
+
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "issuing_body_profiles" not in out.stdout, out.stdout
+
+
+def test_the_operator_is_told_at_startup_which_overlay_is_broken(tmp_path):
+    """SAID ONCE, TO THE OPERATOR, because the per-call answer only reaches the agent —
+    the registry's startup line, for the file beside it. A corpus deploying a malformed
+    overlay serves every body with an empty curated block, and nothing on the way in said
+    so: the `curated_warning` reaches whoever calls `issuing_body_profile`, never the
+    person who can edit the file."""
+    pytest.importorskip("mcp")
+    from corpus_toolkit.mcp import server as server_mod
+
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        server_mod.build_server(_config(_corpus(tmp_path, MALFORMED)))
+
+    said = captured.getvalue()
+    assert "plugins.issuing_body_profiles" in said, said
+    assert "_meta/profiles.yml" in said, said
+    assert "could not be read" in said, said
+
+
+def test_the_server_still_starts_with_an_overlay_it_cannot_read(tmp_path):
+    """A WARNING, NOT A REFUSAL. The overlay is the optional half of ONE tool's answer, so
+    a corpus that cannot read it loses its curated notes and keeps everything else —
+    refusing to start would cost it every other question as well. The config loader is
+    tolerant for the same reason: a pin bump must degrade a corpus, not take it down."""
+    pytest.importorskip("mcp")
+    from corpus_toolkit.mcp import server as server_mod
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        mcp = server_mod.build_server(_config(_corpus(tmp_path, MALFORMED)))
+
+    assert "issuing_body_profile" in {t.name for t in mcp._tool_manager.list_tools()}
+
+
+def test_a_corpus_whose_overlay_reads_gets_no_startup_warning(tmp_path):
+    """THE GUARD MUST NOT FIRE ON A WORKING CORPUS. A startup line printed for every corpus
+    is a line every operator learns to ignore, which is the same as printing nothing."""
+    pytest.importorskip("mcp")
+    from corpus_toolkit.mcp import server as server_mod
+
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        server_mod.build_server(_config(_corpus(tmp_path, GOOD_PROFILES)))
+
+    assert "issuing_body_profiles" not in captured.getvalue(), captured.getvalue()
+
+
+def test_one_sentence_reaches_all_three_surfaces_verbatim(tmp_path):
+    """DECLARED ONCE, READ THREE TIMES — the shape the registry has had since
+    corpus-toolkit#136, and the reason this issue is two call sites and not two messages.
+    "One fact declared twice with nothing gating agreement" is a pattern this project has
+    hit six times; a re-wording at either new call site is how the validator ends up
+    naming the file while the startup line names only the key, and an operator gets half
+    an answer twice.
+
+    The per-call `curated_warning` from corpus-toolkit#143 is the third surface, and it is
+    asserted here unchanged."""
+    pytest.importorskip("mcp")
+    from corpus_toolkit.mcp import server as server_mod
+
+    root = _corpus(tmp_path, MALFORMED)
+    sentence = _config(root).issuing_body_profiles_fault
+    assert sentence, "the fault this test is about"
+
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        server_mod.build_server(_config(root))
+    validated = _validate(_corpus(tmp_path / "again", MALFORMED, content=False))
+    curated_warning = _fw(root).issuing_body_profile(DAS)["curated_warning"]
+
+    for surface, said in (("startup stderr", captured.getvalue()),
+                          ("validator finding", validated.stdout),
+                          ("per-call note", curated_warning)):
+        assert sentence in said, f"{surface} re-words the fault: {said}"

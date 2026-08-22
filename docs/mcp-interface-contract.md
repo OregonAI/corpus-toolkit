@@ -377,6 +377,15 @@ corpus without a graph answers the first row above.
   every corpus whose overlay reads — and for every corpus that declares none,
   which is a choice rather than a fault — so this stays contract v1.
 
+  **And the caller is not the only one told** (corpus-toolkit#150). A per-call
+  note reaches the agent holding the answer and never the person who can edit
+  the file, so a declared overlay that cannot be read is also a
+  `corpus-validate-frontmatter` **error** and one **stderr line at startup**,
+  exactly as the registry's is — declaring the key is optional, but a file a
+  corpus declared and cannot read is a config defect. The server still starts
+  and still serves; refusing would cost the corpus every other question to
+  protect the optional half of one answer.
+
   **Uniqueness is per body, not per name.** A query hitting a body's `name`, its
   `oar_name` and two of its aliases is one hit, not four; otherwise a wider net
   would turn good matches into `no unique issuing body match`.

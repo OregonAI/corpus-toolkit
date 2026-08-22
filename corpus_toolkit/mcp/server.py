@@ -127,6 +127,21 @@ def build_server(config):
               f"will start, but issuing_body_profile can look up no body, and every tool "
               f"that reports whether a slug names a registry entry answers 'could not "
               f"check' instead. Fix the file and restart.", file=sys.stderr)
+    # THE FILE BESIDE IT, ON THE SAME TERMS (corpus-toolkit#150). `issuing_body_profile`
+    # reads two declared files, and after corpus-toolkit#143 an unreadable overlay was
+    # reported only in that tool's per-call `curated_warning` — the one surface that
+    # reaches the agent and never the operator. So a corpus deployed a malformed overlay,
+    # served every body with an empty curated block, and nothing on the way in said so.
+    #
+    # A WARNING AND NOT A REFUSAL, for less reason than the registry even: the overlay is
+    # the optional half of one tool's answer, so the corpus loses its curated notes and
+    # keeps everything else. The GATE that refuses is `corpus-validate-frontmatter`, where
+    # this same fault is an error; a running server can only mention.
+    if config.issuing_body_profiles_fault:
+        print(f"[corpus-mcp] WARNING: {config.issuing_body_profiles_fault} — the server "
+              f"will start, and issuing_body_profile still answers with registry identity, "
+              f"holdings and attribution, but no body gets its curated notes and every "
+              f"answer says so. Fix the file and restart.", file=sys.stderr)
     # Log the SDK. The failure that motivated the compat seam is invisible in the
     # toolkit's own version number: same toolkit, different SDK major, unstartable server.
     _sdk.report()

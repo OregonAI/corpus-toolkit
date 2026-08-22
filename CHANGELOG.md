@@ -17,6 +17,36 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — a `plugins.issuing_body_profiles` file that cannot be read now fails CI and warns the operator at startup (corpus-toolkit#150)
+
+**This can break a corpus's CI, and only one that is already broken.** A corpus that
+declares `plugins.issuing_body_profiles` and points it at a file the toolkit cannot read
+now **fails `corpus-validate-frontmatter`**. A corpus that declares no overlay, or declares
+one that reads, is unaffected — and nothing about this is checked at load, so the server
+still starts either way.
+
+corpus-toolkit#143 (below) made an unreadable overlay *reportable*, and gave the report one
+reader: `issuing_body_profile`'s per-call `curated_warning`. The registry beside it has
+three — a validator error, a startup line on stderr, and the per-call notes. So a malformed
+overlay merged through a green CI, deployed, and served every issuing body with a silently
+empty curated block until somebody read one tool response closely.
+
+The fault now reaches the same three surfaces the registry's does:
+
+* `corpus-validate-frontmatter` — an **error**, so CI refuses it. Declaring the key is
+  optional; a file you declared and cannot read is a config defect, which is exactly the
+  rule `plugins.issuing_body_registry` has followed since corpus-toolkit#129.
+* `corpus-mcp-serve` — **one stderr warning at startup**, said to the operator because the
+  per-call note only ever reaches the agent. A warning and not a refusal: the overlay is
+  the optional half of one tool's answer, so the corpus loses its curated notes and keeps
+  every other question.
+* `issuing_body_profile`'s `curated_warning` — unchanged.
+
+All three read `CorpusConfig.issuing_body_profiles_fault`, which already declared the
+sentence; the callers choose severity and nothing else. **If this turns your CI red**, open
+the file the finding names — it names the overlay and `plugins.issuing_body_profiles`,
+never the registry's file or key — or drop the key if the overlay is gone.
+
 ### Fixed — a curated `issuing_body_profiles` file that cannot be read no longer raises out of `issuing_body_profile` (corpus-toolkit#143)
 
 **This can only turn a failed tool call into an answer.** `issuing_body_profile` reads two
