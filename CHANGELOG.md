@@ -17,6 +17,24 @@ it can break you.
 
 ## Unreleased
 
+### Internal — `test_user_agent.py` no longer fails in a git worktree (corpus-toolkit#146)
+
+**Nothing here changes anything a corpus can observe**, and no bump is involved: test-only,
+no runtime behaviour, no schema, no MCP contract, no version.
+
+Recorded because the failure mode wastes an agent's afternoon and then survives into a PR
+description. Two of these tests failed in **every fresh `git worktree`** and passed in the
+main checkout. `importlib.metadata` resolves against `sys.path`, and `*.egg-info/` is
+gitignored, so a worktree has no metadata of its own and resolution falls through to a stale
+user-site install — leaving the assertion comparing this tree's code against an unrelated
+install's metadata. Both tests already skipped when *nothing* answered; the condition asked
+**"is corpus-toolkit installed?"** where the question is **"is the installed distribution
+THIS tree's?"**. The skip reason now names the resolved path of the metadata that answered
+and the tree it came from.
+
+**A stale install of this checkout still fails**, which is what these tests are for; CI
+installs editable from the checkout root, so nothing is skipped there.
+
 ### Fixed — a curated `issuing_body_profiles` file that cannot be read no longer raises out of `issuing_body_profile` (corpus-toolkit#143)
 
 **This can only turn a failed tool call into an answer.** `issuing_body_profile` reads two
