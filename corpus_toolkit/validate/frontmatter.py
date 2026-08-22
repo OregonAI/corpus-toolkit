@@ -8,8 +8,12 @@ oregon-policy-repo/src/validate_frontmatter.py; Oregon-specific hardcoding
 (CONTENT_DIRS, DIR_DOC_TYPE, the agency registry file) replaced by config-
 driven equivalents — see docs/reference-architecture.md and MIGRATION.md.
 
-  --check-relationships   run ONLY the relationship-graph resolution (used by
-                          the check-links reusable workflow; no --schema needed)
+  --check-relationships   skip the per-document schema checks: run the
+                          relationship-graph and join resolution plus the
+                          corpus-level config checks (used by the check-links
+                          reusable workflow; no --schema needed). The config
+                          checks are NOT skipped — see the flag's definition in
+                          main() for why (corpus-toolkit#139)
   --changed [REF]         validate only files changed vs REF (merge-base with
                           origin/main if omitted)
   -j N / --jobs N         parallelize per-file checks across N processes
@@ -22,8 +26,6 @@ import urllib.parse
 
 import jsonschema
 import yaml
-
-from typing import NamedTuple
 
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.config import name_values
@@ -253,75 +255,24 @@ def _resolution_universe(config, docs):
     return (_graph_node_ids(config) or _all_content_ids(config)) | set(docs)
 
 
-class RegistryRead(NamedTuple):
-    """ONE READ OF THE ISSUING-BODY REGISTRY, and every question this run asks of it.
+# THE NAME STAYS IMPORTABLE FROM HERE. `RegistryRead` was defined in this module until
+# corpus-toolkit#136 moved it to `config`, and a name a corpus repo can import is public
+# surface wherever it is defined (AGENTS.md). One binding, so there is still one class.
+RegistryRead = config_mod.RegistryRead
 
-    `entries` is None for COULD NOT READ, WHICH IS NEVER THE SAME ANSWER AS AN EMPTY
-    REGISTRY. Both callers gate on that distinction: the per-file checks skip rather than
-    report every document's slug as unregistered, and `_check_config` declines to call a
-    declared name field unmatched by a registry nobody could open.
 
-    The derived answers hang off the read rather than being recomputed per caller.
-    `config._parse_registry_slugs` is documented as THE one registry parser precisely
-    because two derivations of one registry drift into disagreeing about which slugs exist
-    — a third one written inline at a call site is how that starts.
+def _read_registry(config) -> config_mod.RegistryRead:
+    """This run's one read of the issuing-body registry, for every check that asks about it.
+
+    A THIN NAME OVER `config.issuing_body_registry_read`, NOT A SECOND READER. The validator
+    grew `RegistryRead` first (corpus-toolkit#129) while the runtime parsed the same file
+    separately and RAISED where this reported (corpus-toolkit#136) — the same registry
+    answering two ways depending on who asked. The shape moved to `config`, which both `mcp`
+    and `validate` already import, so "unreadable" is decided once. This function stays
+    because a corpus's own scripts may call it, and because `_check_config` reads better
+    taking the read as an argument than reaching into config for it.
     """
-    entries: list | None
-    problem: str | None
-
-    @property
-    def readable(self) -> bool:
-        return self.entries is not None
-
-    @property
-    def slugs(self):
-        """The registry's slugs, or None where there was nothing readable to check."""
-        if self.entries is None:
-            return None
-        return {e["slug"] for e in self.entries if e.get("slug")}
-
-    @property
-    def without_slug(self) -> int:
-        """Entries carrying no slug — rows nothing can ever be attributed to."""
-        return 0 if self.entries is None else sum(1 for e in self.entries if not e.get("slug"))
-
-
-def _read_registry(config) -> RegistryRead:
-    """Read the issuing-body registry once, for every check that asks about it.
-
-    A file that parses to a mapping with a missing or null entries key is READ, and holds
-    no entries — that is a registry saying nothing, and the per-file checks are entitled to
-    act on it exactly as they always have. Unreadable is: gone, unparseable, or shaped like
-    something other than a registry.
-
-    Entry-level shape is the tolerant rule `config._parse_registry_slugs` already uses: a
-    non-mapping entry, or one with no slug, is skipped rather than raised over. It used to
-    raise `KeyError` out of the load, a traceback naming neither the file nor the row —
-    which is a bad message but a loud one, so `_check_config` reports the count instead of
-    letting a broken row disappear.
-    """
-    if not config.issuing_body_registry:
-        return RegistryRead(None, None)
-    key = config.issuing_body_registry_key
-    try:
-        data = yaml.safe_load(config.issuing_body_registry.read_text())
-    except (OSError, yaml.YAMLError) as e:
-        # ONE FINDING, ONE LINE, capped like the schema errors above. A yaml.YAMLError's
-        # message is several lines with a caret diagram, and `Reporter` prints a finding as
-        # a line — pasted in raw, the rest of this sentence ended up under a `^`, reading
-        # as a different message.
-        detail = " ".join(str(e).split())[:200]
-        return RegistryRead(None, f"could not be read: {type(e).__name__}: {detail}")
-    if data is None:
-        data = {}
-    if not isinstance(data, dict):
-        return RegistryRead(None, (f"could not be read as a registry: expected a mapping "
-                                   f"with a {key!r} list, got {type(data).__name__}"))
-    entries = data.get(key) or []
-    if not isinstance(entries, list):
-        return RegistryRead(None, (f"could not be read as a registry: {key!r} must be a "
-                                   f"list of entries, got {type(entries).__name__}"))
-    return RegistryRead([e for e in entries if isinstance(e, dict)], None)
+    return config.issuing_body_registry_read
 
 
 # RFC 2606 reserves these names so they can never belong to anyone: §2 sets aside the
@@ -552,15 +503,15 @@ def _check_registry(config, r, rel, registry):
     if not config.issuing_body_registry:
         # Nothing to name columns of; declaring fields in that state is refused at load.
         return
-    registry_rel = config.issuing_body_registry
-    try:
-        registry_rel = registry_rel.relative_to(config.root)
-    except ValueError:
-        pass
+    # The same spelling of the file the MCP tools' notes use — see
+    # `CorpusConfig.issuing_body_registry_rel`.
+    registry_rel = config.issuing_body_registry_rel
     fields = config.issuing_body_name_fields
 
     if not registry.readable:
-        r.error(rel, f"plugins.issuing_body_registry {registry_rel} {registry.problem} — "
+        # THE SAME SENTENCE THE MCP TOOLS SERVE — see
+        # `CorpusConfig.issuing_body_registry_fault`.
+        r.error(rel, f"{config.issuing_body_registry_fault} — "
                      f"so the issuing-body slug of every document went unchecked, and "
                      f"plugins.issuing_body_name_fields ({', '.join(fields)}) could not be "
                      f"checked against it either. This is 'could not check', not 'nothing "
@@ -588,7 +539,8 @@ def _check_registry(config, r, rel, registry):
                     f"issuing-body slug is reported as unregistered.")
         return
 
-    unmatched = [f for f in fields if not any(name_values(e, f) for e in registry.entries)]
+    unmatched = [f for f in fields
+                 if not any(name_values(e, f) for e in registry.mappings)]
     if not unmatched:
         return
     # A corpus that declared nothing must not be told off for a key it never wrote: the
@@ -599,8 +551,8 @@ def _check_registry(config, r, rel, registry):
            "no override")
     r.warn(rel, (
         f"{how}: no entry in {registry_rel} carries a name in "
-        f"{', '.join(repr(f) for f in unmatched)} — checked {len(registry.entries)} entr"
-        f"{'y' if len(registry.entries) == 1 else 'ies'}, and a name is a string cell or a "
+        f"{', '.join(repr(f) for f in unmatched)} — checked {len(registry.mappings)} entr"
+        f"{'y' if len(registry.mappings) == 1 else 'ies'}, and a name is a string cell or a "
         f"list of strings. A free-text `issuing_body_profile` query can never match on "
         f"{'these fields' if len(unmatched) > 1 else 'that field'}, and matching nothing "
         f"looks exactly like a body this corpus does not hold. "
@@ -643,7 +595,26 @@ def _check_extra_schemas(config, r):
                 r.error(rel, f"missing: {e}")
 
 
-def _run_relationships_only(config, paths, r):
+def _check_corpus_config(config, r, registry):
+    """EVERY corpus-level check, as one thing, because both entry points run all of them.
+
+    Two call sites that each list the checks are two lists to keep in agreement, and this
+    module has already paid for that once: `--check-relationships` returned before
+    `_check_config` was reached, so the path `check-links.yml` runs gated no front door, no
+    registry, no name fields and no declared extra schemas (corpus-toolkit#139).
+    """
+    _check_config(config, r, registry)
+    _check_extra_schemas(config, r)
+
+
+def _run_relationships_only(config, paths, r, registry):
+    """The `--check-relationships` path: the relationship graph, the joins, AND the
+    corpus-level configuration.
+
+    WHY THE CONFIG CHECK RUNS HERE — see the flag's definition in `main` for the decision
+    and its reasoning. In short: the flag narrows which DOCUMENTS are checked, not whether
+    the corpus is CONFIGURED, and the config findings are not per-document.
+    """
     docs = {}
     for p in paths:
         try:
@@ -657,7 +628,12 @@ def _run_relationships_only(config, paths, r):
     for rel, level, msg in (_relationship_findings(paths, universe, config)
                             + _join_findings(paths, universe, config)):
         (r.error if level == "error" else r.warn)(rel, msg)
-    r.finish(f"OK: relationship graph consistent across {len(paths)} content file(s).")
+    _check_corpus_config(config, r, registry)
+    # THE SUMMARY SAYS WHAT WAS CHECKED. #139's complaint was that a green
+    # "relationship graph consistent" reads as a full pass to someone who reached for this
+    # flag as the cheap validate; naming both halves is what makes the green run readable.
+    r.finish(f"OK: relationship graph consistent across {len(paths)} content file(s), "
+             f"and corpus configuration checked.")
 
 
 def main():
@@ -666,8 +642,38 @@ def main():
     ap.add_argument("--schema", help="path to a frontmatter JSON schema. Defaults to the "
                     "one bundled with this package, which is what CI validates against — "
                     "pass this only to validate against a different schema.")
+    # THE DECISION, RECORDED WHERE THE FLAG IS DEFINED (corpus-toolkit#139).
+    #
+    # This flag ran NO corpus-level config check at all: `_run_relationships_only`
+    # returned before `_check_config` was reached, so the path `check-links.yml` runs
+    # gated no front door, no registry readability, no slug-less registry rows, no
+    # declared name fields and no extra schemas. It was harmless only because a SECOND
+    # workflow runs the full command — a property of one workflow file, not of this tool.
+    #
+    # THE CHOICE: run the config check here too, rather than printing that it was skipped.
+    #
+    #   * The flag narrows WHICH DOCUMENTS are checked, not WHETHER THE CORPUS IS
+    #     CONFIGURED. None of the config findings is per-document, and none of them gets
+    #     cheaper by looking at fewer files.
+    #   * The join gate went this way for exactly this reason (corpus-toolkit#3): "leaving
+    #     it out of that path would mean the gate exists in a command no corpus's CI
+    #     actually invokes."
+    #   * It costs one YAML read that the config load has already done.
+    #   * The config check stopped being advisory: #141 made a missing or placeholder
+    #     front door a hard ERROR and #129 added the registry findings. Skipping all of it
+    #     is a bigger claim now than when this path was written.
+    #   * The alternative — print "no config was checked" — leaves a corpus whose CI is
+    #     trimmed to the link check with no gate at all, and this repo does not ship a
+    #     guard that cannot fire (AGENTS.md).
+    #
+    # WHAT IT COSTS: this command can now fail for a reason that is not a relationship.
+    # That is the point, and the help text says so rather than leaving "only" to imply
+    # otherwise.
     ap.add_argument("--check-relationships", action="store_true",
-                    help="run only the relationship-graph resolution check")
+                    help="skip the per-document schema checks: run the relationship-graph "
+                         "and join resolution checks plus the corpus-level config checks "
+                         "(front door, issuing-body registry, extra schemas) — the "
+                         "corpus-level facts are gated on every entry point")
     ap.add_argument("--changed", nargs="?", const="", metavar="REF",
                     help="validate only files changed vs REF (default: merge-base with origin/main)")
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1,
@@ -675,28 +681,34 @@ def main():
     args = ap.parse_args()
 
     config = config_mod.load(args.config)
+    r = Reporter()
+    # ONE READ, EVERY QUESTION. The per-file checks want the slug set; the config check
+    # wants the entries themselves. Reading the file twice is how two answers about one
+    # registry start to disagree (config.RegistryRead carries the same warning).
+    registry = _read_registry(config)
+
     scoped = args.changed is not None
     if scoped:
         paths = changed_content_files(config, args.changed or None)
         if not paths:
             print("No changed content files to validate.")
             if args.check_relationships:
+                # A CORPUS-LEVEL FACT DOES NOT DEPEND ON WHICH FILES A PR TOUCHED, and the
+                # full command already checks the config on this same no-op run. A gate
+                # that fires on one branch of one flag and not the other is the "guard
+                # that cannot fire" AGENTS.md files as a defect.
+                _check_corpus_config(config, r, registry)
+                r.finish("OK: no changed content files; corpus configuration checked.")
                 return
     else:
         paths = list(content_files(config))
 
-    r = Reporter()
-
     if args.check_relationships:
-        _run_relationships_only(config, paths, r)
+        _run_relationships_only(config, paths, r, registry)
         return
 
     doc_schema = json.loads(open(args.schema).read()) if args.schema else bundled_schema()
     doc_schema = schema_with_extensions(doc_schema, config)
-    # ONE READ, EVERY QUESTION. The per-file checks want the slug set; the config check
-    # wants the entries themselves. Reading the file twice is how two answers about one
-    # registry start to disagree (config._parse_registry_slugs carries the same warning).
-    registry = _read_registry(config)
 
     docs = {}
     # The fork-pool, the 50-file threshold and the chunk size live in repo.map_documents —
@@ -716,8 +728,7 @@ def main():
                             + _join_findings(paths, universe, config)):
         (r.error if level == "error" else r.warn)(rel, msg)
 
-    _check_config(config, r, registry)
-    _check_extra_schemas(config, r)
+    _check_corpus_config(config, r, registry)
 
     scope = f"{len(paths)} changed" if scoped else f"{len(paths)}"
     r.finish(f"OK: {scope} content file(s) validated across {', '.join(config.content_dirs)}.")

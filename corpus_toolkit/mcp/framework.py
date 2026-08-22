@@ -896,16 +896,18 @@ class CorpusFramework:
         # means the answer is QUALIFIED -- something a caller has to act on.
         if known is not None:
             return {"value": value, "matched": "issuing_body", "registry_checked": True}
-        # A DECLARED REGISTRY THAT IS NOT THERE is a FAULT; declaring none is a CHOICE,
-        # and a caller can act on the first. `issuing_body_slugs` answers None for both,
-        # so the config is what tells them apart.
+        # A DECLARED REGISTRY THIS CORPUS CANNOT READ is a FAULT; declaring none is a
+        # CHOICE, and a caller can act on the first. `issuing_body_slugs` answers None for
+        # both, so the config is what tells them apart.
         #
-        # A registry that IS there and does not PARSE reaches neither branch: it raises
-        # out of `issuing_body_slugs` before this runs (corpus-toolkit#136). That is a
-        # third outcome this field does not cover, and saying so here is cheaper than a
-        # reader inferring from `registry_checked: false` that every read failure lands
-        # softly.
-        why = ("declares an issuing-body registry that is not there to read"
+        # GONE, UNOPENABLE, UNPARSEABLE, NOT TEXT AND WRONGLY SHAPED ARE ONE CONDITION, and
+        # `RegistryRead.problem` says which — from a caller's point of view they are all
+        # "this corpus declares a registry it cannot read". Only the missing FILE used to
+        # land here at all: a registry that was present and did not parse raised out of
+        # `issuing_body_slugs` before this ran, so the same fault reached one caller as a
+        # stated limit and another as a failed tool call (corpus-toolkit#136).
+        why = (f"has a broken issuing-body registry — "
+               f"{self.config.issuing_body_registry_fault}"
                if self.config.issuing_body_registry
                else "declares no issuing-body registry")
         return {"value": value, "matched": "issuing_body", "registry_checked": False,
@@ -1222,8 +1224,27 @@ class CorpusFramework:
         if not self.config.issuing_body_registry:
             return {**self._envelope(),
                     "error": "this corpus has no issuing-body registry configured"}
-        registry = yaml.safe_load(self.config.issuing_body_registry.read_text()) or {}
-        entries = {e["slug"]: e for e in registry.get(self.config.issuing_body_registry_key, [])}
+        read = self.config.issuing_body_registry_read
+        if not read.readable:
+            # AN ANSWER, NOT A TRACEBACK, AND NOT A CLAIM ABOUT THE BODY. This tool read the
+            # registry itself and raised whatever the file did — a failed tool call, which is
+            # the outcome an agent can act on least (corpus-toolkit#136). What it must never
+            # degrade into is the no-match wording below: "could not read the registry",
+            # "the registry is empty" and "that body is not in the registry" are three
+            # findings with three different fixes, and only the first one is known here.
+            return {**self._envelope(),
+                    "error": (f"{self.config.issuing_body_registry_fault}, so no body "
+                              f"could be looked up. This is a broken configuration, not a "
+                              f"corpus without a registry, and it says NOTHING about "
+                              f"whether {str(slug_or_query).strip()!r} names a body — fix "
+                              f"the file and ask again.")}
+        # SKIPPED, NOT RAISED, for a row nothing can be attributed to — no `slug`, or not
+        # an entry at all. `{e["slug"]: e for e in ...}` died with a `KeyError: 'slug'`
+        # naming neither the file nor the row, out of a live tool, for a registry the rest
+        # of the platform reads perfectly well. The validator reports those rows by count
+        # and fails CI over them (corpus-toolkit#129), so this is not silence; it serves
+        # the bodies that DO have a slug rather than serving nobody.
+        entries = read.by_slug
         curated = {}
         if self.config.issuing_body_profiles and self.config.issuing_body_profiles.is_file():
             curated = (yaml.safe_load(self.config.issuing_body_profiles.read_text()) or {}).get(
@@ -1471,10 +1492,10 @@ class CorpusFramework:
             why = ("this corpus declares no issuing-body registry, so whether a slug names "
                    "a real body was NOT checked here"
                    if not self.config.issuing_body_registry else
-                   f"this corpus declares an issuing-body registry at "
-                   f"{self.config.issuing_body_registry} but it could not be read, so "
-                   f"whether a slug names a real body could NOT be checked — this is a "
-                   f"broken configuration, not a corpus without a registry")
+                   f"this corpus has a broken issuing-body registry — "
+                   f"{self.config.issuing_body_registry_fault} — so whether a slug names a "
+                   f"real body could NOT be checked; this is a broken configuration, not a "
+                   f"corpus without a registry")
             if in_corpus == 0:
                 # An empty index is not a fully attributed corpus. The four-bucket path says
                 # so; dropping it here claimed "every document carries a slug" about a corpus
