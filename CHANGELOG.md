@@ -17,6 +17,63 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — `search_corpus(issuing_body=...)` takes a registry slug too, and says which it matched
+
+**Additive: a caller passing a frontmatter string is unaffected, and an unfiltered search is
+byte-identical.** The filter was an exact match on the free-text `issuing_body`
+**frontmatter** field and nothing else. Every other tool that takes a body takes a
+**registry slug** — `issuing_body_profile(slug)` resolves one, `documents_by_agency(slug)`
+requires one — so a caller holding a slug passed it here and got `[]`, which is
+indistinguishable from "this corpus holds nothing for that body". The contract did not say
+which of the two the parameter wanted, so neither reading was wrong on its face.
+
+It is worse for an agent than for a person: an agent that has just resolved a slug has every
+reason to reuse it, no signal that this one parameter wants a different kind of string, and
+an empty result that reads as a finding.
+
+**Both are accepted, and resolution is by IDENTITY, never by hit count.** A value naming an
+entry in the corpus's issuing-body registry filters on the resolved slug
+(`docs.issuing_body_slug`, the column `documents_by_agency` already answers from); anything
+else filters on the frontmatter field exactly as before. Deciding by "did it return
+anything" would make the same call mean different things on different days, and would
+collapse the distinction this fixes: a slug naming a real body that holds nothing here would
+fall through and be reported as a string that matched nothing.
+
+**A body-filtered search with no matches no longer answers `[]`.** `search_corpus` is the
+one tool with no envelope to carry a note (response convention 1's exemption), so an empty
+list was the whole answer — and an empty list cannot say which of two columns it looked in.
+It now returns exactly one record that is not a hit (`no_hits: true`, no `id`/`path`/
+`snippet`) carrying the query, the filter block and a note naming every filter applied. It
+says what was searched for; it never says the corpus holds nothing for that body. An
+unfiltered search that matches nothing still returns `[]`.
+
+**Every hit gains `issuing_body_filter`** — `{value, matched, registry_checked, note?}` —
+and only when the parameter is used. `registry_checked` is separate from `matched` because
+`matched: "issuing_body"` means two different things: *checked, and it names no body* when a
+registry was read, and *never asked* when the corpus declares none or declares one that
+could not be read (the note says which — a broken path is a fault, no registry is a choice).
+Reporting the second as the first would tell a caller its slug is wrong on every corpus with
+no registry to be wrong against.
+
+**A value that is both a slug and some document's frontmatter string resolves to the slug**,
+and the hit says so. The slug is the identity every other tool takes, so a caller holding one
+got it from a slug-shaped tool; there is no parameter to force the other reading, because a
+frontmatter descriptor is prose and a slug is lower-hyphen-case.
+
+**Custom backends keep working and are never misreported.** `RetrievalBackend.search` MAY now
+accept a keyword-only `issuing_body_slug`; the framework passes it only to a `search` whose
+signature NAMES it, so an adapter written before this keeps answering, and its frontmatter
+answer is labelled a frontmatter answer with a note naming the backend rather than relabelled
+a slug answer. `**kwargs` deliberately does not count: a backend that swallows the keyword
+returns an *unfiltered* result, and an unfiltered result labelled "filtered by slug" is a
+wrong answer rather than a missing one. `FileBackend` implements it, so a file-backed corpus
+does nothing. The slug filter holds on the semantic branch as well as the keyword one — a
+filter only one ranker honours stops filtering the moment a corpus configures semantic
+search.
+
+No index rebuild: `docs.issuing_body_slug` has been in the schema since v1.26.0.
+Contract v1 (`docs/mcp-interface-contract.md`, corpus-toolkit#131).
+
 ### Added — the validator reports a name field the registry does not carry
 
 **Reported, not fatal: a corpus mid-migration keeps loading and keeps serving.** New

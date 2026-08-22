@@ -25,6 +25,88 @@ corpus configures no `semantic_search_module`. `limit` is capped at 40.
   proxied live search endpoints — results must be labeled `source: live`
   vs `source: docs`.
 
+**`issuing_body` takes EITHER of the two things a body is called, and the
+response says which one matched** (toolkit >= this release, corpus-toolkit#131).
+This page did not say which of the two the parameter wanted, and the filter was
+an exact match on the free-text `issuing_body` **frontmatter** field — a
+human-written descriptor that frequently names a sub-unit ("DAS Enterprise
+Information Strategy and Policy Division") rather than a registry entry.
+Every *other* tool that takes a body takes a **registry slug**:
+`issuing_body_profile(slug_or_query)` resolves one and `documents_by_agency(slug)`
+requires one. So a caller holding a slug passed it here and got `[]` — which is
+indistinguishable from "this corpus holds nothing for that body", and is worse
+for an agent than for a person: an agent that has just resolved a slug has every
+reason to reuse it, no signal that this one parameter wants a different kind of
+string, and an empty result that reads as a finding.
+
+Resolution, and it is by **identity, never by hit count**:
+
+| the value | filtered on |
+|---|---|
+| names an entry in this corpus's issuing-body registry | the **resolved slug** (`config.registry_slug_for`'s answer — the same attribution `documents_by_agency` serves) |
+| anything else | the free-text `issuing_body` frontmatter field, exactly as before |
+
+Deciding by "did it return anything" would make the same call mean different
+things on different days and would collapse the distinction this fix is about: a
+slug naming a real body that holds nothing here would fall through and be
+reported as a string that matched nothing.
+
+**A value that is BOTH a registry slug and some document's frontmatter string
+resolves to the slug.** That is a decision, not a default: the slug is the
+identity every other tool takes, so a caller holding one got it from a
+slug-shaped tool. It is not silent — the hit says `matched: "registry_slug"` —
+and there is deliberately no parameter to force the other reading, since a
+frontmatter descriptor is prose and a slug is lower-hyphen-case, so the overlap
+is pathological rather than routine.
+
+**Every hit gains `issuing_body_filter`** when the parameter is used, and only
+then — a search that passes no `issuing_body` is unchanged, key for key:
+
+    {"value": <as passed, stripped>,
+     "matched": "registry_slug" | "issuing_body",
+     "registry_checked": true | false,       # was the registry consulted at all?
+     "note": "..."}                          # ONLY when the answer is qualified:
+                                             #   the registry could not be consulted, or
+                                             #   this backend cannot filter by slug
+
+`registry_checked` is a second field because `matched` cannot carry two answers.
+`matched: "issuing_body"` **with** `registry_checked: true` means checked, and
+the value names no body in the registry. The same `matched` with
+`registry_checked: false` means the question was never asked — this corpus
+declares no registry, or declares one that could not be read (the `note` says
+which, because a broken path is a fault and no registry is a choice). Serving
+the second as the first would tell a caller its slug is wrong on every corpus
+that has no registry to be wrong against — the collapse `slug_in_registry: null`
+already exists to prevent below.
+
+**A body-filtered search with no matches never answers with a bare `[]`.** It
+answers with exactly one record that is **not a hit** — no `id`, no `path`, no
+`snippet` — carrying `no_hits: true`, the `query`, the same
+`issuing_body_filter` block, and a `note` naming every filter that was applied:
+
+    [{"no_hits": true, "query": "...", "issuing_body_filter": {...},
+      "note": "no document matched ... The body filter was applied to ..."}]
+
+`search_corpus` is the one tool with no envelope to put a note in (see the
+exemption under response convention 1), so an empty list is the whole answer —
+and an empty list cannot say which of two columns it looked in. The note says
+what was searched for; it never says the corpus holds nothing for that body,
+which is a different claim and one this tool is not in a position to make.
+An unfiltered search that matches nothing still returns `[]`.
+
+**What this asks of a backend: nothing.** `RetrievalBackend.search` may
+additionally accept a keyword-only `issuing_body_slug`, and the framework passes
+it only to a `search` whose signature **names** it. An adapter written before
+this existed keeps working untouched and its frontmatter answer is reported as a
+frontmatter answer — `matched: "issuing_body"` with a `note` naming the backend
+— rather than relabelled a slug answer. `**kwargs` does not count as accepting
+the keyword: a backend that swallows it returns an *unfiltered* result, and an
+unfiltered result labelled "filtered by slug" is a wrong answer rather than a
+missing one. The built-in `FileBackend` implements it, so a file-backed corpus
+needs to do nothing.
+
+Additive on every path a corpus already used, so this stays contract v1.
+
 ### `get_document(id, part?)`
 Full document by id, including frontmatter and the provenance block. API
 corpora return entity or dataset docs; live record retrieval goes through

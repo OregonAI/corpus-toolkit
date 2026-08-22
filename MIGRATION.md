@@ -524,6 +524,46 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
+### Unreleased — `search_corpus`'s `issuing_body` takes a registry slug too (corpus-toolkit#131)
+
+**Nothing to do, no rebuild, and no config key.** The filter still matches the free-text
+`issuing_body` frontmatter field for every value that is not a registry slug, so a caller
+passing a frontmatter string sees exactly what it saw before, and a search that passes no
+`issuing_body` is byte-identical. What changes is that a value naming an entry in your
+`plugins.issuing_body_registry` is now filtered on the RESOLVED slug — the same attribution
+`documents_by_agency` answers from — instead of matching nothing.
+
+**Two response changes to know about if you parse hits.**
+
+1. A hit gains `issuing_body_filter` (`{value, matched, registry_checked, note?}`) whenever
+   the parameter is used, naming the column that matched.
+2. A body-filtered search with NO matches returns one record that is not a hit —
+   `no_hits: true`, no `id`/`path`/`snippet` — instead of `[]`. A client that renders hits
+   should branch on `no_hits`; one that counts `len()` will see 1 where it used to see 0, on
+   that path only. An unfiltered search that matches nothing still returns `[]`.
+
+**If your corpus supplies `plugins.retrieval_module`, read this.** `RetrievalBackend.search`
+may now accept a keyword-only `issuing_body_slug: str | None = None` and filter on the
+resolved registry slug. It is OPTIONAL and detected from your signature, so an adapter that
+does not name the parameter is never handed it and keeps working untouched — its answer is
+reported as a frontmatter answer with a note naming your backend, never relabelled a slug
+answer.
+
+**`**kwargs` does not count as accepting it.** If your `search` takes `**kwargs` and ignores
+unknown keys, the framework will NOT ask it for a slug filter — deliberately, because a
+backend that swallows the keyword returns an unfiltered result, and an unfiltered result
+labelled "filtered by slug" is a wrong answer rather than a missing one. Name the parameter
+explicitly to serve slug filtering:
+
+```python
+def search(self, query, *, doc_type=None, issuing_body=None, limit=10,
+           mode="hybrid", issuing_body_slug=None):
+```
+
+Corpora with no `issuing_body_registry` (`oregon-kpm`, `oregon-audits`) resolve nothing and
+say so: the filter block reports `registry_checked: false`, which means the slug question was
+never asked — not that the value is not a slug.
+
 ### Unreleased — a corpus declares which registry fields carry a name (corpus-toolkit#128)
 
 **No index rebuild, no schema-version bump, and no change to which bodies you match unless

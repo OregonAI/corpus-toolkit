@@ -742,10 +742,159 @@ class CorpusFramework:
         'semantic' is vector-only. Hybrid/semantic silently degrade to
         keyword when no semantic_search_module is configured/available.
 
-        Ranking and storage belong to the backend; this stays a passthrough so every
-        archetype returns the same hit shape."""
-        return self.backend.search(query, doc_type=doc_type, issuing_body=issuing_body,
-                                   limit=limit, mode=mode)
+        Ranking and storage belong to the backend; this stays a passthrough for
+        everything except which COLUMN the issuing-body filter is applied to, which is a
+        corpus-level question the backend cannot answer.
+
+        `issuing_body` TAKES EITHER OF THE TWO THINGS A BODY IS CALLED HERE
+        (corpus-toolkit#131): a registry slug, or the free-text `issuing_body` frontmatter
+        string. It used to take only the second, while every other tool that takes a body
+        takes the first -- `issuing_body_profile(slug)` resolves one, `documents_by_agency
+        (slug)` requires one -- so a caller who had just resolved a slug passed it here and
+        got `[]`, which reads as "this corpus holds nothing for that body". Nothing in the
+        response said otherwise, and nothing in the contract said which of the two this
+        parameter wanted, so neither reading was wrong on its face.
+
+        WHAT THE ANSWER NOW CARRIES, in both directions:
+
+          * every hit gains `issuing_body_filter` -- {value, matched, [registry_checked],
+            [note]} -- naming the column that matched, so a slug search whose hits carry
+            an unfamiliar `issuing_body` string explains itself;
+          * a filtered search with NO matches answers with ONE record that is not a hit
+            (`no_hits: True`, no id/path/snippet) carrying the same block. An empty list
+            cannot say which of two columns it looked in, and `search_corpus` is the one
+            tool with no envelope to put a note in (contract, response convention 1), so
+            two different findings -- a real body holding nothing here, and a string that
+            is nobody's frontmatter value -- arrived identical.
+
+        UNFILTERED SEARCH IS BYTE-IDENTICAL. The blast radius is the parameter under
+        repair: pass no `issuing_body` and the hit shape is exactly what it was.
+        """
+        value = str(issuing_body or "").strip()
+        if not value:
+            return self.backend.search(query, doc_type=doc_type, issuing_body=None,
+                                       limit=limit, mode=mode)
+        filt = self._issuing_body_filter(value)
+        if filt["matched"] == "registry_slug":
+            hits = self.backend.search(query, doc_type=doc_type, issuing_body=None,
+                                       issuing_body_slug=value, limit=limit, mode=mode)
+        else:
+            hits = self.backend.search(query, doc_type=doc_type, issuing_body=value,
+                                       limit=limit, mode=mode)
+        if not hits:
+            return [self._no_issuing_body_hits(query, doc_type, filt)]
+        for hit in hits:
+            hit["issuing_body_filter"] = dict(filt)
+        return hits
+
+    # What each `matched` value actually filtered on, in the words a caller can act on.
+    _FILTERED_COLUMN = {
+        "registry_slug": ("the RESOLVED issuing-body registry slug, the same identity "
+                          "`issuing_body_profile` and `documents_by_agency` take"),
+        "issuing_body": ("the free-text `issuing_body` frontmatter field, which is a "
+                         "human-written descriptor and often names a sub-unit rather "
+                         "than a registry entry"),
+    }
+
+    def _no_issuing_body_hits(self, query: str, doc_type: str | None,
+                              filt: dict) -> dict:
+        """The one record a body-filtered search with no matches answers with.
+
+        NOT A HIT, AND SHAPED SO IT CANNOT BE READ AS ONE: no `id`, no `path`, no
+        `snippet`, and `no_hits: True` said out loud. `search_corpus` is the one tool with
+        no response envelope to carry a note in (contract, response convention 1), so an
+        empty list is the whole answer -- and an empty list cannot say which of two
+        columns it looked in. Two different findings arrived identical.
+        """
+        also = f" and doc_type={doc_type!r}" if doc_type else ""
+        return {
+            "no_hits": True,
+            "query": query,
+            "issuing_body_filter": dict(filt),
+            "note": (f"no document matched {query!r} with issuing_body="
+                     f"{filt['value']!r}{also}. The body filter was applied to "
+                     f"{self._FILTERED_COLUMN[filt['matched']]}. This is what was "
+                     f"searched for, not a statement that this corpus holds nothing "
+                     f"for that body."),
+        }
+
+    def _backend_takes_slug_filter(self) -> bool:
+        """Does this backend's `search` NAME the `issuing_body_slug` keyword?
+
+        ASKED OF THE SIGNATURE, NEVER ASSUMED. `RetrievalBackend` is a public seam and
+        every corpus-supplied adapter in service was written before this parameter existed
+        (`oregon-legislature` and `oregon-budget` each ship one); passing a keyword such a
+        `search` does not name is a TypeError on every body-filtered query -- a live corpus
+        broken by a pin bump, which is the failure mode AGENTS.md calls public surface.
+
+        `**kwargs` DOES NOT COUNT, deliberately. A backend that swallows the keyword and
+        ignores it returns an UNFILTERED result, and this framework would then label it
+        `matched: registry_slug` -- a wrong answer wearing a correct label, which is worse
+        than the degradation the check exists to produce.
+
+        Re-derived per call rather than cached at load: `self.backend` is a plain
+        attribute that tests and corpus code reassign, and a capability cached from a
+        backend that is no longer there would answer for the wrong object.
+        """
+        fn = getattr(self.backend, "search", None)
+        try:
+            param = inspect.signature(fn).parameters.get("issuing_body_slug")
+        except (TypeError, ValueError):        # a C callable, or no signature to read
+            return False
+        return param is not None and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+
+    def _issuing_body_filter(self, value: str) -> dict:
+        """Which of the two things `search_corpus(issuing_body=...)` was handed.
+
+            {"value": str, "matched": "registry_slug" | "issuing_body"}
+
+        A REGISTRY SLUG WINS, DECIDED BY IDENTITY AND NEVER BY HIT COUNT. Resolving on
+        "did it return anything" would make the same call mean different things on
+        different days, and would collapse the one distinction #131 is about: a slug that
+        names a real body holding nothing here would fall through to the frontmatter
+        column and be reported as a string that matched nothing.
+
+        `registry_checked` IS THE SECOND FIELD BECAUSE `matched` CANNOT CARRY TWO
+        ANSWERS. `matched: "issuing_body"` after a registry lookup means "checked, and it
+        names no body"; the same value from a corpus with no registry means the question
+        was never asked. Serving the second as the first tells a caller its slug is wrong
+        on every corpus that has no registry to be wrong against -- the collapse
+        `documents_by_agency`'s `slug_in_registry: null` already exists to prevent, and
+        which CONTEXT.md puts above the rest of the vocabulary.
+        """
+        known = self.config.issuing_body_slugs
+        if known is not None and value in known:
+            if self._backend_takes_slug_filter():
+                return {"value": value, "matched": "registry_slug",
+                        "registry_checked": True}
+            # A SLUG THIS BACKEND CANNOT ANSWER FOR. Say so rather than label its
+            # frontmatter answer a slug answer: the label is what a caller reads to decide
+            # whether the empty half of the result means anything.
+            return {"value": value, "matched": "issuing_body", "registry_checked": True,
+                    "note": (f"{value!r} IS a registry slug for this corpus, but the "
+                             f"retrieval backend {self.backend.name!r} cannot filter by "
+                             f"the resolved slug (its search() does not take "
+                             f"`issuing_body_slug`), so this filtered on the free-text "
+                             f"`issuing_body` frontmatter field. Documents attributed to "
+                             f"that body under some other frontmatter string are NOT in "
+                             f"this answer.")}
+        # NO NOTE ON THE ORDINARY CASE. `matched` plus `registry_checked: true` already
+        # says "checked, it names no body, so the frontmatter field was searched", and a
+        # note repeating that rides on all 40 hits of every filtered search. A note here
+        # means the answer is QUALIFIED -- something a caller has to act on.
+        if known is not None:
+            return {"value": value, "matched": "issuing_body", "registry_checked": True}
+        # Declared-and-unreadable is a FAULT and declaring none is a CHOICE, and a caller
+        # can act on the first. `issuing_body_slugs` answers None for both.
+        why = ("declares an issuing-body registry that could not be read"
+               if self.config.issuing_body_registry
+               else "declares no issuing-body registry")
+        return {"value": value, "matched": "issuing_body", "registry_checked": False,
+                "note": (f"this corpus {why}, so whether {value!r} is a registry slug "
+                         f"could NOT be checked — it was matched against the free-text "
+                         f"`issuing_body` frontmatter field. Not checked is not the same "
+                         f"as not a slug.")}
 
     def get_document(self, doc_id: str, part: str = "auto") -> dict:
         """Backend supplies the record; the corpus-level envelope is added here so it is

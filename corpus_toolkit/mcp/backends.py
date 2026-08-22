@@ -98,6 +98,10 @@ _WORD = re.compile(r"[\w.\-]+")
 # the fts row beside it was already named -- the hazard these constants exist to remove,
 # applied to one of the two readers.
 KW_ID, KW_TITLE, KW_CITATION, KW_DOCTYPE, KW_ISSUER, KW_PATH, KW_BM25 = range(7)
+# Index 6 of a `_doc_meta_row` tuple, which has no bm25 column -- these two share a
+# position and NOTHING ELSE. Named separately so a reader of the semantic branch cannot
+# mistake one row shape for the other.
+META_SLUG = 6
 
 # Column offsets into the tuple _doc_row() returns -- a DIFFERENT and wider projection than
 # the one above, in a different order, and the only one `get()` reads. Twelve positional
@@ -227,7 +231,28 @@ class RetrievalBackend(Protocol):
     def search(self, query: str, *, doc_type: str | None = None,
                issuing_body: str | None = None, limit: int = 10,
                mode: str = "hybrid") -> list[dict]:
-        """Ranked hits: {id, title, citation, doc_type, issuing_body, path, snippet}."""
+        """Ranked hits: {id, title, citation, doc_type, issuing_body, path, snippet}.
+
+        `issuing_body` filters on the FREE-TEXT frontmatter field, which is what it has
+        always meant and what it still means.
+
+        TWO COLUMNS, TWO PARAMETERS (corpus-toolkit#131). A backend MAY additionally
+        accept a keyword-only `issuing_body_slug: str | None = None` and filter on the
+        RESOLVED registry slug -- `config.registry_slug_for`'s answer, the same identity
+        `documents_for_slug` and `issuing_body_profile` take. The two filters are separate
+        parameters rather than one overloaded one because they are separate questions: a
+        free-text descriptor names a sub-unit ("DAS Enterprise Information Strategy and
+        Policy Division"), a slug names a registry entry, and only the caller knows which
+        it holds.
+
+        OPTIONAL, AND DETECTED FROM THE SIGNATURE. `CorpusFramework.search_corpus` passes
+        the keyword only to a `search` whose signature NAMES it, so an adapter written
+        before this existed keeps working untouched, and its frontmatter answer is
+        reported as a frontmatter answer rather than relabelled a slug answer. `**kwargs`
+        does not count as accepting it: a backend that swallows the keyword returns an
+        unfiltered result, and an unfiltered result labelled "filtered by slug" is a wrong
+        answer rather than a missing one.
+        """
         ...
 
     def get(self, doc_id: str, *, part: str = "auto") -> dict:
@@ -588,7 +613,7 @@ class FileBackend:
     def _terms(query: str) -> list[str]:
         return _WORD.findall(query)
 
-    def _fts_rows(self, con, query, doc_type, issuing_body, limit):
+    def _fts_rows(self, con, query, doc_type, issuing_body, limit, issuing_body_slug=None):
         terms = self._terms(query)
         if not terms:
             return {}, []
@@ -604,6 +629,8 @@ class FileBackend:
             sql += " AND d.doc_type = ?"; sql_args.append(doc_type)
         if issuing_body:
             sql += " AND d.issuing_body = ?"; sql_args.append(issuing_body)
+        if issuing_body_slug:
+            sql += " AND d.issuing_body_slug = ?"; sql_args.append(issuing_body_slug)
         sql += " ORDER BY bm25(fts) LIMIT ?"
         sql_args.append(max(1, min(int(limit), 40)))
         rows = {r[KW_ID]: r for r in con.execute(sql, sql_args).fetchall()}
@@ -636,8 +663,16 @@ class FileBackend:
         return bool(avail()) if avail else True
 
     def _doc_meta_row(self, con, doc_id):
+        """One document's hit-shaped metadata, PLUS its resolved slug at META_SLUG.
+
+        The slug is appended rather than woven in so every existing KW_* index into this
+        row keeps addressing the same column. It is read by the semantic branch of
+        `search`, which re-checks each candidate against the active filters -- a filter
+        the keyword SQL applies and this loop does not is a filter that stops filtering
+        the moment a corpus configures semantic search.
+        """
         return con.execute(
-            "SELECT id, title, citation, doc_type, issuing_body, path "
+            "SELECT id, title, citation, doc_type, issuing_body, path, issuing_body_slug "
             "FROM docs WHERE id = ?", (doc_id,)).fetchone()
 
     def _doc_row(self, doc_id: str):
@@ -658,12 +693,18 @@ class FileBackend:
 
     def search(self, query: str, *, doc_type: str | None = None,
                issuing_body: str | None = None, limit: int = 10,
-               mode: str = "hybrid") -> list[dict]:
+               mode: str = "hybrid", issuing_body_slug: str | None = None) -> list[dict]:
+        """Ranked hits. `issuing_body` filters the free-text frontmatter column;
+        `issuing_body_slug` filters `docs.issuing_body_slug`, the RESOLVED registry slug
+        (corpus-toolkit#131). Both are exact matches, and the framework passes at most one
+        -- deciding which is a corpus-level question, because only the registry says what
+        a slug is."""
         con = self.ensure_index()
         n = max(1, min(int(limit), 40))
         use_sem = mode in ("hybrid", "semantic") and self._semantic_available()
         pool = max(n * 4, 40) if use_sem else n
-        rows, kw_order = self._fts_rows(con, query, doc_type, issuing_body, pool)
+        rows, kw_order = self._fts_rows(con, query, doc_type, issuing_body, pool,
+                                        issuing_body_slug)
         sem_chunks: dict = {}
 
         if not use_sem:
@@ -678,12 +719,14 @@ class FileBackend:
                 if callable(rank_chunks) else {}
             sem_order = (list(sem_chunks) if sem_chunks
                          else list(self._semantic.rank(query, pool) or []))
-            if doc_type or issuing_body:
+            if doc_type or issuing_body or issuing_body_slug:
                 keep = []
                 for d in sem_order:
                     mr = self._doc_meta_row(con, d)
                     if mr and (not doc_type or mr[KW_DOCTYPE] == doc_type) and \
-                            (not issuing_body or mr[KW_ISSUER] == issuing_body):
+                            (not issuing_body or mr[KW_ISSUER] == issuing_body) and \
+                            (not issuing_body_slug
+                             or mr[META_SLUG] == issuing_body_slug):
                         keep.append(d)
                 sem_order = keep
             final = sem_order[:n] if mode == "semantic" else self._rrf([kw_order, sem_order])[:n]
