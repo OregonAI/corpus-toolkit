@@ -30,8 +30,11 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-import yaml
-
+# NO `import yaml` HERE ANY MORE, DELIBERATELY. The only YAML this module read was the
+# curated issuing-body profiles file, parsed inline, which is corpus-toolkit#143 — the
+# declared files a corpus configures are read by `corpus_toolkit.config`, which reports a
+# file it cannot read instead of raising out of a live tool call. A second parse site in
+# this module is the defect, not the import.
 from corpus_toolkit.config import CorpusConfig, name_values
 from corpus_toolkit.plugins import load_module
 from corpus_toolkit.mcp.backends import (
@@ -1254,10 +1257,15 @@ class CorpusFramework:
         # and fails CI over them (corpus-toolkit#129), so this is not silence; it serves
         # the bodies that DO have a slug rather than serving nobody.
         entries = read.by_slug
-        curated = {}
-        if self.config.issuing_body_profiles and self.config.issuing_body_profiles.is_file():
-            curated = (yaml.safe_load(self.config.issuing_body_profiles.read_text()) or {}).get(
-                "profiles", {})
+        # THROUGH THE SAME KIND OF READER AS THE REGISTRY ABOVE. This used to be
+        # `yaml.safe_load(...read_text()).get("profiles", {})` inline, so the OPTIONAL half
+        # of this answer could take the whole call down — `ParserError` from a mistyped
+        # line, `PermissionError` or `UnicodeDecodeError` from `read_text`, `AttributeError`
+        # from `.get` on a file that parsed to a list or a string. The `is_file()` in front
+        # of it guarded absence, the one failure mode that never raised (corpus-toolkit#143).
+        # An unreadable overlay is REPORTED below and costs nothing else: the registry
+        # identity, holdings and attribution in this response come from other files.
+        curated = self.config.issuing_body_profiles_read
 
         # STRIPPED ONCE, AND THE STRIPPED VALUE IS WHAT IS USED. `"  slug  "` otherwise
         # missed the exact-match branch, fell into the substring fallback, matched nothing,
@@ -1289,11 +1297,11 @@ class CorpusFramework:
         # backend and why three separate guards were needed to keep that from surfacing as
         # a crash (corpus-toolkit#75).
         docs, attribution = self._holdings(self.backend.holdings_for(slug))
-        return {
+        out = {
             **self._envelope(),
             "slug": slug,
             "registry": entries[slug],
-            "curated": curated.get(slug, {}),
+            "curated": curated.for_slug(slug),
             "in_repo": docs or _NO_HOLDINGS[attribution["complete"]],
             # WHAT THE COUNT COULD SEE. `in_repo` is a count of documents attributed to
             # this body, and attribution is per-document: a corpus can hold documents
@@ -1304,6 +1312,23 @@ class CorpusFramework:
             "attribution": attribution,
             "disclaimer": self.disclaimer,
         }
+        if (fault := self.config.issuing_body_profiles_fault):
+            # STATE THE LIMIT, SERVE WHAT THE REGISTRY KNOWS. `curated: {}` above is now
+            # ambiguous — it is what a body with no curated notes gets and what a corpus
+            # whose overlay could not be read gets — and an empty slot with nothing beside
+            # it reads as the first. That is "could not check" reported as "is not there",
+            # which is the one rule CONTEXT.md calls overriding.
+            #
+            # A SEPARATE KEY FROM `corpus_overview`'s `config_warning`, and a separate
+            # sentence from the registry's: this names a different file under a different
+            # config key with a different fix, and an operator sent to the registry by it
+            # would find nothing wrong there (corpus-toolkit#143).
+            out["curated_warning"] = (
+                f"{fault}, so `curated` is empty because the overlay could not be read — "
+                f"NOT because this corpus curates no notes for this body. Everything else "
+                f"in this response is unaffected: the registry entry, the holdings and the "
+                f"attribution come from other files, which read fine.")
+        return out
 
     def documents_by_agency(self, slug: str, limit: int = 50, offset: int = 0) -> dict:
         """This corpus's documents for one registry slug (corpus-toolkit#46).

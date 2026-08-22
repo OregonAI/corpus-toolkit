@@ -17,6 +17,53 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — a curated `issuing_body_profiles` file that cannot be read no longer raises out of `issuing_body_profile` (corpus-toolkit#143)
+
+**This can only turn a failed tool call into an answer.** `issuing_body_profile` reads two
+files. The issuing-body registry goes through `read_issuing_body_registry`
+(corpus-toolkit#136, above), so a registry a corpus cannot read comes back as one reported
+condition. The **curated profiles file two lines later was parsed inline** and raised
+whatever the file raised: `ParserError` from a mistyped line, `PermissionError` or
+`UnicodeDecodeError` from `read_text()`, and `AttributeError` from `.get("profiles", {})`
+on a document that parses to a list or a string. The `is_file()` in front of it guarded
+only *absence* — the one failure mode that never raised.
+
+The curated block is by construction the **optional** half of this tool's answer: a corpus
+declaring no profiles file serves `curated: {}` quite happily. So the whole registry
+identity, holdings and attribution answer was being lost to a file whose absence would have
+cost nothing, and an agent got a failed tool call instead of a finding.
+
+**It is now read once, through the config, the same four ways the registry is** — gone,
+unopenable, unparseable, or shaped like something other than a profiles file
+(`corpus_toolkit.config.read_issuing_body_profiles` / `ProfilesRead`, and
+`CorpusConfig.issuing_body_profiles_read`). The "could not be read: `<type>`: `<detail>`"
+wording is now shared by both readers rather than spelled twice.
+
+**The answer states the limit and serves what the registry knows.** The response is the
+normal success response — `curated: {}`, and the registry entry, `in_repo` and
+`attribution` all served, because they come from files that read fine — plus a new
+**`curated_warning`** naming `plugins.issuing_body_profiles`, the file and the reason, and
+saying that `curated` is empty because the overlay could not be read and **not** because
+this corpus curates nothing for that body. Reporting "could not check" as "is not there" is
+the collapse this platform files bugs about, and an unreadable overlay must never degrade
+into "that body is not registered".
+
+**The fault sentence is declared once, in `config.py`, as
+`CorpusConfig.issuing_body_profiles_fault`, and is not the registry's.** Different key,
+different file, different fix; an operator sent to the registry by it would find nothing
+wrong there.
+
+**One behaviour change worth naming: a declared profiles file that is not there is now a
+fault rather than a silence.** It used to fall through `is_file()` and serve `curated: {}`,
+which reported a path nobody created as a fact about the body. This matches what the
+registry reader has always done with a declared file that is gone. A corpus that declares
+**no** `plugins.issuing_body_profiles` key is unaffected and carries no warning — that is a
+choice, not a fault. Of the eight live corpora only `executive-regulatory-frameworks`
+declares the key, and its file is present and reads.
+
+`curated_warning` is additive and absent for every corpus whose overlay reads, so this
+stays contract v1.
+
 ### Fixed — an address literal is not a name, so `http://127.0.0.1:8000` passed the front-door gate (corpus-toolkit#138)
 
 **This can turn a corpus red that was green.** `corpus-validate-frontmatter` refused a
