@@ -17,6 +17,66 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — an address literal is not a name, so `http://127.0.0.1:8000` passed the front-door gate (corpus-toolkit#138)
+
+**This can turn a corpus red that was green.** `corpus-validate-frontmatter` refused a
+`corpus.authoritative_source` under a name RFC 2606 reserves, and an address literal is not
+a name — so `http://localhost:8000/` failed and `http://127.0.0.1:8000/` and
+`http://[::1]/official` passed. Two spellings of the same dead pointer, treated
+differently, and the address spelling is the worse one: it *resolves*, on the agent's own
+machine, to whatever is listening there.
+
+**Every IP address literal is now refused, loopback or not**, under its own rule and its own
+message. `0.0.0.0` and `::` are the wildcard a server binds to rather than an address a
+client connects to; `192.168.*`, `10.*`, `172.16-31.*`, `169.254.*` and `fc00::/7` resolve
+on the *reader's* network, which is worse than dead because they can answer, wrongly, and
+differently for every reader; and a routable literal like `8.8.8.8` names no publisher,
+matches no TLS certificate name, and stops being this corpus's front door the day the host
+is renumbered. `127.1` and `127.000.000.001` are refused as well — every resolver in the
+path reads them as 127.0.0.1, and `ipaddress.ip_address` parses neither (strict dotted
+quads, and no leading zeros since CVE-2021-29921), so the check consults `socket.inet_aton`
+after it.
+
+**corpus-template still validates at exit 0**, and its exemption is not widened: while
+`corpus.id` is unfilled *and* the repo holds no documents, a **missing** front door and the
+**placeholder the template ships** are warnings. Those are the two states an unedited
+template is legitimately in. An address literal is not one of them — the template does not
+ship one — so it is an error there too.
+
+**The RFC 2606 rule is untouched, and the two stay two.** `localhost` still fails as a
+reserved *name*, not as a loopback address: the citations answer different questions and a
+message that blurs them is wrong about the value it is quoted at. `corpus_overview` picked
+the new rule up with no change of its own — that is what moving the predicate in #140 first
+bought. No live corpus is affected; all nine declare a public https host.
+
+### Fixed — `corpus_overview` names a front door that cannot answer (corpus-toolkit#140)
+
+**Nothing to change; one new sentence may appear in one tool's response.** `corpus_overview`
+attached its `config_warning` on exactly one condition — `corpus.authoritative_source`
+missing. A corpus serving `https://REPLACE-ME.invalid/where-the-official-text-lives`, the
+value `corpus-template` ships, is truthy, so no warning fired and every object-shaped
+response carried that URL as if it were an answer while the one tool an agent is told to
+call first said nothing was wrong. An omission had a voice; the same defect with a URL in
+front of it had silence.
+
+`corpus_overview` now warns whenever there is **anything** wrong with the declared front
+door, not when it is missing. The declared value **still ships** in the envelope: `null` is
+the documented "this corpus declares none", and emitting it here would collapse a corpus
+configured wrongly into an unconfigured one and delete the one fact an operator needs —
+which placeholder is in the file.
+
+**Still not a repo gate at runtime** (corpus-toolkit#141). `config.load()` keeps
+`authoritative_source: str | None` and a server still starts on any value, because a pin
+bump must not take down a corpus that was legal when it deployed. What changed is that the
+runtime may now *say* something. A warning is not a refusal.
+
+The rule itself moved: `validate/frontmatter._reserved_name` and the wording of every
+finding about this field are now `config.front_door_fault`, which the validator and the MCP
+framework both read. This is the `issuing_body_registry_fault` arrangement
+(corpus-toolkit#136) applied to the field next door — the two readers of one field can no
+longer answer differently, which is the whole of #140. Zero live corpora are affected; all
+nine declare a real https front door.
+
 ### Added — a drift run may file one group drift finding (corpus-toolkit#132, ADR 0010)
 
 **On a capped run this costs you tickets: one slot per finding.** `MAX_ISSUES_PER_RUN` is

@@ -601,6 +601,20 @@ the hook and registering nothing is likewise an error rather than a no-op.
    plus a `config_warning` on `corpus_overview` — an absent key would read as
    "the server did not look", which is not what happened.
 
+   **`config_warning` fires on ANY fault in the declared front door, not only
+   on its absence** (corpus-toolkit#140). A value that is present and cannot
+   answer — a host under an RFC 2606 reserved name, a value that is not a URL —
+   used to pass silently because it is truthy, so the tool an agent calls first
+   to learn what it is talking to said nothing while every response carried a
+   dead pointer. The **declared value still ships** in the slot: `null` is the
+   documented "this corpus declares none", and emitting it for a corpus that
+   configured the field wrongly would erase the difference between the two and
+   with it the only fact that tells an operator what to fix. The warning names
+   the value and why it cannot be a front door; the slot keeps carrying it.
+   `corpus_overview` is the only tool that carries this warning — a config
+   complaint on every response would be noise proportional to traffic rather
+   than to the problem.
+
    **Declaring one is a repo gate, not a runtime one** (corpus-toolkit#11).
    `corpus-validate-frontmatter` fails a corpus that declares no
    `corpus.authoritative_source`, and fails one whose host is a name RFC 2606
@@ -610,10 +624,34 @@ the hook and registering nothing is likewise an error rather than a no-op.
    parses as a URL and would otherwise sail through. A host still carrying the
    template's `REPLACE-ME` marker fails as well, for the case where the
    reserved name was edited away and the marker was not, as do a URL that
-   names no host and one that cannot be parsed. The exception is the
+   names no host and one that cannot be parsed.
+
+   **A host that is an IP address fails under a second, separate rule**
+   (corpus-toolkit#138). RFC 2606 reserves *names*, so `http://localhost:8000`
+   failed while `http://127.0.0.1:8000` and `http://[::1]/` — the same dead
+   pointer, differently spelled — did not. Every address literal is refused,
+   loopback or not: `0.0.0.0` and `::` are the wildcard a server binds to,
+   the private and link-local ranges resolve on the *reader's* network (worse
+   than dead — they can answer, wrongly, and differently for every reader), and
+   even a routable literal names no publisher, matches no TLS certificate name,
+   and stops pointing at this corpus the day the host is renumbered.
+   `127.1` and `127.000.000.001` are refused too; they are 127.0.0.1 to every
+   resolver, and `ipaddress.ip_address` alone parses neither.
+
+   The two rules stay **two**, with two messages, because they answer different
+   questions: *is this host a name reserved so that it can never resolve* (RFC
+   2606) and *is this host an address that resolves only to the machine asking*
+   (RFC 5735/6890). `localhost` is refused as a reserved **name**; folding it
+   under the address rule would make a cited RFC wrong about the value it is
+   quoted at. The exception is the
    template itself: while `corpus.id` is still the unfilled `{{CORPUS_ID}}`
-   **and** the repo holds no documents, both findings are warnings, so the
-   template validates while no corpus can hide behind it. The **server** still
+   **and** the repo holds no documents, a **missing** front door and the
+   **placeholder the template ships** are warnings, so the template validates
+   while no corpus can hide behind it. The exemption covers only those two
+   states, which are the ones an unedited template is legitimately in. A value
+   that is not a URL, and a host that is an address literal, are errors there
+   too — corpus-template ships neither, so either one is a value somebody
+   typed. The **server** still
    starts either way and still emits `null`, because a corpus that was legal
    when it deployed must not be taken down by a pin bump. **That `null` is load-bearing**:
    it is a documented value, not a missing one, and anything that validates

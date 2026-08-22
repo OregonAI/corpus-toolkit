@@ -303,6 +303,30 @@ class TestResponseConvention1(GraphToolTestCase):
         self.assertIsNone(out["authoritative_source"])   # ...and explicitly null
         self.assertIn("corpus.authoritative_source", out["config_warning"])
 
+    PLACEHOLDER = "https://REPLACE-ME.invalid/where-the-official-text-lives"
+
+    def test_a_placeholder_front_door_is_named_rather_than_served_in_silence(self):
+        """corpus-toolkit#140. The value corpus-template ships is TRUTHY, so the
+        omission branch never fired and `corpus_overview` — the tool an agent is told to
+        call first — said nothing while every response carried a host RFC 2606 guarantees
+        can never resolve. An omission gets a voice; the placeholder is the same defect
+        with a URL in front of it, and it got silence."""
+        cfg = self.corpus(authoritative_source=f'"{self.PLACEHOLDER}"')
+
+        out = self.framework(cfg).corpus_overview()
+
+        self.assertIn("config_warning", out,
+                      "corpus_overview served a placeholder front door in silence")
+        self.assertIn("REPLACE-ME", out["config_warning"])
+        self.assertIn("RFC 2606", out["config_warning"])
+        self.assertEqual(
+            out["authoritative_source"], self.PLACEHOLDER,
+            "the placeholder was NULLED rather than named. `null` is the documented "
+            "value for a corpus that declares none, so emitting it here collapses a "
+            "corpus configured wrongly into an unconfigured one and deletes the one "
+            "thing an operator needs — WHICH placeholder is in the file "
+            "(corpus-toolkit#140, decision 2, option A)")
+
     def test_every_graph_response_carries_the_envelope_including_errors(self):
         cfg = self.corpus(authoritative_source=self.SOURCE,
                           edges=[{"from": "schedule-employment", "type": "related",

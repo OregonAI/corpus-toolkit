@@ -20,6 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from corpus_toolkit import config as config_mod                  # noqa: E402
+from corpus_toolkit.mcp.framework import CorpusFramework         # noqa: E402
 from corpus_toolkit.validate import frontmatter as fm_mod        # noqa: E402
 
 CORPUS_YML = """\
@@ -195,6 +197,75 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
                           f"the unset error no longer carries {fragment!r} ({guards}), "
                           f"so a corpus reading it cannot act on it:\n{out}")
 
+    # EVERY DISTINCT front door the nine live corpora declare, read off
+    # `/home/dzinck/*/_meta/corpus.yml` on 2026-08-22 — eight strings, not nine, because
+    # oregon-budget and oregon-legislature both declare `olis.oregonlegislature.gov`.
+    # Kept as LITERALS rather than read off disk so the guard runs anywhere: what it
+    # protects is the rule, not those checkouts.
+    LIVE_FRONT_DOORS = (
+        "https://www.oregonlegislature.gov/bills_laws/",              # ERF
+        "https://www.ecfr.gov/",                                      # federal-reference
+        "https://sos.oregon.gov/audits/pages/state-audits.aspx",      # oregon-audits
+        "https://olis.oregonlegislature.gov/",                        # budget + legislature
+        "https://www.oregon.gov/das/hr/pages/lru.aspx",               # collective-bargaining
+        "https://oregoncounties.org/counties/",                       # oregon-counties
+        "https://www.oregonlegislature.gov/lfo/Pages/KPM.aspx",       # oregon-kpm
+        "https://sos.oregon.gov/archives/records-management/Pages/default.aspx",  # retention
+    )
+
+    # NOT a live corpus's value — a constructed near-miss, kept apart from the measured
+    # list above so neither claims the other's provenance. Its PATH says example and its
+    # host does not, which is what a substring check gets wrong.
+    PATH_SAYS_EXAMPLE = "https://sos.oregon.gov/archives/example-schedules"
+
+    def _overview(self):
+        """`corpus_overview` for the corpus this test just wrote to disk."""
+        cfg = config_mod.load(self.root / "_meta" / "corpus.yml")
+        return CorpusFramework(cfg).corpus_overview()
+
+    def test_the_gate_and_the_running_server_say_the_same_sentence(self):
+        """corpus-toolkit#140. The two readers of this field are `corpus-validate-
+        frontmatter` and `corpus_overview`, and the defect was that they answered the same
+        question differently: CI refused `https://REPLACE-ME.invalid/...` while the server
+        carried it on every response without a word.
+
+        Asserted as SENTENCE IDENTITY rather than as two independent wordings, because
+        two wordings is the state this came from — one fact declared twice with nothing
+        gating agreement has been the shape of five defects in this repo. If either caller
+        re-inlines its own prose, this fails."""
+        for source in ('"https://REPLACE-ME.invalid/where-the-official-text-lives"',
+                       '"https://sos.oregon.example/archives"', None):
+            with self.subTest(authoritative_source=source):
+                self.write_corpus(authoritative_source=source)
+                self.write_doc("spending-100", "Spending 100")
+
+                code, out = self.validate()
+                warning = self._overview().get("config_warning")
+
+                self.assertEqual(code, 1, out)
+                self.assertIsNotNone(
+                    warning, f"corpus_overview served {source} without a config_warning")
+                self.assertIn(warning, out,
+                              f"the gate and the server disagree about {source}:\n"
+                              f"server: {warning}\ngate:\n{out}")
+
+    def test_a_real_front_door_produces_no_warning_anywhere(self):
+        """The half of this that is easiest to fake. A predicate that fires on every
+        corpus satisfies "the placeholder is named" and destroys the field, so every
+        distinct front door the nine live corpora declare is checked against BOTH readers,
+        plus the constructed `.../example-schedules` whose PATH says example and whose
+        host does not."""
+        for url in (*self.LIVE_FRONT_DOORS, self.PATH_SAYS_EXAMPLE):
+            with self.subTest(url=url):
+                self.write_corpus(authoritative_source=f'"{url}"')
+                self.write_doc("spending-100", "Spending 100")
+
+                code, out = self.validate()
+
+                self.assertEqual(code, 0, f"the gate refused a real front door {url}:\n{out}")
+                self.assertNotIn("config_warning", self._overview(),
+                                 f"corpus_overview warned about a real front door {url}")
+
     def test_a_non_url_authoritative_source_is_an_error(self):
         """Convention 1 says the field IS a URL, so a caller will try to follow it —
         a plausible-looking non-URL is worse than the omission."""
@@ -241,6 +312,100 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
 
                 self.assertEqual(code, 1, f"gate passed on {url}:\n{out}")
                 self.assertIn("RFC 2606", out)
+
+    # Six spellings of the loopback, including the two `ipaddress.ip_address` alone does
+    # NOT parse — `127.1` and `127.000.000.001` are what every resolver on earth turns
+    # into 127.0.0.1, and Python's strict dotted-quad parser rejects both.
+    LOOPBACK_URLS = ("http://127.0.0.1:8000/",
+                     "http://[::1]/official",
+                     "http://127.1/",
+                     "http://127.000.000.001/schedules",
+                     "https://127.255.255.254/official",
+                     "http://[::ffff:127.0.0.1]/official")
+
+    # Address literals that are not loopback and are still not a front door: the wildcard
+    # a dev server binds to, and the private ranges that resolve to something on the
+    # READER's own network — the one host worse than "cannot exist" is one that answers
+    # wrongly. Plus a globally routable literal, which can answer and still names no
+    # publisher.
+    NON_LOOPBACK_LITERALS = ("http://0.0.0.0:8000/", "http://[::]/official",
+                             "http://192.168.1.10/official", "http://10.0.0.1/official",
+                             "http://172.16.0.1/official", "http://[fd00::1]/official",
+                             "http://169.254.1.1/official", "https://8.8.8.8/official")
+
+    def test_a_loopback_address_literal_fails_the_gate(self):
+        """corpus-toolkit#138. An address literal is not a NAME, so RFC 2606's rule misses
+        it and `http://127.0.0.1:8000` shipped green while `http://localhost:8000` did
+        not — two spellings of the same dead pointer treated differently. This is the one
+        host worse than "cannot exist": on the agent's own machine it RESOLVES, to
+        whatever happens to be listening."""
+        for url in self.LOOPBACK_URLS:
+            with self.subTest(url=url):
+                self.write_corpus(authoritative_source=f'"{url}"')
+                self.write_doc("spending-100", "Spending 100")
+
+                code, out = self.validate()
+
+                self.assertEqual(code, 1, f"gate passed on {url}:\n{out}")
+                self.assertIn("loopback", out)
+                self.assertIn("only to the machine asking", out)
+                self.assertIn("Set it to", out, "the finding names no fix")
+                self.assertNotIn("RFC 2606", out,
+                                 f"{url} was refused under the reserved-NAME citation, "
+                                 f"which does not cover address literals — that is the "
+                                 f"blur corpus-toolkit#138 exists to prevent:\n{out}")
+
+    def test_an_address_literal_that_is_not_loopback_fails_the_gate_too(self):
+        """The class, not half of it. `0.0.0.0` is the wildcard a server BINDS to and is
+        never an address a client connects to; `192.168.*`, `10.*` and `169.254.*` resolve
+        on the reader's own network, so every reader gets a different answer and some get
+        one; and a routable literal like `8.8.8.8` can answer while naming no publisher,
+        matching no TLS certificate name, and ceasing to be this corpus's front door the
+        day the host is renumbered. Drawing the line at loopback would leave a gate a
+        one-character edit walks through."""
+        for url in self.NON_LOOPBACK_LITERALS:
+            with self.subTest(url=url):
+                self.write_corpus(authoritative_source=f'"{url}"')
+                self.write_doc("spending-100", "Spending 100")
+
+                code, out = self.validate()
+
+                self.assertEqual(code, 1, f"gate passed on {url}:\n{out}")
+                self.assertIn("address", out)
+                self.assertIn("Set it to", out, "the finding names no fix")
+
+    def test_localhost_still_fails_as_a_reserved_name_and_not_as_a_loopback(self):
+        """The two rules answer different questions and must stay legible as two: `is this
+        host a NAME reserved so it can never resolve` (RFC 2606) and `is this host an
+        ADDRESS that resolves only to the machine asking` (RFC 5735/6890). `localhost` is
+        the first, and a fix that folds it into the second would make the citation wrong
+        for every value it is quoted at."""
+        self.write_corpus(authoritative_source='"http://localhost:8000/official"')
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1, f"gate passed on localhost:\n{out}")
+        self.assertIn("RFC 2606", out)
+        self.assertNotIn("loopback", out,
+                         f"`localhost` was refused as a loopback ADDRESS; it is a "
+                         f"reserved NAME, and blurring the two reasons is what "
+                         f"corpus-toolkit#138 asked not to do:\n{out}")
+
+    def test_the_running_server_names_an_address_literal_too(self):
+        """corpus-toolkit#140 widened `corpus_overview` to any front-door fault and #138
+        widened what counts as one. The point of moving the predicate first was that this
+        needs no second change — if it did, there would be two declarations again."""
+        self.write_corpus(authoritative_source='"http://127.0.0.1:8000/"')
+        self.write_doc("spending-100", "Spending 100")
+
+        warning = self._overview().get("config_warning")
+
+        self.assertIsNotNone(
+            warning, "corpus_overview served http://127.0.0.1:8000/ as a front door in "
+                     "silence — an address that resolves, on the agent's own machine, to "
+                     "whatever is listening there")
+        self.assertIn("loopback", warning)
 
     def test_a_url_shaped_value_that_cannot_be_parsed_is_a_finding(self):
         """`urlsplit` RAISES on a malformed authority (`https://[oops` — "Invalid IPv6
@@ -338,6 +503,32 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
             self.assertIn(fragment, out,
                           f"the template warning no longer carries {fragment!r} "
                           f"({guards}):\n{out}")
+
+    def test_the_template_exemption_does_not_cover_a_value_someone_typed(self):
+        """The exemption is for the two states an unedited template is legitimately in —
+        no front door, or the placeholder it ships. A value that is not a URL is not one of
+        them: somebody chose it, and a caller follows this field. It has been an error
+        since v1.10.0 and stays one here, template or not."""
+        self.write_template(authoritative_source='"Oregon Secretary of State"')
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1, f"the template exemption swallowed a non-URL:\n{out}")
+        self.assertIn("must be a URL", out)
+
+    def test_the_template_exemption_does_not_cover_an_address_literal(self):
+        """corpus-toolkit#138, and the other half of the exemption's boundary. The
+        template ships `REPLACE-ME.invalid`, never an address, so a template carrying
+        `http://127.0.0.1:8000/` is a value somebody typed — the "ran it against my dev
+        server and pasted what it printed" case the rule exists for. The state predicate
+        is unchanged; what it forgives is not widened to cover it."""
+        self.write_template(authoritative_source='"http://127.0.0.1:8000/"')
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1,
+                         f"the template exemption swallowed an address literal:\n{out}")
+        self.assertIn("loopback", out)
 
     def test_a_template_that_holds_a_document_is_a_corpus_and_fails(self):
         """The exemption cannot become the way to keep a placeholder: a repo that forked

@@ -1202,17 +1202,26 @@ class CorpusFramework:
             "graph_edges": sum(len(v) for d in self.graph()[1].values() for v in d.values()),
             "contract_version": self.config.contract_version,
         }
-        if not self.config.authoritative_source:
-            # Do not let the omission pass as a fact about the world. The disclaimer on
-            # this very response tells the agent to "verify at source" and then declines
-            # to say where the source is; naming the missing config key is the only way
-            # the gap reaches anyone who can close it.
-            out["config_warning"] = (
-                "this corpus declares no `corpus.authoritative_source` in "
-                "_meta/corpus.yml, which docs/mcp-interface-contract.md response "
-                "convention 1 requires on every response — set it to this corpus's "
-                "front door, the one page a reader opens to reach its official text; "
-                "it need not cover every publisher this corpus draws on")
+        if (fault := self.config.front_door_fault):
+            # Do not let a bad front door pass as a fact about the world. The disclaimer
+            # on this very response tells the agent to "verify at source"; naming what is
+            # wrong with the source is the only way the gap reaches anyone who can close
+            # it.
+            #
+            # ANY FAULT, NOT A LIST OF THE INTERESTING ONES. This branch used to read
+            # `if not self.config.authoritative_source`, which gave an OMISSION a voice
+            # and gave `https://REPLACE-ME.invalid/...` silence — truthy, so no warning,
+            # while every response carried a host that can never resolve as if it were an
+            # answer (corpus-toolkit#140). Re-enumerating the kinds here would reopen that
+            # gap at a new offset the next time `config.front_door_fault` learns one; the
+            # sentence and the enumeration are declared there, once, and the validator
+            # reads the same one.
+            #
+            # THE DECLARED VALUE STILL SHIPS in the envelope above rather than being
+            # nulled: `null` is the documented "this corpus declares none", and collapsing
+            # a corpus configured wrongly into an unconfigured one would delete the one
+            # thing an operator needs to fix it — WHICH placeholder is in the file.
+            out["config_warning"] = fault.message
         return out
 
     # ---------- document-corpus extension: issuing-body profile ----------
