@@ -443,11 +443,240 @@ class UnseededManifestIsNotDriftTest(_DriftRun):
     def test_a_partly_seeded_manifest_still_files(self):
         # The refusal is for the wholly-unseeded case only — one unseeded source among
         # real ones must not switch reporting off for the corpus.
+        #
+        # TWO tickets since corpus-toolkit#145, not three: the two genuinely drifted
+        # sources file and the unseeded one does not, because it was never compared to
+        # anything. The count moved; the intent above did not, and the last two assertions
+        # are what keep it true — the corpus still reports on `counties-0`, through the
+        # channel that names it and its remedy rather than through a drift ticket that
+        # claims a comparison never made.
         self.group("counties", 1, baseline=None)
         self.group("oar", 2, baseline="stale")
         code, out, err = self.run_cli("--open-issues")
-        self.assertEqual(self.open_issue.call_count, 3)
-        self.assertEqual(code, 0)
+        self.assertEqual([c.args[0] for c in self.open_issue.call_args_list],
+                         ["oar-0", "oar-1"])
+        self.assertIn("counties-0", err,
+                      "reporting was switched off for the unseeded source entirely")
+        self.assertIn("--record-baseline", err)
+        self.assertEqual(code, 1,
+                         "the run reported success with one of its sources unchecked")
+
+
+class AnUnseededSourceIsNotAChangedSourceTest(_DriftRun):
+    """corpus-toolkit#145: the per-source half of ADR 0010's rule.
+
+    "An uncompared source is not a changed source" was enforced for the group drift
+    finding and not for the individual tickets. A source with `sha256: ''` compares
+    unequal to everything, so it filed `Source changed: <id>` with an EMPTY previous hash
+    every run — could-not-check reported as a finding — and entered the issue budget
+    alongside genuine drift. The wholly-unseeded run was refused by the `inert` guard, but
+    that guard is all-or-nothing: one seeded source anywhere switched it off for the whole
+    corpus.
+    """
+
+    def _tickets(self):
+        return [c.args[0] for c in self.open_issue.call_args_list]
+
+    def test_an_unseeded_source_files_no_source_changed_ticket(self):
+        # The issue's own reproduction: one unseeded group beside a genuinely drifted one.
+        # `counties-0` was never compared to anything, so a ticket claiming upstream drift
+        # for it is a report about a check that did not happen.
+        self.group("counties", 1, baseline=None)
+        self.group("oar", 2, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(self._tickets(), ["oar-0", "oar-1"],
+                         "a source with no recorded baseline filed a drift ticket")
+
+    def test_a_partly_seeded_run_names_the_unseeded_sources_and_the_remedy(self):
+        """The half that is not optional. Filing nothing for `counties-0` and saying
+        nothing about it trades "could not check reported as drift" for "could not check
+        reported as absent" — the same rule of CONTEXT.md broken the other way round, and
+        the reason the one-line filter is the wrong fix on its own.
+
+        IDS, not only a count: `1 of 3 have no recorded baseline` does not tell an
+        operator which manifest entry to seed, and the tickets — wrong as they were —
+        used to. The remedy is named on the same line for the same reason."""
+        self.group("counties", 2, baseline=None)
+        self.group("oar", 2, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("counties-0", err)
+        self.assertIn("counties-1", err)
+        self.assertIn("--record-baseline", err)
+
+    def test_an_unseeded_source_spends_no_slot_from_the_issue_cap(self):
+        """`MAX_ISSUES_PER_RUN` is the budget for reporting drift, and a source that was
+        never compared has no drift to report. Thirty unseeded sources used to fill it and
+        truncate a run that had three real findings and room for all of them."""
+        self.group("counties", changes.MAX_ISSUES_PER_RUN + 5, baseline=None)
+        self.group("oar", 3, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(self._tickets(), ["oar-0", "oar-1", "oar-2"])
+        self.assertNotIn("STOPPED after", err,
+                         "sources that were never compared truncated the run")
+
+    def test_genuine_drift_an_unseeded_group_pushed_out_is_now_filed(self):
+        """The issue's measured case, at cap scale. A corpus mid-seeding — the state
+        corpus-toolkit#68 left corpora in — put its unseeded group AHEAD of the genuinely
+        drifted one in the smallest-group-first spend order of corpus-toolkit#69, and the
+        real drift got nothing at all."""
+        self.group("counties", changes.MAX_ISSUES_PER_RUN - 1, baseline=None)
+        self.group("oar", changes.MAX_ISSUES_PER_RUN + 1, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertTrue(self._tickets(), "the run filed nothing at all")
+        self.assertTrue(all(t.startswith("oar-") for t in self._tickets()),
+                        f"the budget bought tickets for sources never compared: "
+                        f"{self._tickets()}")
+
+    def test_a_run_whose_only_finding_is_unseeded_sources_does_not_report_success(self):
+        """The shape that exists only because of this fix. Two seeded sources holding
+        still and one that was never compared: nothing is filed, and before the exit status
+        carried it this run printed a clean summary and a green check while one of its
+        three sources had not been checked at all — could-not-check served as
+        nothing-to-report, which CONTEXT.md says outranks the rest of the vocabulary."""
+        self.group("counties", 1, baseline=None)
+        self.group("oar", 2, baseline="current")
+        code, out, err = self.run_cli("--open-issues")
+        self.open_issue.assert_not_called()
+        self.assertEqual(code, 1, "a run that checked nothing about counties-0 was green")
+        self.assertIn("counties-0", err)
+        self.assertIn("--record-baseline", err)
+
+    def test_real_drift_alongside_an_unseeded_source_does_not_report_success_either(self):
+        """DELIBERATELY NOT NARROWED to "unseeded was the only finding". Whether a source
+        was compared is a fact about that source, and gating the signal on whether some
+        OTHER source happened to drift makes it appear and disappear for unrelated
+        reasons — green this week because nothing else moved, red next week because
+        something did, with `counties-0` unchecked throughout. Same reasoning as a missing
+        watched path (corpus-toolkit#72), which exits non-zero regardless of `--strict`:
+        the bytes arrived, the comparison did not happen, and it will not happen on any
+        future run either until somebody seeds it."""
+        self.group("counties", 1, baseline=None)
+        self.group("oar", 2, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertEqual(code, 1)
+
+    def test_seeding_is_not_itself_the_unchecked_condition(self):
+        """`--record-baseline` is the remedy the line above names. A run that just applied
+        it must not be red for the thing it fixed, or the remedy never reports done."""
+        self.group("counties", 2, baseline=None)
+        code, out, err = self.run_cli("--record-baseline")
+        self.assertEqual(code, 0, f"the seeding run reported failure:\n{err}")
+
+    def test_an_unseeded_source_does_not_set_changed_true_for_the_workflow(self):
+        """`changed=true` fires whatever the calling workflow does next. An unseeded
+        source is not drift, so it must not fire it — the same reasoning the inert run
+        already applies, one level down."""
+        self.group("counties", 1, baseline=None)
+        self.group("oar", 2, baseline="current")
+        gh = self.root / "gh-output"
+        self.run_cli("--github-output", str(gh))
+        self.assertIn("changed=false", gh.read_text())
+        self.assertIn("unseeded=1", gh.read_text())
+
+    def test_the_wholly_unseeded_refusal_and_its_annotation_are_unchanged(self):
+        """`inert` stays a separate concept. The ticket filter now suppresses everything
+        the predicate used to suppress here, but it is not the same statement: the filter
+        is a fact about one source, `inert` is a diagnosis of the RUN — "this detected
+        seeding, not drift" — and it is what backs this refusal, its annotation and
+        `changed=false` on a corpus nobody has ever seeded.
+
+        A PRESERVATION GUARD. It passes on `main` too; that is what "unchanged" means, and
+        it is here so the fix cannot quietly delete the whole-corpus report on its way to
+        deleting the per-source ticket."""
+        self.group("counties", 4, baseline=None)
+        with mock.patch.dict(changes.os.environ, {"GITHUB_ACTIONS": "true"}):
+            code, out, err = self.run_cli("--open-issues")
+        self.assertIn("REFUSING to open issues: all 4 in-scope source(s) have no "
+                      "recorded baseline", err)
+        self.assertIn("::warning title=Drift detection is inert::", out)
+        self.assertEqual(code, 1)
+        # UNCHANGED means nothing added either. The per-source naming below is the
+        # partly-seeded run's report; here the refusal already speaks for the whole
+        # corpus, and listing 4 of 4 ids — 3,447 of 3,447 in the founding case — adds
+        # length, a second annotation and no information.
+        self.assertIn("4 of 4 in-scope source(s) have NO recorded baseline. A source with "
+                      "`sha256: ''` can never compare equal, so it reports CHANGED every "
+                      "run and its drift means nothing. Seed them with", err)
+        self.assertNotIn("counties-0", err)
+        self.assertEqual(out.count("::warning title="), 1,
+                         f"the wholly-unseeded run gained a second annotation:\n{out}")
+
+    def test_the_run_does_not_count_unseeded_sources_as_tickets_it_failed_to_file(self):
+        """`2 opened, 0 failed, of 3 changed source(s)` invites the subtraction that says
+        one filing went missing. The denominator has to be what the run was entitled to
+        file, or the summary reinstates the corpus-toolkit#53 confusion it exists to
+        prevent — this time by understating."""
+        self.group("counties", 1, baseline=None)
+        self.group("oar", 2, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("of 2 changed source(s) with a recorded baseline", out)
+
+    def test_a_capped_run_does_not_count_unseeded_sources_among_what_it_dropped(self):
+        """`dropped = changed - attempted` counted sources the run declined to file for as
+        sources the CAP lost, which inflates the one number an operator uses to judge how
+        much of the report is missing — and points them at the cap for a condition the cap
+        had nothing to do with."""
+        n = changes.MAX_ISSUES_PER_RUN + 5
+        self.group("counties", 5, baseline=None)
+        self.group("oar", n, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("STOPPED after", err)
+        # 30 drifted with a baseline, 24 filed (the group finding took the 25th slot).
+        self.assertIn("6 changed source(s) were not reported", err)
+        self.assertIn("not the cause", err.lower(),
+                      "the capped run blamed the unseeded sources for a cap they no "
+                      "longer spend a slot of")
+
+    def test_the_allocation_line_counts_a_group_by_what_it_could_file(self):
+        """`mixed (24/24 of 35)` invites the reader to subtract eleven tickets the budget
+        supposedly lost, when six were dropped by the cap and five were never candidates.
+        This block exists to tell a cap apart from the silent-reporting failure of
+        corpus-toolkit#53; a denominator that counts uncompared sources puts them back
+        together."""
+        self.group("mixed", changes.MAX_ISSUES_PER_RUN + 5, baseline="stale",
+                   file_stem="mixed_a")
+        self.group("mixed", 5, baseline=None, start=changes.MAX_ISSUES_PER_RUN + 5,
+                   file_stem="mixed_b")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("STOPPED after", err)
+        self.assertIn("mixed (24/24 of 30)", err)
+
+    def test_the_tsv_still_carries_the_unseeded_source_with_an_empty_old_column(self):
+        """The ticket is what goes away, not the record. `changed-sources.tsv` is read by
+        corpus repos and its four columns are public surface (corpus-toolkit#53), and an
+        empty `old` column is self-describing where a ticket body was not. A preservation
+        guard — dropping the row would be the over-suppression this fix must not become."""
+        self.group("counties", 1, baseline=None)
+        self.group("oar", 1, baseline="stale")
+        self.run_cli("--open-issues")
+        rows = [r.split("\t") for r in
+                (self.root / "changed-sources.tsv").read_text().splitlines()]
+        self.assertEqual([r[0] for r in rows], ["counties-0", "oar-0"])
+        self.assertEqual(rows[0][2], "", "the unseeded row lost its empty `old` column")
+
+    def test_more_unseeded_sources_than_the_line_can_name_still_reach_the_operator(self):
+        """The issue's own case is a 152-source unseeded group, and this report is now the
+        only channel those sources have. Truncating at twenty matches every other listing
+        in this file, so the line has to say how many it did not name and where the rest
+        are — `changed-sources.tsv` carries every one of them, with the empty previous-hash
+        column that says what happened."""
+        self.group("counties", 25, baseline=None)
+        self.group("oar", 2, baseline="stale")
+        code, out, err = self.run_cli("--open-issues")
+        self.assertIn("counties-19", err)
+        self.assertIn("first 20 of 25", err)
+        self.assertIn("changed-sources.tsv", err)
+
+    def test_the_unseeded_report_reaches_ci_where_stderr_does_not(self):
+        """A notice on stderr sat unread near line 3,870 of a 3,900-line log while drift
+        detection was inert for a week (corpus-toolkit#67), which is why `_annotate`
+        exists. Removing the tickets moves this finding onto exactly that surface."""
+        self.group("counties", 1, baseline=None)
+        self.group("oar", 2, baseline="stale")
+        with mock.patch.dict(changes.os.environ, {"GITHUB_ACTIONS": "true"}):
+            code, out, err = self.run_cli("--open-issues")
+        self.assertIn("::warning title=", out)
+        self.assertIn("counties-0", out.split("::warning title=", 1)[1])
 
 
 class NothingCheckedIsNotCleanTest(_DriftRun):

@@ -17,6 +17,54 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — an unseeded source no longer files a `Source changed:` ticket, and the run says which ones it could not check (corpus-toolkit#145)
+
+**This changes what a drift run files and can turn a green run red.** A source with
+`sha256: ""` compares unequal to everything, so it reported CHANGED on every run and filed
+`Source changed: <id>` with an **empty previous hash** — a drift report about a comparison
+that never happened. It also entered the issue budget: in an ERF-shaped reconstruction a
+152-source unseeded group sat ahead of `oar` in the smallest-group-first spend order and
+competed for slots with genuine drift, so a corpus mid-seeding could push real findings out
+of a capped run. ADR 0010's rule — *an uncompared source is not a changed source* — was
+enforced for the group drift finding and not for the individual tickets; that asymmetry was
+the defect. The wholly-unseeded run was already refused by the `inert` guard, but that guard
+is all-or-nothing: one seeded source anywhere switched it off for the whole corpus.
+
+An unseeded source now files **no** ticket and spends **no** slot. It is still counted, still
+marked `[N unseeded]` in the per-group breakdown, and still written to `changed-sources.tsv`
+with an empty `old` column.
+
+**Removing the ticket without adding a voice would have been the same rule broken the other
+way** — could-not-check reported as nothing-to-report — so a partly-seeded run now:
+
+- **names the unseeded ids** on stderr, not only a count, beside `--record-baseline`;
+- emits a CI annotation, because the previous version of this notice sat unread in a
+  3,900-line log (corpus-toolkit#67);
+- **exits non-zero**, like a missing watched path and for the same reason: the bytes
+  arrived, the comparison did not happen, and it will not happen on any future run until
+  somebody seeds it. Deliberately not narrowed to "unseeded was the only finding" — gating
+  the signal on whether some *other* source drifted would make it appear and disappear for
+  unrelated reasons. `--record-baseline` runs are exempt; that run is the remedy.
+- sets `changed=false` in `--github-output` when nothing with a baseline drifted, so an
+  unseeded source cannot fire downstream work.
+
+**If your corpus is mid-seeding, its drift workflow will now fail until the baselines are
+recorded** — `corpus-detect-changes --config _meta/corpus.yml --record-baseline`, review the
+manifest diff, commit. That is the corpus-toolkit#68 remedy, and the failure is the tool
+saying the check has not been running rather than reporting that it has.
+
+The wholly-unseeded refusal, its annotation and its wording are unchanged. `inert` stays a
+separate concept: it diagnoses the **run** ("this detected seeding, not drift") where the new
+filter states a fact about one **source**. The group drift finding is untouched, and this
+does not address the duplicate tickets a bulk-drifting group still files (ADR 0010 is
+explicit that it does not).
+
+Two private helpers of `corpus_toolkit.sources.changes` changed shape — `_issue_order` is
+now `_tickets_in_spend_order` and no longer takes the per-group tally, and
+`_drifting_groups_in_spend_order` lost the same parameter. Both are underscore-private to
+that CLI module and nothing outside it calls them, but AGENTS.md treats anything a corpus
+repo can reach as public surface, so it is named here rather than left silent.
+
 ### Internal — the suite now asserts WHERE `corpus_toolkit` was imported from (corpus-toolkit#152)
 
 **Nothing here changes anything a corpus can observe**: test-only, no runtime behaviour, no
