@@ -15,7 +15,7 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
-## Unreleased
+## v1.29.0 — 2026-08-22
 
 ### Fixed — an unseeded source no longer files a `Source changed:` ticket, and the run says which ones it could not check (corpus-toolkit#145)
 
@@ -108,7 +108,7 @@ and the tree it came from.
 **A stale install of this checkout still fails**, which is what these tests are for; CI
 installs editable from the checkout root, so nothing is skipped there.
 
-### Fixed — a `plugins.issuing_body_profiles` file that cannot be read now fails CI and warns the operator at startup (corpus-toolkit#150)
+### Fixed — an unreadable curated profiles file now reaches CI and the operator, not only the caller (corpus-toolkit#150)
 
 **This can break a corpus's CI, and only one that is already broken.** A corpus that
 declares `plugins.issuing_body_profiles` and points it at a file the toolkit cannot read
