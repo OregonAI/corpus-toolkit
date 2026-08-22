@@ -527,6 +527,40 @@ review the manifest diff, commit both. Otherwise the next cron reports the whole
 drift, which is the failure the key exists to prevent. ERF's own `src/repo_lib.py` patterns
 are the ones to move here — the two hashers can disagree about the same bytes until they do.
 
+### Unreleased — a `plugins.issuing_body_profiles` file that cannot be read fails your CI (corpus-toolkit#150)
+
+**REQUIRED action only if your curated overlay is already broken; nothing to do otherwise.**
+This is the one change in this batch that can turn a corpus's CI red on the bump, so check
+it before you move the pin:
+
+```bash
+python3 -c "from corpus_toolkit.config import load; print(load('_meta/corpus.yml').issuing_body_profiles_fault)"
+```
+
+`None` means nothing changes for you — including for every corpus that declares no
+`plugins.issuing_body_profiles` key at all, which is a choice and not a fault. A sentence
+means `corpus-validate-frontmatter` will now report it as an **error** and exit non-zero.
+
+**Why it became an error.** corpus-toolkit#143 (below) stopped an unreadable overlay from
+raising out of `issuing_body_profile` and turned it into a reported condition — with one
+reader, the per-call `curated_warning`. That reaches the agent holding an answer and never
+the person who can edit the file, so a malformed overlay merged on green CI, deployed, and
+served every issuing body with a silently empty `curated` block. `plugins.issuing_body_registry`
+has failed CI over the same class of fault since corpus-toolkit#129, on the same reasoning:
+declaring the key is optional, but a file you declared and cannot read is a config defect.
+
+**The fix is the file, and the finding names it** — the overlay's path and
+`plugins.issuing_body_profiles`, never the registry's file or key. Four ways it can fail:
+gone, unopenable, unparseable, or shaped like something other than a profiles file (a
+document that parses to a list or a string, or a `profiles:` key that is not a mapping of
+slug to notes). If the overlay is genuinely gone, drop the key rather than pointing it at
+nothing.
+
+**Your server still starts.** Nothing here is checked at load, deliberately: a pin bump must
+degrade a corpus, not take it down. `corpus-mcp-serve` prints one stderr warning naming the
+file and keeps serving — `issuing_body_profile` still answers with registry identity,
+holdings and attribution, and says why `curated` is empty. The gate that refuses is CI.
+
 ### Unreleased — `search_corpus`'s `issuing_body` takes a registry slug too (corpus-toolkit#131)
 
 **Nothing to do, no rebuild, and no config key.** The filter still matches the free-text

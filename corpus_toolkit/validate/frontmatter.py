@@ -363,6 +363,36 @@ def _check_config(config, r, registry):
         say = r.warn if (template and fault.exempt_while_uninstantiated) else r.error
         say(rel, fault.message)
     _check_registry(config, r, rel, registry)
+    _check_profiles(config, r, rel)
+
+
+def _check_profiles(config, r, rel):
+    """A declared curated-profiles overlay this corpus cannot read, as a finding
+    (corpus-toolkit#150).
+
+    THE SENTENCE COMES FROM `config.issuing_body_profiles_fault`; this function decides
+    severity and nothing else — the arrangement the front door and the registry already
+    use above. It is a DIFFERENT sentence from the registry's, deliberately: different key,
+    different file, different fix, and reporting a broken overlay in the registry's words
+    sends an operator to edit the file that was never at fault (corpus-toolkit#143).
+
+    ERROR, LIKE THE REGISTRY'S, AND FOR THE REGISTRY'S REASON. Declaring
+    `plugins.issuing_body_profiles` is optional — a corpus that declares none serves
+    `curated: {}` quite happily and is not reported here — but a file a corpus DID declare
+    and cannot read is a config defect, not a corpus with nothing curated. Before this the
+    fault had one reader, the per-call `curated_warning`, which reaches the AGENT holding
+    an answer and never the person who can edit the file: a malformed overlay merged on
+    green CI, deployed, and silently stopped serving every curated note on every body.
+
+    REPORTED, NOT FATAL AT LOAD. `load()` stays tolerant so a pin bump degrades a corpus
+    rather than taking it down; this is the gate that gets to refuse, and `build_server`
+    is the same fault said once to the operator while the server still starts.
+    """
+    if (fault := config.issuing_body_profiles_fault):
+        r.error(rel, f"{fault} — so no body's curated notes are served: every "
+                     f"`issuing_body_profile` answer carries an empty curated block and "
+                     f"says why. This is 'could not be read', not 'this corpus curates "
+                     f"nothing' — fix the file, or drop the key if the overlay is gone.")
 
 
 def _check_registry(config, r, rel, registry):
