@@ -13,7 +13,9 @@ executed by the suite. Changing its implementation with nothing watching is how 
 convention-1 violation of corpus-toolkit#38 survived undocumented for as long as it did.
 """
 import json
+import os
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -816,11 +818,17 @@ def _config_only(tmp_path: Path, declared: str, registry=PROMOTED) -> Path:
 
 
 def _validate(root: Path) -> subprocess.CompletedProcess:
-    """Run the validator the way a corpus's CI does, from the corpus root."""
+    """Run the validator the way a corpus's CI does, from the corpus root.
+
+    THIS interpreter and THIS checkout, pinned: `python3` plus a bare cwd would run
+    whichever `corpus_toolkit` happened to be importable there, so the guard could pass
+    against an install that does not contain the code under test.
+    """
     return subprocess.run(
-        ["python3", "-m", "corpus_toolkit.validate.frontmatter",
+        [sys.executable, "-m", "corpus_toolkit.validate.frontmatter",
          "--config", "_meta/corpus.yml"],
-        cwd=root, capture_output=True, text=True)
+        cwd=root, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
 
 
 def test_a_name_field_no_registry_entry_carries_is_reported_by_the_validator(tmp_path):
@@ -851,7 +859,8 @@ def test_a_name_field_the_registry_carries_is_not_reported(tmp_path):
     """THE GUARD MUST NOT FIRE ON THE RIGHT CONFIG. `name`, `oar_name` and `aliases` are all
     carried by the promoted registry; a check that reports them too is a check that reports
     everything, which is the same as reporting nothing."""
-    root = _config_only(tmp_path, '      issuing_body_name_fields: ["name", "oar_name", "aliases"]\n')
+    root = _config_only(
+        tmp_path, '      issuing_body_name_fields: ["name", "oar_name", "aliases"]\n')
 
     out = _validate(root)
 
@@ -902,8 +911,41 @@ def test_an_unreadable_registry_is_not_reported_as_an_unmatched_field(tmp_path):
 
     out = _validate(root)
 
-    assert "no entry in" not in out.stdout, \
-        f"claimed a field is carried by no entry of a registry it could not read — {out.stdout}"
+    claim = "claimed a field is carried by no entry of a registry it could not read"
+    assert "no entry in" not in out.stdout, f"{claim} — {out.stdout}"
     assert "could not be read" in out.stdout, out.stdout
     assert "could not be checked" in out.stdout, out.stdout
     assert "Traceback" not in out.stderr, out.stderr
+
+
+def test_a_registry_entry_with_no_slug_is_reported(tmp_path):
+    """A registry row with no `slug` is a broken row: nothing can be attributed to it, and
+    a document naming that body is reported as unregistered. It used to raise `KeyError`
+    out of the validator's registry load — a traceback naming neither the file nor the row,
+    but a loud failure. Skipping it silently would trade a bad message for no message."""
+    registry = {"entries": [{"slug": DAS, "name": "Administrative Services, Department of"},
+                            {"name": "A body nobody gave a slug"}]}
+    root = _config_only(tmp_path, "", registry=registry)
+
+    out = _validate(root)
+
+    assert "no slug" in out.stdout, out.stdout
+    assert "registry.yml" in out.stdout, out.stdout
+    assert out.returncode == 1, "a broken registry row must still fail the run"
+    assert "Traceback" not in out.stderr, out.stderr
+
+
+def test_the_default_name_field_is_reported_as_the_default(tmp_path):
+    """A corpus that declared nothing must not be told off for a key it never wrote. The
+    finding is the same — `name` reaches no cell, so every free-text query fails — but it
+    is the DEFAULT that reaches nothing, and the fix is to declare the field the registry
+    actually carries."""
+    registry = {"entries": [{"slug": DAS, "oar_name": "Oregon Department of Administrative "
+                                                      "Services"}]}
+    root = _config_only(tmp_path, "", registry=registry)
+
+    out = _validate(root)
+
+    assert "default" in out.stdout, out.stdout
+    assert "'name'" in out.stdout, out.stdout
+    assert out.returncode == 0, out.stdout

@@ -22,6 +22,8 @@ import re
 import jsonschema
 import yaml
 
+from typing import NamedTuple
+
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.config import name_values
 from corpus_toolkit.repo import (
@@ -250,53 +252,78 @@ def _resolution_universe(config, docs):
     return (_graph_node_ids(config) or _all_content_ids(config)) | set(docs)
 
 
-def _registry_entries(config):
-    """`(entries, problem)` — the issuing-body registry's entry mappings, or None plus what
-    stopped us reading them.
+class RegistryRead(NamedTuple):
+    """ONE READ OF THE ISSUING-BODY REGISTRY, and every question this run asks of it.
 
-    NONE IS "COULD NOT READ", WHICH IS NEVER THE SAME ANSWER AS AN EMPTY REGISTRY. Every
-    caller below gates on that distinction: the per-file slug checks skip rather than
+    `entries` is None for COULD NOT READ, WHICH IS NEVER THE SAME ANSWER AS AN EMPTY
+    REGISTRY. Both callers gate on that distinction: the per-file checks skip rather than
     report every document's slug as unregistered, and `_check_config` declines to call a
     declared name field unmatched by a registry nobody could open.
+
+    The derived answers hang off the read rather than being recomputed per caller.
+    `config._parse_registry_slugs` is documented as THE one registry parser precisely
+    because two derivations of one registry drift into disagreeing about which slugs exist
+    — a third one written inline at a call site is how that starts.
+    """
+    entries: list | None
+    problem: str | None
+
+    @property
+    def readable(self) -> bool:
+        return self.entries is not None
+
+    @property
+    def slugs(self):
+        """The registry's slugs, or None where there was nothing readable to check."""
+        if self.entries is None:
+            return None
+        return {e["slug"] for e in self.entries if e.get("slug")}
+
+    @property
+    def without_slug(self) -> int:
+        """Entries carrying no slug — rows nothing can ever be attributed to."""
+        return 0 if self.entries is None else sum(1 for e in self.entries if not e.get("slug"))
+
+
+def _read_registry(config) -> RegistryRead:
+    """Read the issuing-body registry once, for every check that asks about it.
 
     A file that parses to a mapping with a missing or null entries key is READ, and holds
     no entries — that is a registry saying nothing, and the per-file checks are entitled to
     act on it exactly as they always have. Unreadable is: gone, unparseable, or shaped like
     something other than a registry.
 
-    Entry-level shape is the tolerant rule `config._parse_registry_slugs` already uses — a
-    non-mapping entry, or one with no slug, is skipped. It used to raise `KeyError` out of
-    this function, which reached a corpus author as a traceback naming neither the file nor
-    the entry.
+    Entry-level shape is the tolerant rule `config._parse_registry_slugs` already uses: a
+    non-mapping entry, or one with no slug, is skipped rather than raised over. It used to
+    raise `KeyError` out of the load, a traceback naming neither the file nor the row —
+    which is a bad message but a loud one, so `_check_config` reports the count instead of
+    letting a broken row disappear.
     """
     if not config.issuing_body_registry:
-        return None, None
+        return RegistryRead(None, None)
     key = config.issuing_body_registry_key
     try:
         data = yaml.safe_load(config.issuing_body_registry.read_text())
     except (OSError, yaml.YAMLError) as e:
-        return None, f"could not be read: {type(e).__name__}: {e}"
+        # ONE FINDING, ONE LINE, capped like the schema errors above. A yaml.YAMLError's
+        # message is several lines with a caret diagram, and `Reporter` prints a finding as
+        # a line — pasted in raw, the rest of this sentence ended up under a `^`, reading
+        # as a different message.
+        detail = " ".join(str(e).split())[:200]
+        return RegistryRead(None, f"could not be read: {type(e).__name__}: {detail}")
     if data is None:
         data = {}
     if not isinstance(data, dict):
-        return None, (f"could not be read as a registry: expected a mapping with a {key!r} "
-                      f"list, got {type(data).__name__}")
+        return RegistryRead(None, (f"could not be read as a registry: expected a mapping "
+                                   f"with a {key!r} list, got {type(data).__name__}"))
     entries = data.get(key) or []
     if not isinstance(entries, list):
-        return None, (f"could not be read as a registry: {key!r} must be a list of entries, "
-                      f"got {type(entries).__name__}")
-    return [e for e in entries if isinstance(e, dict)], None
+        return RegistryRead(None, (f"could not be read as a registry: {key!r} must be a "
+                                   f"list of entries, got {type(entries).__name__}"))
+    return RegistryRead([e for e in entries if isinstance(e, dict)], None)
 
 
-def _load_registry(config):
-    """The registry's slugs, or None where there is nothing readable to check against."""
-    entries, _ = _registry_entries(config)
-    if entries is None:
-        return None
-    return {e["slug"] for e in entries if e.get("slug")}
-
-
-def _check_config(config, r, entries=None, registry_problem=None):
+def _check_config(config, r, registry):
     """Corpus-level config checks — things the per-document schema cannot see.
 
     `corpus.authoritative_source` is required by docs/mcp-interface-contract.md response
@@ -336,12 +363,19 @@ def _check_config(config, r, entries=None, registry_problem=None):
         # caller will try to follow it.
         r.error(rel, f"corpus.authoritative_source must be a URL, got "
                      f"{config.authoritative_source!r}")
-    _check_name_fields(config, r, rel, entries, registry_problem)
+    _check_registry(config, r, rel, registry)
 
 
-def _check_name_fields(config, r, rel, entries, registry_problem):
-    """Does each declared `plugins.issuing_body_name_fields` field reach a name in the
-    registry it names columns of? (corpus-toolkit#129)
+def _check_registry(config, r, rel, registry):
+    """What this run learned about the issuing-body registry, as findings (corpus-toolkit#129).
+
+    Four conditions, and keeping them apart is the whole job — each has a different cause
+    and a different fix, and three of them otherwise read as "that body is not here":
+
+      * the registry COULD NOT BE READ -> error, and nothing is claimed about its columns
+      * an entry carries NO SLUG        -> error; nothing can be attributed to that row
+      * the registry holds NO ENTRIES   -> warning about the registry, not about a field
+      * a declared name field reaches NO NAME in any entry -> warning naming the field
 
     REPORTED HERE, AND REPORTED RATHER THAN FATAL. `load()` checks the declaration's SHAPE
     and refuses a corpus that declares nothing usable; what it deliberately does not check
@@ -367,7 +401,9 @@ def _check_name_fields(config, r, rel, entries, registry_problem):
     "COULD NOT CHECK" IS NOT "IS NOT THERE". A registry that could not be read says nothing
     about which columns it has, so the fields are not reported — the read failure is, as an
     error, because a configured registry that cannot be opened also silently skips every
-    per-document attribution check.
+    per-document attribution check. An EMPTY registry is read, but a column claim about a
+    registry with no rows would accuse an author of a typo they did not make, so the empty
+    registry is what gets reported.
     """
     if not config.issuing_body_registry:
         # Nothing to name columns of; declaring fields in that state is refused at load.
@@ -377,26 +413,58 @@ def _check_name_fields(config, r, rel, entries, registry_problem):
         registry_rel = registry_rel.relative_to(config.root)
     except ValueError:
         pass
-    if entries is None:
-        r.error(rel, f"plugins.issuing_body_registry {registry_rel} {registry_problem} — "
+    fields = config.issuing_body_name_fields
+
+    if not registry.readable:
+        r.error(rel, f"plugins.issuing_body_registry {registry_rel} {registry.problem} — "
                      f"so the issuing-body slug of every document went unchecked, and "
-                     f"plugins.issuing_body_name_fields "
-                     f"({', '.join(config.issuing_body_name_fields)}) could not be checked "
-                     f"against it either. This is 'could not check', not 'nothing is "
-                     f"wrong': fix the file, then re-run.")
+                     f"plugins.issuing_body_name_fields ({', '.join(fields)}) could not be "
+                     f"checked against it either. This is 'could not check', not 'nothing "
+                     f"is wrong': fix the file, then re-run.")
         return
-    unmatched = [f for f in config.issuing_body_name_fields
-                 if not any(name_values(e, f) for e in entries)]
-    if unmatched:
-        r.warn(rel, (
-            f"plugins.issuing_body_name_fields: no entry in {registry_rel} carries a name "
-            f"in {', '.join(repr(f) for f in unmatched)} — checked {len(entries)} entr"
-            f"{'y' if len(entries) == 1 else 'ies'}, and a name is a string cell or a list "
-            f"of strings. A free-text `issuing_body_profile` query can never match on "
-            f"{'these fields' if len(unmatched) > 1 else 'that field'}, and matching "
-            f"nothing looks exactly like a body this corpus does not hold. If this is a "
-            f"typo, fix the spelling; if the registry is about to grow the column, this "
-            f"line goes away when it does."))
+
+    if registry.without_slug:
+        # A row nothing can be attributed to. This used to raise KeyError out of the read —
+        # a traceback naming neither file nor row, but a failure nobody could miss. Reading
+        # it tolerantly and saying nothing would be the trade this repo does not make.
+        r.error(rel, f"plugins.issuing_body_registry {registry_rel}: "
+                     f"{registry.without_slug} entr"
+                     f"{'y has' if registry.without_slug == 1 else 'ies have'} no slug, so "
+                     f"nothing can be attributed to "
+                     f"{'it' if registry.without_slug == 1 else 'them'} and a document "
+                     f"naming that body is reported as unregistered. Give every entry a "
+                     f"slug, or remove the row.")
+
+    if not registry.entries:
+        # READ, AND EMPTY. Every free-text query fails, but the cause is the empty registry
+        # and not the fields: a column claim about a registry holding no rows would accuse
+        # the author of a typo they did not make. Say the one true thing.
+        r.warn(rel, f"plugins.issuing_body_registry {registry_rel} holds no entries, so "
+                    f"`issuing_body_profile` can match no body at all and every document's "
+                    f"issuing-body slug is reported as unregistered.")
+        return
+
+    unmatched = [f for f in fields if not any(name_values(e, f) for e in registry.entries)]
+    if not unmatched:
+        return
+    # A corpus that declared nothing must not be told off for a key it never wrote: the
+    # finding is the same, the fix is to DECLARE the field its registry actually carries.
+    declared = "issuing_body_name_fields" in (config.raw.get("plugins") or {})
+    how = ("plugins.issuing_body_name_fields" if declared else
+           "plugins.issuing_body_name_fields defaults to ['name'], and this corpus declares "
+           "no override")
+    r.warn(rel, (
+        f"{how}: no entry in {registry_rel} carries a name in "
+        f"{', '.join(repr(f) for f in unmatched)} — checked {len(registry.entries)} entr"
+        f"{'y' if len(registry.entries) == 1 else 'ies'}, and a name is a string cell or a "
+        f"list of strings. A free-text `issuing_body_profile` query can never match on "
+        f"{'these fields' if len(unmatched) > 1 else 'that field'}, and matching nothing "
+        f"looks exactly like a body this corpus does not hold. "
+        + ("If this is a typo, fix the spelling; if the registry is about to grow the "
+           "column, this line goes away when it does."
+           if declared else
+           "Declare the field(s) your registry carries under plugins."
+           "issuing_body_name_fields.")))
 
 
 def _check_extra_schemas(config, r):
@@ -481,12 +549,10 @@ def main():
 
     doc_schema = json.loads(open(args.schema).read()) if args.schema else bundled_schema()
     doc_schema = schema_with_extensions(doc_schema, config)
-    registry_entries, registry_problem = _registry_entries(config)
-    # ONE READ, TWO QUESTIONS. The per-file checks want the slug set; the config check wants
-    # the entries themselves. Reading the file twice is how two answers about one registry
-    # start to disagree (config._parse_registry_slugs carries the same warning).
-    registry = (None if registry_entries is None
-                else {e["slug"] for e in registry_entries if e.get("slug")})
+    # ONE READ, EVERY QUESTION. The per-file checks want the slug set; the config check
+    # wants the entries themselves. Reading the file twice is how two answers about one
+    # registry start to disagree (config._parse_registry_slugs carries the same warning).
+    registry = _read_registry(config)
 
     docs = {}
     # The fork-pool, the 50-file threshold and the chunk size live in repo.map_documents —
@@ -494,7 +560,7 @@ def main():
     # either meant finding both (corpus-toolkit#76). The worker-global handoff below is
     # unchanged: _init_worker still populates this module's globals, which check_file reads.
     results = map_documents(paths, check_file, jobs=args.jobs, setup=_init_worker,
-                            setup_args=(doc_schema, config, registry))
+                            setup_args=(doc_schema, config, registry.slugs))
     for rel, findings, doc_id in results:
         for level, msg in findings:
             (r.error if level == "error" else r.warn)(rel, msg)
@@ -506,7 +572,7 @@ def main():
                             + _join_findings(paths, universe, config)):
         (r.error if level == "error" else r.warn)(rel, msg)
 
-    _check_config(config, r, registry_entries, registry_problem)
+    _check_config(config, r, registry)
     _check_extra_schemas(config, r)
 
     scope = f"{len(paths)} changed" if scoped else f"{len(paths)}"

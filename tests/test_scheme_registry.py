@@ -152,6 +152,14 @@ class TestCompiledPatternFlagsSurvive(SchemeRegistryTestCase):
     The seam is the SERVED resolver — `resolve_citation` on the framework the server
     answers from — not the pattern object the corpus happens to hold. Asserting on the
     local object proves only that `re` works.
+
+    HONEST ABOUT WHAT THIS GUARD IS. It passes against the code before the fix, because
+    `re.compile()` returns a compiled pattern unchanged: the flags survived by accident of
+    the stdlib while the signature, the docstring and this suite all said `str`. It was
+    watched failing against the normalization that accident invites —
+    `re.compile(pattern.pattern)`, which drops every flag and is the obvious tidy-up — so
+    this is a contract lock, not a reproduction. `test_a_string_pattern_is_compiled_exactly
+    _as_before` holds the other half: the string call that made a corpus lose `re.I`.
     """
 
     def _compiled_corpus(self) -> Path:
@@ -186,8 +194,9 @@ class TestCompiledPatternFlagsSurvive(SchemeRegistryTestCase):
 
         self.assertEqual([m["id"] for m in f.resolve_citation("EO 23-04")["matches"]],
                          ["eo-23-04"], "a string caller must behave exactly as before")
-        self.assertEqual([m["id"] for m in f.resolve_citation("executive order 23-04")["matches"]],
-                         ["eo-23-04"], "an inline (?i) in a string pattern must still apply")
+        lower = f.resolve_citation("executive order 23-04")
+        self.assertEqual([m["id"] for m in lower["matches"]], ["eo-23-04"],
+                         "an inline (?i) in a string pattern must still apply")
 
     def test_a_bytes_pattern_is_refused_at_registration(self):
         """A compiled BYTES pattern cannot match a citation string, and `pattern.search(c)`

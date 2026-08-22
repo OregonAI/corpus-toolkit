@@ -271,7 +271,7 @@ def _validate(tmp_path, docs, *, sentinels=None):
             id=path.stem, doc_type=doc_type, sha=str(i) * 64,
             agency=f"agency: {agency}\n" if agency else ""))
     from corpus_toolkit.validate import frontmatter as fmv
-    registry = fmv._load_registry(cfg)
+    registry = fmv._read_registry(cfg).slugs
     findings = []
     for rel, agency, doc_type in docs:
         path = tmp_path / rel

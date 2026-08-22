@@ -107,17 +107,24 @@ def _compiled(name: str, pattern) -> "re.Pattern":
 
     THE TRAP THIS CLOSES (corpus-toolkit#134). The parameter used to be typed and
     documented `str`, so a corpus holding its citation patterns compiled — the natural
-    shape, since it matches with them itself — had one call it could write:
-    `register_scheme("eo", EO_C.pattern)`. `re.compile()` over a pattern's SOURCE TEXT
-    keeps none of the flags the original was compiled with, and the loss is silent: the
-    scheme registers, the server starts, and citations stop matching in whatever way the
-    flag governed. `executive-regulatory-frameworks` lost `re.I` on five of its six schemes
-    that way, so `resolve_citation("executive order 23-04")` came back `unresolved` while
-    `"EO 23-04"` resolved — a difference of case that reads to an agent as a difference of
-    content.
+    shape, since it matches with them itself — read the signature and wrote the one call it
+    said was available: `register_scheme("eo", EO_C.pattern)`. `re.compile()` over a
+    pattern's SOURCE TEXT keeps none of the flags the original was compiled with, and the
+    loss is silent: the scheme registers, the server starts, and citations stop matching in
+    whatever way the flag governed. `executive-regulatory-frameworks` lost `re.I` on five of
+    its six schemes that way (ERF#202), so `resolve_citation("executive order 23-04")` came
+    back `unresolved` while `"EO 23-04"` resolved — a difference of case that reads to an
+    agent as a difference of content.
 
-    Passing the object through is what makes the flags survive BY CONSTRUCTION rather than
-    by every corpus remembering to inline `(?i)` in its source text.
+    BE PRECISE ABOUT WHAT CHANGED, because the old line already tolerated this by accident:
+    `re.compile()` hands a compiled pattern straight back, flags intact, so passing the
+    object worked at runtime before this function existed. What did NOT exist was any
+    reason for a corpus to believe it: the annotation said `str`, the docstring said `str`,
+    and no test held the behaviour, so it was one normalization away from silently
+    reverting — `re.compile(pattern.pattern)` is the obvious tidy-up and drops every flag.
+    The type, this explicit branch and the guard in tests/test_scheme_registry.py are what
+    turn an accident into the contract: flags survive BY CONSTRUCTION rather than by every
+    corpus remembering to inline `(?i)` in its source text.
 
     A STRING IS UNAFFECTED: still `re.compile(pattern)`, no flags, inline `(?i)` honoured
     exactly as before. Widening the accepted type is additive — every existing corpus call

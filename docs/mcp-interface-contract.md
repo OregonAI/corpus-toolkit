@@ -224,8 +224,10 @@ corpus without a graph answers the first row above.
   `corpus.authoritative_source`, naming the field and the registry it was
   checked against. A field carried by *some* entries is a partly-populated
   column and is not reported. A registry that could not be read reports the
-  read failure as an **error** and says the fields went unchecked — "could not
-  check" is never served as "is not there" (response convention 5).
+  read failure as an **error** and says the fields went unchecked, and a
+  registry holding no entries is reported as an empty registry rather than as a
+  misspelled field — "could not check" is never served as "is not there"
+  (response convention 5).
 
   **Uniqueness is per body, not per name.** A query hitting a body's `name`, its
   `oar_name` and two of its aliases is one hit, not four; otherwise a wider net
