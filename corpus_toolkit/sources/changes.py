@@ -674,9 +674,22 @@ def _issue_order(changed: list[ChangedSource],
     return sorted(changed, key=lambda c: (per_group[c.group]["changed"], c.group))
 
 
-def _group_drift_findings(changed: list["ChangedSource"],
-                          per_group: dict[str, dict]) -> list[tuple[str, list[str]]]:
-    """(group, its changed ids) for every group where EVERY COMPARED source changed.
+class GroupFinding(NamedTuple):
+    """One group whose every compared source changed, and the counts behind that claim.
+
+    The compared count RIDES ALONG rather than being looked up again where the issue is
+    written: the rule that fired and the number in the body are then the same reading, and
+    a finding cannot say `2 of 4` about a group it accepted because 2 of 2 changed.
+    """
+    group: str
+    ids: list[str]
+    compared: int
+    in_scope: int
+
+
+def _group_drift_findings(changed: list[ChangedSource],
+                          per_group: dict[str, dict]) -> list[GroupFinding]:
+    """Every group where EVERY COMPARED source changed, with its ids and compared count.
 
     The trigger of ADR 0010, and the ONE place it is expressed. `changed` supplies both the
     ids in the finding's body and the count the rule turns on, so there is no second tally
@@ -711,14 +724,17 @@ def _group_drift_findings(changed: list["ChangedSource"],
         # a shape this cannot read has to hear about it.
         compared = per_group[g]["compared"]
         if compared > 1 and len(ids) == compared:
-            out.append((g, ids))
-    # LARGEST FIRST, the opposite of `_issue_order`, and only observable when the findings
-    # alone exhaust the budget. The two orders do not compete: a small whole-group drift is
-    # reported by its own tickets, which `_issue_order` files first, while the largest
-    # group's finding is the only issue that group will get — dropping that one first would
-    # rebuild the inversion corpus-toolkit#132 was opened about. Ties by group name, so the
-    # order is a fact about the drift and not about manifest position.
-    return sorted(out, key=lambda t: (-len(t[1]), t[0]))
+            out.append(GroupFinding(g, ids, compared, per_group[g]["total"]))
+    # LARGEST FIRST. ADR 0010 settles the findings' order against the TICKETS and says
+    # nothing about their order among themselves, so this is a choice, not a decision it
+    # made. It is observable only when the findings alone exhaust `MAX_ISSUES_PER_RUN` —
+    # and in that regime no per-source ticket files at all, so no group here is "covered by
+    # its own tickets" and none of them is worse off than the others on that count. What is
+    # left to prefer by is the evidence: a finding says "these N changed together", so
+    # dropping the one with the most sources behind it discards the most of what the run
+    # observed. Ties by group name, so the order is a fact about the drift rather than
+    # about manifest position, and a re-run over the same drift files the same set.
+    return sorted(out, key=lambda f: (-len(f.ids), f.group))
 
 
 def _run_url() -> str | None:
@@ -736,7 +752,8 @@ def _run_url() -> str | None:
     return f"{server}/{repo}/actions/runs/{run_id}"
 
 
-def _open_group_finding(group: str, changed_ids: list[str], compared: int) -> bool:
+def _open_group_finding(group: str, changed_ids: list[str], compared: int,
+                        in_scope: int) -> bool:
     """Open one group drift finding: every COMPARED source in `group` changed (ADR 0010).
 
     CORRELATION, NOT CAUSE, in the wording as well as the rule. The tool observes that
@@ -745,7 +762,19 @@ def _open_group_finding(group: str, changed_ids: list[str], compared: int) -> bo
     change at all. So this says they changed together and stops there.
 
     It does NOT replace the individual tickets, and it is not filed instead of them.
+
+    The equality is GATED here, not re-decided here: `_group_drift_findings` owns the rule
+    and this refuses to write a report that does not satisfy it. `480 of 484` is the ">80%"
+    finding ADR 0010 rejected, and the two numbers arrive independently -- without the gate,
+    one careless call site is all it takes to publish the shape the decision rules out.
     """
+    if len(changed_ids) != compared:
+        raise ValueError(
+            f"group {group!r}: a group drift finding reports that EVERY compared source "
+            f"changed, and {len(changed_ids)} of {compared} did. A partial group is not "
+            f"this finding: its sources have their own `Source changed:` tickets, and the "
+            f"ones that held still are evidence against the pattern this would assert "
+            f"(ADR 0010).")
     run = _run_url()
     body = (f"Automated detection: every compared source in the `{group}` group changed in "
             f"one run.\n\n"
@@ -757,6 +786,13 @@ def _open_group_finding(group: str, changed_ids: list[str], compared: int) -> bo
             f"(ADR 0010).\n\n"
             f"- **Group**: {group}\n"
             f"- **Compared sources that changed**: {len(changed_ids)} of {compared}\n"
+            # WHAT THE DENOMINATOR LEAVES OUT, on the face of the report. `2 of 2` is
+            # true of a group of two and of a group of five where three were never
+            # compared, and those are the two shapes corpus-toolkit#67 built the
+            # per-group breakdown to separate.
+            f"- **Sources in the group**: {in_scope}, of which "
+            f"{in_scope - compared} not compared this run (no recorded baseline, or the "
+            f"fetch did not complete)\n"
             f"- **Sample ids**: " + ", ".join(changed_ids[:10])
             + ("…" if len(changed_ids) > 10 else "") + "\n"
             + (f"- **Run**: {run}\n" if run else ""))
@@ -1018,14 +1054,14 @@ def main():
         # Out of the same budget, because a cap that some issues are exempt from is not a
         # cap: a corpus with 27 bulk-drifting groups would file 27 issues past a limit of
         # 25. There is at most one finding per group, so filing them first cannot flood.
-        for g, ids in findings:
+        for f in findings:
             if attempted + findings_attempted >= MAX_ISSUES_PER_RUN:
                 capped = True
                 break
             findings_attempted += 1
-            if _open_group_finding(g, ids, per_group[g]["compared"]):
+            if _open_group_finding(f.group, f.ids, f.compared, f.in_scope):
                 findings_opened += 1
-                filed_findings.append(g)
+                filed_findings.append(f.group)
         for c in _issue_order(changed, per_group):
             if attempted + findings_attempted >= MAX_ISSUES_PER_RUN:
                 capped = True
@@ -1229,11 +1265,17 @@ def main():
                       file=sys.stderr)
             # The findings are capped too, and a finding the budget never reached is the
             # silence corpus-toolkit#132 was opened about — said, not inferred.
-            findings_dropped = len(findings) - findings_attempted
-            if findings_dropped:
-                print(f"{findings_dropped} group drift finding(s) were not filed either — "
-                      f"the budget was spent before them. Those groups are in the "
-                      f"breakdown above, at 100% of what was compared.", file=sys.stderr)
+            dropped_findings = [f.group for f in findings[findings_attempted:]]
+            if dropped_findings:
+                # NAMED, like every other line in this block. A bare count leaves the
+                # reader to subtract two lists to find which group has no issue, and that
+                # inference is what the message exists to remove.
+                print(f"{len(dropped_findings)} group drift finding(s) were not filed "
+                      f"either — the budget was spent before them: "
+                      + ", ".join(dropped_findings[:20])
+                      + ("…" if len(dropped_findings) > 20 else "")
+                      + ". Those groups are in the breakdown above, at 100% of what was "
+                        "compared.", file=sys.stderr)
             _annotate("Drift report truncated",
                       f"{dropped} of {len(changed)} changed sources were not reported "
                       f"(cap {MAX_ISSUES_PER_RUN}). See the per-group breakdown in the log.")
