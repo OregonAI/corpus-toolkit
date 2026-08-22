@@ -17,6 +17,50 @@ it can break you.
 
 ## Unreleased
 
+### Added — a drift run may file one group drift finding (corpus-toolkit#132, ADR 0010)
+
+**The cap does not move, and no ticket disappears.** `MAX_ISSUES_PER_RUN` is still 25, and
+every source that drifted still gets its own `Source changed:` ticket exactly as before.
+What is new is that a run may also file **one** issue per group in which **every compared
+source changed**, titled `Group drifted: <group>`.
+
+It reports **correlation, not cause**: that those sources changed *together*, and nothing
+about why. The tool observes bytes. Of the three whole-group events on record one was a
+footer version bump, one was a set of URLs that stopped serving, and one — oregon-counties'
+3,447 of 3,447 (corpus-toolkit#68) — was no change at all, an inert run whose baselines were
+all empty. So the finding **accompanies** the individual tickets and never suppresses them:
+a genuinely independent change inside a bulk-drifting group keeps its own ticket.
+
+What it buys, reconstructed against ERF run 31022774644: `oar` (484 of 484, 89% of the drift
+and no ticket at all under the cap) files a finding; `deq`'s 52 of 52 files a finding **and**
+still 20 near-identical tickets. **It does not fix the duplicate tickets** — `deq`'s twenty
+remain twenty. What changes is that the cause with the most evidence behind it stops being
+the one with nothing in the tracker.
+
+The trigger is an observation, not a judgement:
+
+* **100% of the sources that were COMPARED**, and more than one of them. ">80%" was
+  rejected: the sources that did not change are evidence against the pattern, and one
+  source cannot corroborate itself.
+* **An uncompared source is not a changed source.** Unseeded baselines and failed fetches
+  are excluded from both sides of the rule, so a group that "changed" because nothing was
+  ever compared to it — the oregon-counties shape — files **nothing**.
+
+**This can change which sources get a ticket on a capped run.** A finding **consumes a slot
+from `MAX_ISSUES_PER_RUN`**, because a cap some issues are exempt from is not a cap: a
+corpus with 27 bulk-drifting groups would otherwise file 27 issues past a limit of 25.
+Findings are filed **before** the individual tickets — corpus-toolkit#69 spends the ticket
+budget smallest-drifting-group-first and so reaches the largest group last, where a finding
+queued behind the tickets would never file — and the remaining budget then spends
+smallest-first exactly as #69 decided. Among themselves the findings go largest group first.
+A run that files three findings therefore reports three fewer changed sources; both numbers
+are printed, and a finding the budget did not reach is named on stderr.
+
+The title carries **no counts**: `_open_issue` prevents re-filing by searching for its own
+title, and `Group drifted: oar (484 of 484)` would file a second issue for the same
+unresolved condition the day the count read 480. The counts, a sample of the ids and the
+run link are in the body.
+
 ### Changed — `--check-relationships` now checks the corpus configuration too (corpus-toolkit#139)
 
 **This can turn a `check-links` run red, and that is the point.**

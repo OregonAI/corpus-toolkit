@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """corpus-detect-changes — re-fetch every source declared in the corpus's
 source manifest, diff content hashes, write changed-sources.tsv, optionally
-open a GitHub issue per drifted source. Ported from
+open a GitHub issue per drifted source — plus, for a group in which EVERY
+COMPARED source changed, one `Group drifted:` finding that says they changed
+together and nothing about why (ADR 0010). Ported from
 oregon-policy-repo/src/detect_changes.py; the Oregon-specific SharePoint-
 listing diff (`check_sp_listing`) is NOT ported — it re-queries a specific
 vendor's list-view API and doesn't generalize. A corpus that needs it keeps
@@ -154,37 +156,47 @@ def _ensure_label() -> bool:
     return True
 
 
-def _open_issue(source_id, url, old, new) -> bool:
-    """Open one drift issue. Returns True only if an issue now exists for this source.
+def _file_once(title: str, body: str, subject: str) -> bool:
+    """Open one issue unless one carrying this exact title is already open.
 
     RETURN VALUES ARE CHECKED HERE, unlike the version this replaces, which called
     `subprocess.run` bare and discarded every failure. That is how 618 consecutive
     creation failures produced a log reading `618 changed, 58 fetch failure(s)` and no
     other sign -- the summary counts what DRIFTED, and an operator reasonably reads it
     as what was REPORTED (corpus-toolkit#53).
+
+    ONE implementation for the per-source ticket and the group drift finding, because
+    dedup and the title are the same mechanism: the search is `in:title "<title>"`, so
+    the caller's title is the identity of the condition. A title that moves while the
+    condition persists -- a count in it -- files a fresh issue every run (ADR 0010).
     """
     if not shutil.which("gh"):
-        print(f"NOTE: 'gh' not on PATH — skipping issue creation for {source_id}", file=sys.stderr)
+        print(f"NOTE: 'gh' not on PATH — skipping issue creation for {subject}",
+              file=sys.stderr)
         return False
-    title = f"Source changed: {source_id}"
     existing = subprocess.run(
         ["gh", "issue", "list", "--label", ISSUE_LABEL, "--state", "open",
          "--search", f'in:title "{title}"', "--json", "number", "--jq", "length"],
         capture_output=True, text=True)
     if existing.returncode == 0 and existing.stdout.strip() not in ("", "0"):
-        print(f"Issue already open for {source_id}, skipping")
+        print(f"Issue already open for {subject}, skipping")
         return True
-    body = (f"Automated detection.\n\n- **Document id**: {source_id}\n"
-            f"- **Source URL**: {url}\n- **Previous sha256**: {old}\n"
-            f"- **New sha256**: {new}\n")
     r = subprocess.run(["gh", "issue", "create", "--label", ISSUE_LABEL,
                         "--title", title, "--body", body],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"FAILED to open issue for {source_id}: {r.stderr.strip()[:300]}",
+        print(f"FAILED to open issue for {subject}: {r.stderr.strip()[:300]}",
               file=sys.stderr)
         return False
     return True
+
+
+def _open_issue(source_id, url, old, new) -> bool:
+    """Open one drift issue. Returns True only if an issue now exists for this source."""
+    body = (f"Automated detection.\n\n- **Document id**: {source_id}\n"
+            f"- **Source URL**: {url}\n- **Previous sha256**: {old}\n"
+            f"- **New sha256**: {new}\n")
+    return _file_once(f"Source changed: {source_id}", body, source_id)
 
 
 def _report_robots(config, groups) -> int:
@@ -662,6 +674,95 @@ def _issue_order(changed: list[ChangedSource],
     return sorted(changed, key=lambda c: (per_group[c.group]["changed"], c.group))
 
 
+def _group_drift_findings(changed: list["ChangedSource"],
+                          per_group: dict[str, dict]) -> list[tuple[str, list[str]]]:
+    """(group, its changed ids) for every group where EVERY COMPARED source changed.
+
+    The trigger of ADR 0010, and the ONE place it is expressed. `changed` supplies both the
+    ids in the finding's body and the count the rule turns on, so there is no second tally
+    that could disagree with the first about how many sources drifted.
+
+    100% OF COMPARED SOURCES, because that is the only threshold that is itself an
+    observation. ">80% changed" embeds a judgement about how much is a lot, and the sources
+    that did NOT change are evidence against the very pattern the finding would assert. All
+    three whole-group events on record were N of N.
+
+    MORE THAN ONE compared source: one source cannot corroborate itself, and its own
+    `Source changed:` ticket already says everything the finding would. Three ERF groups
+    hold exactly one source, and at 1/1 the trigger is trivially true.
+
+    AN UNCOMPARED SOURCE IS NOT A CHANGED SOURCE, which is what `compared` counts and why
+    the denominator is not the group total. Unseeded baselines and failed fetches both read
+    as 100% to anything counting mismatches alone — oregon-counties reported 3,447 of 3,447
+    changed with every baseline empty (corpus-toolkit#68), an inert run a finding would have
+    diagnosed with confidence.
+    """
+    by_group: dict[str, list[str]] = {}
+    for c in changed:
+        # A source with no recorded baseline compares unequal to `''` and reports CHANGED
+        # every run: it was never compared to anything, so it is not evidence of drift.
+        if c.old:
+            by_group.setdefault(c.group, []).append(c.id)
+    out = []
+    for g, ids in sorted(by_group.items()):
+        # KeyError, not `.get(g, {}).get("compared", 0)`: a per-group tally that does not
+        # carry the count would silently file no finding at all, and "no finding" is what
+        # this function says when the drift is genuinely not whole-group. A caller passing
+        # a shape this cannot read has to hear about it.
+        compared = per_group[g]["compared"]
+        if compared > 1 and len(ids) == compared:
+            out.append((g, ids))
+    # LARGEST FIRST, the opposite of `_issue_order`, and only observable when the findings
+    # alone exhaust the budget. The two orders do not compete: a small whole-group drift is
+    # reported by its own tickets, which `_issue_order` files first, while the largest
+    # group's finding is the only issue that group will get — dropping that one first would
+    # rebuild the inversion corpus-toolkit#132 was opened about. Ties by group name, so the
+    # order is a fact about the drift and not about manifest position.
+    return sorted(out, key=lambda t: (-len(t[1]), t[0]))
+
+
+def _run_url() -> str | None:
+    """The Actions run this process is, or None when the environment does not say.
+
+    None rather than a partial url: a link assembled from variables that are not set is a
+    dead link that reads as a citation, and this is a report whose whole claim is that the
+    numbers in it were observed somewhere specific.
+    """
+    server = os.environ.get("GITHUB_SERVER_URL")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    if not (server and repo and run_id):
+        return None
+    return f"{server}/{repo}/actions/runs/{run_id}"
+
+
+def _open_group_finding(group: str, changed_ids: list[str], compared: int) -> bool:
+    """Open one group drift finding: every COMPARED source in `group` changed (ADR 0010).
+
+    CORRELATION, NOT CAUSE, in the wording as well as the rule. The tool observes that
+    bytes moved, and the three whole-group events on record had three different reasons --
+    a footer version bump, a set of urls that stopped serving, and, in oregon-counties, no
+    change at all. So this says they changed together and stops there.
+
+    It does NOT replace the individual tickets, and it is not filed instead of them.
+    """
+    run = _run_url()
+    body = (f"Automated detection: every compared source in the `{group}` group changed in "
+            f"one run.\n\n"
+            f"This reports that they changed TOGETHER and says nothing about why. A "
+            f"whole-group change has been a template edit, a set of URLs that stopped "
+            f"serving, and a manifest whose baselines were never recorded — the tool "
+            f"observes bytes, not causes. The individual `Source changed:` tickets for "
+            f"this group stand on their own and are not replaced by this finding "
+            f"(ADR 0010).\n\n"
+            f"- **Group**: {group}\n"
+            f"- **Compared sources that changed**: {len(changed_ids)} of {compared}\n"
+            f"- **Sample ids**: " + ", ".join(changed_ids[:10])
+            + ("…" if len(changed_ids) > 10 else "") + "\n"
+            + (f"- **Run**: {run}\n" if run else ""))
+    return _file_once(f"Group drifted: {group}", body, f"group {group}")
+
+
 def _drifting_groups_in_spend_order(changed: list[ChangedSource],
                                     per_group: dict[str, dict]) -> list[str]:
     """Every group that drifted, in the order `_issue_order` spends the budget on them.
@@ -775,7 +876,7 @@ def main():
         old = str(s.get("sha256") or "").strip()
         gname = s.get("_group", "manifest")
         stats = per_group.setdefault(gname, {"changed": 0, "total": 0, "unseeded": 0,
-                                             "uncompared": 0})
+                                             "uncompared": 0, "compared": 0})
         stats["total"] += 1
         in_scope.add((gname, sid))
         if not old:
@@ -849,6 +950,13 @@ def main():
             print(f"FETCH FAILED {sid}: {url} ({e})")
             continue
         fetched[(gname, sid)] = new
+        # COUNTED HERE, not derived as `total - unseeded - uncompared`, because a source
+        # can be BOTH — an unseeded entry whose fetch then failed increments both markers,
+        # and the subtraction removes it twice. This is the one line where "was compared to
+        # a recorded baseline" is a fact rather than an inference: bytes arrived, hashing
+        # succeeded, and there was something to compare them against.
+        if old:
+            stats["compared"] += 1
         if new != old:
             # The group rides along because the issue budget is allocated by group
             # (corpus-toolkit#69) and the spend loop is far from the only scope that knows
@@ -898,10 +1006,28 @@ def main():
     attempted_by_group: dict[str, int] = {}
     opened_by_group: dict[str, int] = {}
     capped = False
+    findings = _group_drift_findings(changed, per_group)
+    findings_attempted = findings_opened = 0
+    filed_findings: list[str] = []
     if args.open_issues and changed and not inert:
         _ensure_label()
+        # BEFORE the individual tickets, and out of the same budget (ADR 0010). Before,
+        # because `_issue_order` spends smallest-drifting-group-first and therefore reaches
+        # the largest group last — a finding queued behind the tickets is precisely the
+        # finding that never files, which is the case corpus-toolkit#132 was opened about.
+        # Out of the same budget, because a cap that some issues are exempt from is not a
+        # cap: a corpus with 27 bulk-drifting groups would file 27 issues past a limit of
+        # 25. There is at most one finding per group, so filing them first cannot flood.
+        for g, ids in findings:
+            if attempted + findings_attempted >= MAX_ISSUES_PER_RUN:
+                capped = True
+                break
+            findings_attempted += 1
+            if _open_group_finding(g, ids, per_group[g]["compared"]):
+                findings_opened += 1
+                filed_findings.append(g)
         for c in _issue_order(changed, per_group):
-            if attempted >= MAX_ISSUES_PER_RUN:
+            if attempted + findings_attempted >= MAX_ISSUES_PER_RUN:
                 capped = True
                 break
             attempted += 1
@@ -1022,6 +1148,18 @@ def main():
         else:
             print(f"{opened} issue(s) opened or already open, "
                   f"{attempted - opened} failed, of {len(changed)} changed source(s).")
+            # SAID OUT LOUD, because a new kind of issue appearing in the tracker that the
+            # run's own log never mentions is the corpus-toolkit#53 shape one level up.
+            # Attempted and opened are both here for the same reason they are on the line
+            # above: a finding that was attempted and does not exist is not a report.
+            if findings_attempted:
+                print(f"{findings_opened} group drift finding(s) opened or already open, "
+                      f"{findings_attempted - findings_opened} failed"
+                      + (": " + ", ".join(filed_findings) if filed_findings else "")
+                      + ". Each names a group where EVERY COMPARED source changed in one "
+                        "run: it reports that they changed together and asserts nothing "
+                        "about why, and the individual tickets stand alongside it "
+                        "(ADR 0010).")
         if capped:
             dropped = len(changed) - attempted
             print(f"STOPPED after {MAX_ISSUES_PER_RUN} — {dropped} changed source(s) were "
@@ -1062,10 +1200,18 @@ def main():
             all_failed = [g for g in spend_order
                           if attempted_by_group.get(g) and not opened_by_group.get(g)]
             if unreached:
+                # "raising NO PER-SOURCE TICKET", not "raising nothing": since ADR 0010 a
+                # group the ticket budget never reached may still have filed a group drift
+                # finding, and this line would otherwise deny an issue that exists.
+                also_found = [g for g in unreached if g in filed_findings]
                 print(f"{len(unreached)} group(s) with drift were not reached by the "
                       f"budget at all: " + ", ".join(unreached) + ". Their drift is in the "
-                      "breakdown above and in changed-sources.tsv; raising nothing for "
-                      "them is the cap, not a finding about them.", file=sys.stderr)
+                      "breakdown above and in changed-sources.tsv; raising no per-source "
+                      "ticket for them is the cap, not a finding about them."
+                      + (f" {len(also_found)} of them did file a group drift finding, "
+                         f"which reports only that their compared sources changed together "
+                         f"(ADR 0010): " + ", ".join(also_found) + "."
+                         if also_found else ""), file=sys.stderr)
             if all_failed:
                 print(f"EVERY issue creation failed for {len(all_failed)} group(s) that "
                       f"drifted: " + ", ".join(all_failed) + ". Those sources were "
@@ -1081,6 +1227,13 @@ def main():
                       f"baseline, so an unrecorded baseline is NOT the cause here — this "
                       f"message used to assert it was, and was wrong for ERF.",
                       file=sys.stderr)
+            # The findings are capped too, and a finding the budget never reached is the
+            # silence corpus-toolkit#132 was opened about — said, not inferred.
+            findings_dropped = len(findings) - findings_attempted
+            if findings_dropped:
+                print(f"{findings_dropped} group drift finding(s) were not filed either — "
+                      f"the budget was spent before them. Those groups are in the "
+                      f"breakdown above, at 100% of what was compared.", file=sys.stderr)
             _annotate("Drift report truncated",
                       f"{dropped} of {len(changed)} changed sources were not reported "
                       f"(cap {MAX_ISSUES_PER_RUN}). See the per-group breakdown in the log.")
