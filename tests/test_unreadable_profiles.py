@@ -99,10 +99,10 @@ GOOD_PROFILES = json.dumps({"profiles": {DAS: {"note": "The state's central serv
 
 
 def _corpus(tmp_path: Path, profiles: str | None, *, declare: bool = True,
-            content: bool = True) -> Path:
+            with_documents: bool = True) -> Path:
     """A corpus with a readable registry and whatever `profiles` says about the overlay.
 
-    `content=False` LEAVES THE DOCUMENTS OUT, for the validator guards below. The seam
+    `with_documents=False` LEAVES THE DOCUMENTS OUT, for the validator guards below. The seam
     they test is the corpus-level config check, which runs whether or not the corpus holds
     documents, and this fixture's one policy does not satisfy the bundled frontmatter
     schema — so a run over it exits non-zero on `main` already, and a guard asserting
@@ -110,7 +110,7 @@ def _corpus(tmp_path: Path, profiles: str | None, *, declare: bool = True,
     content out is what makes the exit code mean this finding.
     """
     (tmp_path / "policies").mkdir(parents=True, exist_ok=True)
-    if content:
+    if with_documents:
         (tmp_path / "policies" / "p-1.md").write_text(DOC)
     (tmp_path / "_meta").mkdir(exist_ok=True)
     config = textwrap.dedent(CONFIG).strip() + "\n"
@@ -349,7 +349,7 @@ def test_an_unreadable_profiles_file_fails_the_validator(tmp_path):
     """THE BUG, AT THE GATE. A corpus could commit a malformed overlay and merge it on
     green: the validator never asked the config whether the file it declared could be
     read, so the one check that runs on every PR passed without checking anything."""
-    out = _validate(_corpus(tmp_path, MALFORMED, content=False))
+    out = _validate(_corpus(tmp_path, MALFORMED, with_documents=False))
 
     assert out.returncode != 0, out.stdout + out.stderr
     assert "FAILED" in out.stdout, out.stdout
@@ -359,7 +359,7 @@ def test_the_validator_finding_names_the_profiles_file_and_its_key(tmp_path):
     """"SOMETHING IS WRONG" IS NOT A FINDING. The operator has to know which file to open
     and which key declared it — and it is NOT the registry's key or the registry's file.
     The registry here reads perfectly; naming it would send the fix to the wrong file."""
-    out = _validate(_corpus(tmp_path, MALFORMED, content=False))
+    out = _validate(_corpus(tmp_path, MALFORMED, with_documents=False))
 
     assert "plugins.issuing_body_profiles" in out.stdout, out.stdout
     assert "_meta/profiles.yml" in out.stdout, out.stdout
@@ -373,7 +373,7 @@ def test_a_corpus_whose_overlay_reads_fine_gets_no_finding(tmp_path):
     declares an overlay is a finding every maintainer learns to scroll past, and a gate
     that refuses a correct config is worse than no gate — a blanket "report the overlay"
     would satisfy both guards above and check nothing."""
-    out = _validate(_corpus(tmp_path, GOOD_PROFILES, content=False))
+    out = _validate(_corpus(tmp_path, GOOD_PROFILES, with_documents=False))
 
     assert out.returncode == 0, out.stdout + out.stderr
     assert "issuing_body_profiles" not in out.stdout, out.stdout
@@ -384,7 +384,7 @@ def test_a_corpus_declaring_no_overlay_is_not_told_about_one(tmp_path):
     reason this can be an error at all. A corpus with no `plugins.issuing_body_profiles`
     key must validate exactly as it did before, with nothing said about a file it never
     claimed to have."""
-    out = _validate(_corpus(tmp_path, None, declare=False, content=False))
+    out = _validate(_corpus(tmp_path, None, declare=False, with_documents=False))
 
     assert out.returncode == 0, out.stdout + out.stderr
     assert "issuing_body_profiles" not in out.stdout, out.stdout
@@ -456,10 +456,27 @@ def test_one_sentence_reaches_all_three_surfaces_verbatim(tmp_path):
     captured = io.StringIO()
     with contextlib.redirect_stderr(captured):
         server_mod.build_server(_config(root))
-    validated = _validate(_corpus(tmp_path / "again", MALFORMED, content=False))
+    validated = _validate(_corpus(tmp_path / "again", MALFORMED, with_documents=False))
     curated_warning = _fw(root).issuing_body_profile(DAS)["curated_warning"]
 
     for surface, said in (("startup stderr", captured.getvalue()),
                           ("validator finding", validated.stdout),
                           ("per-call note", curated_warning)):
         assert sentence in said, f"{surface} re-words the fault: {said}"
+
+
+def test_the_finding_gates_the_relationships_entry_point_too(tmp_path):
+    """A CORPUS-LEVEL FACT IS GATED ON EVERY ENTRY POINT (corpus-toolkit#139). A corpus
+    whose CI is trimmed to `--check-relationships` must not be the corpus this finding
+    cannot reach — "the gate exists in a command no corpus's CI actually invokes" is the
+    shape that made #139 a bug."""
+    root = _corpus(tmp_path, MALFORMED, with_documents=False)
+
+    out = subprocess.run(
+        [sys.executable, "-m", "corpus_toolkit.validate.frontmatter",
+         "--config", "_meta/corpus.yml", "--check-relationships"],
+        cwd=root, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
+
+    assert out.returncode != 0, out.stdout + out.stderr
+    assert "plugins.issuing_body_profiles" in out.stdout, out.stdout
