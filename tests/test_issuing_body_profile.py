@@ -777,3 +777,133 @@ def test_a_malformed_registry_cell_no_longer_takes_the_tool_down(tmp_path):
     assert f.config.issuing_body_name_fields == ("name",)
     assert "error" in f.issuing_body_profile("Administrative")     # was AttributeError
     assert f.issuing_body_profile("Employment Board")["slug"] == "employment-department"
+
+
+# ---------- #129: a declared name field the registry does not carry ----------
+#
+# The declaration is checked at LOAD for shape (empty list, bare string, non-string entry,
+# no registry to name columns of) and not against the registry it names columns of, so
+# `oar_nmae` loads clean, serves clean, and matches nothing — indistinguishable from a body
+# that is not there.
+#
+# REPORTED, NOT FATAL, and the operator decision is the reason: a mid-migration corpus
+# legitimately declares a field its registry is about to grow (ERF declared `oar_name`
+# between #166 and #168), so refusing the load would break a config that is correct and
+# merely early.
+#
+# IT SURFACES IN `corpus-validate-frontmatter`, alongside `corpus.authoritative_source` —
+# the corpus-level config channel that already exists, that every corpus runs on every PR
+# through the validate-frontmatter reusable workflow, and that a maintainer already reads
+# for exactly this class of finding. Not a new channel, and not the MCP response: an agent
+# calling `corpus_overview` cannot fix a registry column, and `config_warning` is spent on
+# the one finding that changes how an agent should read the answer it is holding.
+
+def _config_only(tmp_path: Path, declared: str, registry=PROMOTED) -> Path:
+    """A corpus with a registry, a name-field declaration and NO content files.
+
+    The seam under test is the corpus-level config check, which runs whether or not the
+    corpus holds documents; keeping the content out means an unrelated frontmatter error
+    cannot be mistaken for this finding, or mask it.
+    """
+    root = tmp_path
+    (root / "_meta").mkdir(parents=True, exist_ok=True)
+    (root / "agencies").mkdir(exist_ok=True)
+    (root / "rules").mkdir(exist_ok=True)
+    (root / "_meta" / "registry.yml").write_text(json.dumps(registry))
+    (root / "_meta" / "corpus.yml").write_text(
+        textwrap.dedent(DECLARING_FIELD + declared).strip() + "\n")
+    return root
+
+
+def _validate(root: Path) -> subprocess.CompletedProcess:
+    """Run the validator the way a corpus's CI does, from the corpus root."""
+    return subprocess.run(
+        ["python3", "-m", "corpus_toolkit.validate.frontmatter",
+         "--config", "_meta/corpus.yml"],
+        cwd=root, capture_output=True, text=True)
+
+
+def test_a_name_field_no_registry_entry_carries_is_reported_by_the_validator(tmp_path):
+    """The typo case. `oar_nmae` reaches no cell, so every query against it matches
+    nothing — and nothing anywhere says so today."""
+    root = _config_only(tmp_path, '      issuing_body_name_fields: ["name", "oar_nmae"]\n')
+
+    out = _validate(root)
+
+    assert "oar_nmae" in out.stdout, out.stdout
+    assert "issuing_body_name_fields" in out.stdout, out.stdout
+    assert "warning" in out.stdout, f"reported, not fatal — {out.stdout}"
+
+
+def test_the_finding_is_reported_and_does_not_fail_the_run(tmp_path):
+    """A corpus mid-migration declares the field its registry is about to grow. That corpus
+    must still validate — the finding is a report, and making it fatal would refuse a config
+    that is correct and merely early."""
+    root = _config_only(tmp_path, '      issuing_body_name_fields: ["name", "oar_nmae"]\n')
+
+    out = _validate(root)
+
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "FAILED" not in out.stdout, out.stdout
+
+
+def test_a_name_field_the_registry_carries_is_not_reported(tmp_path):
+    """THE GUARD MUST NOT FIRE ON THE RIGHT CONFIG. `name`, `oar_name` and `aliases` are all
+    carried by the promoted registry; a check that reports them too is a check that reports
+    everything, which is the same as reporting nothing."""
+    root = _config_only(tmp_path, '      issuing_body_name_fields: ["name", "oar_name", "aliases"]\n')
+
+    out = _validate(root)
+
+    assert "issuing_body_name_fields" not in out.stdout, out.stdout
+    assert out.returncode == 0, out.stdout
+
+
+def test_a_field_only_some_entries_carry_is_not_reported(tmp_path):
+    """A registry mid-migration carries the field on some rows and not others. That is a
+    partially-populated column, not a field name that reaches nothing, and the two are
+    different findings — only the second one makes every query against it fail."""
+    registry = json.loads(json.dumps(PROMOTED))
+    del registry["entries"][1]["oar_name"]
+    root = _config_only(tmp_path,
+                        '      issuing_body_name_fields: ["name", "oar_name", "aliases"]\n',
+                        registry=registry)
+
+    out = _validate(root)
+
+    assert "oar_name" not in out.stdout, out.stdout
+
+
+def test_a_field_whose_every_cell_is_unmatchable_is_reported(tmp_path):
+    """`oar_name: null` on every row reaches no NAME, which is the same silent outcome as a
+    misspelled field: `_name_match` skips a cell that is not a string. Checking only for the
+    KEY would pass here while every query against the field still matched nothing."""
+    registry = json.loads(json.dumps(PROMOTED))
+    for entry in registry["entries"]:
+        entry["oar_name"] = None
+    root = _config_only(tmp_path,
+                        '      issuing_body_name_fields: ["name", "oar_name", "aliases"]\n',
+                        registry=registry)
+
+    out = _validate(root)
+
+    assert "oar_name" in out.stdout, out.stdout
+    assert "issuing_body_name_fields" in out.stdout, out.stdout
+
+
+def test_an_unreadable_registry_is_not_reported_as_an_unmatched_field(tmp_path):
+    """"COULD NOT CHECK" IS NOT "IS NOT THERE". A registry that cannot be read says nothing
+    about which fields it carries, and reporting the declared fields as unmatched would be a
+    finding invented from a failure to look — the collapse response convention 5 and
+    `_registry_slugs_at_load` both exist to prevent."""
+    root = _config_only(tmp_path,
+                        '      issuing_body_name_fields: ["name", "oar_name", "aliases"]\n')
+    (root / "_meta" / "registry.yml").write_text("entries: [ this is not valid yaml\n")
+
+    out = _validate(root)
+
+    assert "no entry in" not in out.stdout, \
+        f"claimed a field is carried by no entry of a registry it could not read — {out.stdout}"
+    assert "could not be read" in out.stdout, out.stdout
+    assert "could not be checked" in out.stdout, out.stdout
+    assert "Traceback" not in out.stderr, out.stderr

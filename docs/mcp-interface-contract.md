@@ -214,6 +214,19 @@ corpus without a graph answers the first row above.
   into "matches nothing", which is indistinguishable from a body that is not
   there.
 
+  **Whether a declared field exists in the registry is checked by
+  `corpus-validate-frontmatter`, and reported rather than fatal.** A field no
+  registry entry carries — `oar_nmae` — is shape-valid, so it loads and serves
+  while every free-text query against it matches nothing. It is not a load
+  error because a mid-migration corpus legitimately declares the column its
+  registry is about to grow, so the finding surfaces where corpus-level config
+  findings already do: a `warning` from the validator, next to a missing
+  `corpus.authoritative_source`, naming the field and the registry it was
+  checked against. A field carried by *some* entries is a partly-populated
+  column and is not reported. A registry that could not be read reports the
+  read failure as an **error** and says the fields went unchecked — "could not
+  check" is never served as "is not there" (response convention 5).
+
   **Uniqueness is per body, not per name.** A query hitting a body's `name`, its
   `oar_name` and two of its aliases is one hit, not four; otherwise a wider net
   would turn good matches into `no unique issuing body match`.

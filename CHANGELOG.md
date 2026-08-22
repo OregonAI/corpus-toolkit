@@ -17,6 +17,47 @@ it can break you.
 
 ## Unreleased
 
+### Added — the validator reports a name field the registry does not carry
+
+**Reported, not fatal: a corpus mid-migration keeps loading and keeps serving.** New
+`corpus-validate-frontmatter` warning when a field listed in
+`plugins.issuing_body_name_fields` reaches no name in the issuing-body registry it names
+columns of.
+
+The declaration is checked at load for SHAPE — empty list, bare string, non-string entry,
+no registry to name columns of — and was not checked against the registry itself, so
+`oar_nmae` loaded clean, served clean, and made every free-text `issuing_body_profile`
+query against that field match nothing. Matching nothing is exactly what a body the corpus
+does not hold looks like.
+
+It stays out of the loader deliberately: ERF declared `oar_name` between ERF#166 and
+ERF#168, while the column was still being populated, and refusing that load would break a
+config that is correct and merely early. So it surfaces where corpus-level config findings
+already surface — the same function that reports a missing `corpus.authoritative_source`,
+in the command every corpus runs on every PR:
+
+```
+warning _meta/corpus.yml: plugins.issuing_body_name_fields: no entry in
+_meta/agency-registry.yml carries a name in 'oar_nmae' — checked 189 entries, ...
+```
+
+Not `corpus_overview`'s `config_warning`: that channel reaches an AGENT holding an answer,
+and a registry column an agent cannot fix would be noise on every conversation.
+
+Three things it does not do. A field carried by *some* entries is a partly-populated column
+and is not reported. A field whose every cell is null or numeric IS reported, because
+`name_values` — now shared by the matcher and the validator — skips cells that are not
+strings, so a check for the key alone would pass while every query still matched nothing.
+And a registry that could not be read is never reported as a field the registry lacks:
+that is an **error** naming the read failure, saying the fields went unchecked.
+
+**Also fixed: an unreadable registry no longer ends the validator in a traceback.** A
+`plugins.issuing_body_registry` naming a missing file raised `FileNotFoundError` out of
+`_load_registry` before any finding was printed; a slug-less entry raised `KeyError`. Both
+are now named findings against the registry path, the run still fails, and the per-document
+slug checks skip rather than report every document's slug as unregistered.
+(corpus-toolkit#129)
+
 ### Fixed — `register_scheme` accepts a compiled pattern, flags and all
 
 **No action required; every existing (string) call is unchanged. A corpus whose citation

@@ -32,7 +32,7 @@ from pathlib import Path
 
 import yaml
 
-from corpus_toolkit.config import CorpusConfig
+from corpus_toolkit.config import CorpusConfig, name_values
 from corpus_toolkit.plugins import load_module
 from corpus_toolkit.mcp.backends import (
     BIG_DOC_BYTES, REQUIRED_BACKEND_METHODS, FileBackend, RetrievalBackend,
@@ -259,16 +259,14 @@ def _name_match(entry: dict, fields, query: str) -> tuple[str, str] | None:
     to fix: a later caller passing raw text matches nothing and looks like a body that is
     not there.
 
-    A field's value may be a STRING or a LIST of strings (ERF's curated `aliases`), and a
-    list is matched element-wise. Anything else in a registry cell is skipped rather than
-    coerced: a registry is hand-maintained, and `str(None)` matching "none" is a match
-    nobody wrote.
+    Which cells can carry a name — a string, or a list matched element-wise, and nothing
+    coerced — is `config.name_values`, shared with the validator so that a field this
+    matcher can never hit is the same field the validator reports.
     """
     q = query.lower()
     for field in fields:
-        value = entry.get(field)
-        for name in (value if isinstance(value, (list, tuple)) else [value]):
-            if isinstance(name, str) and q in name.lower():
+        for name in name_values(entry, field):
+            if q in name.lower():
                 return field, name
     return None
 
