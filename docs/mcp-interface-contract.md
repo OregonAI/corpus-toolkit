@@ -588,7 +588,10 @@ the hook and registering nothing is likewise an error rather than a no-op.
    reserves (`.test`, `.example`, `.invalid`, `.localhost`, and
    `example.com`/`.net`/`.org`) — those can never be a real front door, and one
    of them is what `corpus-template` ships as its unfilled placeholder, which
-   parses as a URL and would otherwise sail through. The exception is the
+   parses as a URL and would otherwise sail through. A host still carrying the
+   template's `REPLACE-ME` marker fails as well, for the case where the
+   reserved name was edited away and the marker was not, as do a URL that
+   names no host and one that cannot be parsed. The exception is the
    template itself: while `corpus.id` is still the unfilled `{{CORPUS_ID}}`
    **and** the repo holds no documents, both findings are warnings, so the
    template validates while no corpus can hide behind it. The **server** still

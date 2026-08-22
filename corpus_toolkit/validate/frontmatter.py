@@ -348,6 +348,35 @@ _HOW_TO_SET_THE_FRONT_DOOR = (
 _UNFILLED_PLACEHOLDER = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
 
 
+def _host_of(url: str, rel, r) -> str:
+    """`url`'s host, or "" having reported why there isn't one.
+
+    `urllib.parse.urlsplit` RAISES on a malformed authority — `https://[oops` is
+    "Invalid IPv6 URL" — and a value like that reaches here having passed the `https://`
+    prefix check above. Letting the exception out ends the run in a traceback naming
+    neither the file nor the key, which is the failure `config._validated_corpus_string`
+    was written to end; and swallowing it would leave a value convention 1 promises is a
+    URL unchecked and unreported. So it is reported here, as an error, and the caller
+    reads "" and stops asking questions about a host that does not exist.
+    """
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").rstrip(".").lower()
+    except ValueError as e:
+        r.error(rel, f"corpus.authoritative_source is {url!r}, which starts like a URL "
+                     f"but cannot be parsed as one ({type(e).__name__}: {e}). Response "
+                     f"convention 1 says this field IS a URL and a caller will try to "
+                     f"follow it. " + _HOW_TO_SET_THE_FRONT_DOOR)
+        return ""
+    if not host:
+        # `https:///schedules` clears the `https://` branch above and names nowhere to go.
+        # Reported HERE rather than left to the caller: a check that asks what a host is
+        # called has nothing to say about a URL that has no host, so silence would be this
+        # gate passing a value that answers convention 1's question with nothing.
+        r.error(rel, f"corpus.authoritative_source is {url!r}, which names no host, so it "
+                     f"points nowhere. " + _HOW_TO_SET_THE_FRONT_DOOR)
+    return host
+
+
 def _uninstantiated_template(config) -> bool:
     """Is this corpus.yml still corpus-template's, rather than a corpus's?
 
@@ -368,24 +397,44 @@ def _uninstantiated_template(config) -> bool:
     return next(iter(content_files(config)), None) is None
 
 
-def _reserved_name(url: str) -> str | None:
-    """The RFC 2606 reserved name `url`'s HOST sits under, or None.
+# The template's marker, kept as a NAMED BACKSTOP to the RFC 2606 rule rather than as the
+# rule itself. The general rule is the reserved names — an author who edits the path and
+# leaves the host still ships a dead pointer, which a `REPLACE-ME` match alone would miss
+# — but the reverse edge is real too: swap `.invalid` for a live TLD, or drop it, and
+# `https://REPLACE-ME.oregon.gov/...` is off the reserved list while still being the
+# template's unfilled line.
+_TEMPLATE_MARKER = "replace-me"
 
-    Reads the host, never the URL text. A substring match on `example` or `invalid` would
+
+def _reserved_name(host: str) -> str | None:
+    """The RFC 2606 reserved name `host` sits under, or the template's marker, or None.
+
+    Takes the HOST, never the URL text. A substring match on `example` or `invalid` would
     reject `https://sos.oregon.gov/archives/example-schedules` — a real front door whose
     path happens to say example — and would miss nothing a host check misses.
 
-    A URL with no host (`https:///x`) returns None: that is the non-URL case, and the
-    check above it already owns the message for a value that is not a URL.
+    An empty host (`https:///x`, or a value the caller could not parse) returns None: the
+    callers above own the message for a value that is not a usable URL.
+
+    WHERE THE RULE STOPS, deliberately: an address literal is not a name, so
+    `http://127.0.0.1:8000` and `http://[::1]/` pass here while `http://localhost/` does
+    not. They are as dead as a `.invalid` host, but they are dead under a different rule
+    (RFC 5735/6890 special-purpose addresses), and the value of naming RFC 2606 is that
+    "this is a placeholder" stops being a judgement about someone's intent. Filed as
+    corpus-toolkit#136 rather than smuggled in under a citation that does not cover it.
     """
-    host = (urllib.parse.urlsplit(url).hostname or "").rstrip(".").lower()
     if not host:
         return None
     labels = host.split(".")
     if labels[-1] in _RESERVED_TLDS:
         return "." + labels[-1]
     second_level = ".".join(labels[-2:])
-    return second_level if second_level in _RESERVED_DOMAINS else None
+    if second_level in _RESERVED_DOMAINS:
+        return second_level
+    # LAST, so the template's own `REPLACE-ME.invalid` is explained by the general rule
+    # (the reserved name is the reason it can never resolve); the marker only has to speak
+    # for the hosts that rule no longer covers.
+    return "REPLACE-ME" if _TEMPLATE_MARKER in labels else None
 
 
 def _check_config(config, r, registry):
@@ -434,10 +483,10 @@ def _check_config(config, r, registry):
         # is told what it is and what it costs, whether or not it has a front door yet.
         r.warn(rel, f"corpus.id is still the template's unfilled placeholder "
                     f"{config.id!r} and this repo holds no documents, so this is "
-                    f"corpus-template rather than a corpus. Findings about "
-                    f"corpus.authoritative_source below are WARNINGS for that reason "
-                    f"alone; each becomes an error the moment either half changes — when "
-                    f"you fill in corpus.id, or when the first document lands.")
+                    f"corpus-template rather than a corpus. Any finding about "
+                    f"corpus.authoritative_source is reported as a WARNING for that "
+                    f"reason alone, and becomes an error the moment either half changes "
+                    f"— when you fill in corpus.id, or when the first document lands.")
     say = r.warn if template else r.error
     if not config.authoritative_source:
         say(rel, "corpus.authoritative_source is not set — MCP responses will carry "
@@ -449,13 +498,15 @@ def _check_config(config, r, registry):
         # caller will try to follow it.
         r.error(rel, f"corpus.authoritative_source must be a URL, got "
                      f"{config.authoritative_source!r}")
-    elif (reserved := _reserved_name(value)):
-        say(rel, f"corpus.authoritative_source is {value!r}, whose host is under "
-                 f"{reserved}, a name RFC 2606 reserves so that it can never be a real "
-                 f"host. It parses as a URL, so nothing downstream refuses it: every MCP "
-                 f"response would carry it and tell an agent to verify at a host that "
-                 f"cannot exist. This is a placeholder — corpus-template ships one — not "
-                 f"a front door. " + _HOW_TO_SET_THE_FRONT_DOOR)
+    elif (reserved := _reserved_name(_host_of(value, rel, r))):
+        why = ("the marker corpus-template leaves for you to replace"
+               if reserved == "REPLACE-ME" else
+               "a name RFC 2606 reserves so that it can never be a real host")
+        say(rel, f"corpus.authoritative_source is {value!r}, whose host carries "
+                 f"{reserved} — {why}. It parses as a URL, so nothing downstream refuses "
+                 f"it: every MCP response would carry it and tell an agent to verify "
+                 f"somewhere that cannot answer. This is a placeholder, not a front "
+                 f"door. " + _HOW_TO_SET_THE_FRONT_DOOR)
     _check_registry(config, r, rel, registry)
 
 

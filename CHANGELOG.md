@@ -44,7 +44,12 @@ at a host that cannot exist. The rule is the **reserved names of RFC 2606** — 
 `.example`, `.invalid` and `.localhost` TLDs, plus `example.com`/`.net`/`.org` — rather
 than a string match on `REPLACE-ME`, because a corpus that edits the path and leaves the
 host is shipping the same dead pointer. The check reads the URL's HOST, so a real front
-door with `example` in its path is untouched.
+door with `example` in its path is untouched. A host still carrying the template's
+`REPLACE-ME` marker is refused too — the reverse edge, where the reserved name is edited
+away and the marker is not — and so are two values that used to slip past the URL check
+that precedes all of this: `https:///schedules`, which names no host, and
+`https://[oops`, on which `urllib.parse.urlsplit` RAISES, ending the whole run in a
+traceback that named neither the file nor the key.
 
 **The template still validates itself**, or every corpus would start life from a template
 that fails. While `corpus.id` is still the unfilled `{{CORPUS_ID}}` **and** the repo holds
@@ -59,6 +64,12 @@ without one, still emitting the documented `authoritative_source: null` plus
 `corpus_overview`'s `config_warning`. This is a repo gate, never a runtime one — a corpus
 that was legal when it deployed must not be taken down by a pin bump. A value that is not a
 URL at all remains the error it has been since v1.10.0.
+
+**Whether this warrants a major bump is a release decision, not this entry's.** AGENTS.md
+says breaking changes bump the major version, and a corpus that has not adopted the key
+goes from green to red on a pin bump. The precedent in this file runs the other way — the
+v1.10.0 non-URL error and #3's dangling-`document_id` promotion both shipped as minors, and
+no major bump exists here — so the call belongs to whoever cuts the tag.
 
 **If this fails your corpus:** add one line under `corpus:` in `_meta/corpus.yml` naming
 the one page a reader opens to reach your official text. One URL is enough for a corpus

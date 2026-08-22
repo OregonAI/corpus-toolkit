@@ -241,6 +241,47 @@ class TestAuthoritativeSourceConfigCheck(ValidateTestCase):
                 self.assertEqual(code, 1, f"gate passed on {url}:\n{out}")
                 self.assertIn("RFC 2606", out)
 
+    def test_a_url_shaped_value_that_cannot_be_parsed_is_a_finding(self):
+        """`urlsplit` RAISES on a malformed authority (`https://[oops` — "Invalid IPv6
+        URL"), and this value reaches it having passed the `https://` prefix check. An
+        exception out of a validator is a traceback naming neither the file nor the key —
+        the failure mode config._validated_corpus_string exists to end."""
+        self.write_corpus(authoritative_source='"https://[oops"')
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1, f"gate passed on an unparseable URL:\n{out}")
+        self.assertIn("corpus.authoritative_source", out)
+        self.assertIn("cannot be parsed", out)
+
+    def test_a_url_naming_no_host_is_a_finding(self):
+        """`https:///schedules` starts with `https://`, so the is-it-a-URL branch passes
+        it, and a check that only asks about the host's NAME has no name to ask about. It
+        must not fall through clean: convention 1 promises a caller somewhere to go."""
+        self.write_corpus(authoritative_source='"https:///schedules"')
+        self.write_doc("spending-100", "Spending 100")
+
+        code, out = self.validate()
+
+        self.assertEqual(code, 1, f"gate passed on a URL naming no host:\n{out}")
+        self.assertIn("names no host", out)
+
+    def test_replace_me_left_in_a_host_fails_even_off_a_reserved_name(self):
+        """The RFC 2606 rule is the general one, but it has an edge: an author who swaps
+        `.invalid` for a real TLD, or drops it, leaves `REPLACE-ME` sitting in a host the
+        reserved-name rule no longer covers. The template's own marker is worth naming."""
+        for url in ("https://REPLACE-ME.oregon.gov/where-the-official-text-lives",
+                    "http://REPLACE-ME/where-the-official-text-lives"):
+            with self.subTest(url=url):
+                self.write_corpus(authoritative_source=f'"{url}"')
+                self.write_doc("spending-100", "Spending 100")
+
+                code, out = self.validate()
+
+                self.assertEqual(code, 1, f"gate passed on {url}:\n{out}")
+                self.assertIn("REPLACE-ME", out)
+
     def test_a_real_host_whose_path_says_example_is_not_a_placeholder(self):
         """The check reads the HOST, not the URL text. A substring match would reject
         `https://sos.oregon.gov/archives/example-schedules` — a real front door."""
