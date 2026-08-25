@@ -15,6 +15,65 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## v1.30.0 — 2026-08-25
+
+### Fixed — the change detector speaks HTTP/2, so hosts that refuse HTTP/1.1 can be watched (corpus-toolkit#162)
+
+**This can turn a red corpus green, and adds a dependency.** `corpus-detect-changes` fetched
+with `urllib`, which speaks only HTTP/1.1, and a growing number of government hosts refuse
+HTTP/1.1 outright. With the **same** User-Agent:
+
+```
+curl --http2    -> 200
+curl --http1.1  -> 403
+python urllib   -> 403
+```
+
+54 sources in `oregon-counties` could never be seeded because of it — `lake.county.codes`
+(all 14), `www.codepublishing.com`, and six other county groups — while **that repo's own
+ingest reached the same hosts fine**. The mirror held the documents and could not watch them
+for change.
+
+`httpx[http2]` is now a **runtime dependency** rather than an extra: a detector that cannot
+fetch is not optional. It is bounded (`>=0.27,<1.0`) for the reason the existing extras
+already record. httpx negotiates via ALPN, so a host that only speaks HTTP/1.1 is
+unaffected — this **adds** a protocol rather than requiring one.
+
+**Nothing here widens the header set or spoofs a browser.** The User-Agent is unchanged and
+still identifies us; only the protocol version moves. `oregon-counties/src/fetch.py` records
+what the wrong diagnosis cost — a county was marked `unavailable` for four tranches on the
+belief that our *identity* was refused, and a headless browser was reached for before anyone
+checked the protocol.
+
+### Fixed — a scheduled run fails for findings, not for a protected branch (corpus-toolkit#161)
+
+**This unblocks every corpus whose default branch requires a PR review.** The drift workflow
+regenerated `STATUS.md` and pushed it straight to the default branch. Where that branch is
+protected the push is declined —
+
+```
+remote: error: GH006: Protected branch update failed for refs/heads/main
+ ! [remote rejected] main -> main (protected branch hook declined)
+```
+
+— and the whole run went red, burying the drift report the job exists to deliver.
+`oregon-budget` and `oregon-legislature` had been red for this every week since 2026-08-10;
+`federal-reference` and `corpus-template` since 08-03.
+
+Ignoring the rejection would be worse: `STATUS.md` would silently stop updating. It now
+opens a **PR**, on a stable branch, so a run that finds nothing new updates the existing PR
+rather than filing another. **The job needs `pull-requests: write`** — a corpus that pins
+this and restricts workflow permissions must grant it, or the step reports that it could not
+open the PR and names the branch carrying the change.
+
+### Fixed — a transient network error is no longer reported as a broken link (corpus-toolkit#161)
+
+`check-links` ran lychee with no retries, so one reset connection over tens of thousands of
+links turned the weekly check red — on a host that answers 200 when asked again.
+`max-retries` (3) and `retry-wait-time` (2s) are new inputs **with defaults**, so no consumer
+has to change to get the fix, and either can be turned down for a corpus that wants the old
+strictness.
+
 ## v1.29.0 — 2026-08-22
 
 ### Fixed — an unseeded source no longer files a `Source changed:` ticket, and the run says which ones it could not check (corpus-toolkit#145)
