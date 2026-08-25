@@ -29,6 +29,20 @@ on:
         description: HTTP status codes/ranges lychee treats as OK (comma-separated, lychee's own syntax e.g. "200..=299,403,429")
         type: string
         default: "200,203,206,429"
+      max-retries:
+        description: >-
+          How many times lychee retries a link before calling it broken. A weekly check
+          over tens of thousands of links will meet a reset connection eventually, and one
+          of them used to turn the whole run red — `http://www.osbar.org/ | Network error:
+          Connection reset by peer`, on a host that answers 200 when asked again. A
+          transient network fault is not a finding, and a check that reports it as one is a
+          check people stop reading.
+        type: number
+        default: 3
+      retry-wait-time:
+        description: seconds lychee waits between retries
+        type: number
+        default: 2
 
 jobs:
   links:
@@ -50,7 +64,7 @@ jobs:
       - name: External links
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --no-progress --accept ${{ inputs.accept-codes }} ${{ steps.excludes.outputs.flags }} './**/*.md' 'llms.txt'
+          args: --no-progress --accept ${{ inputs.accept-codes }} --max-retries ${{ inputs.max-retries }} --retry-wait-time ${{ inputs.retry-wait-time }} ${{ steps.excludes.outputs.flags }} './**/*.md' 'llms.txt'
       - uses: actions/checkout@v4
         with:
           repository: OregonAI/corpus-toolkit
