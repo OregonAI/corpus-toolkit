@@ -68,7 +68,6 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
-import urllib.request
 
 from typing import NamedTuple
 
@@ -82,11 +81,63 @@ from corpus_toolkit.repo import (WatchedDocumentUnreadable, WatchedPathMissing,
 
 USER_AGENT = "corpus-toolkit-change-detector"
 
+# HTTP/2, AND WHY IT IS NOT A PERFORMANCE CHOICE (corpus-toolkit#162).
+#
+# This fetched with `urllib`, which speaks only HTTP/1.1, and a growing number of
+# government hosts refuse HTTP/1.1 outright. With the SAME User-Agent:
+#
+#     curl --http2    -> 200
+#     curl --http1.1  -> 403
+#     python urllib   -> 403
+#
+# 54 sources in oregon-counties could never be seeded because of it -- lake.county.codes
+# (all 14) and www.codepublishing.com among them -- while THAT REPO'S OWN INGEST reached
+# the same hosts fine, because it already speaks HTTP/2. The mirror held the documents and
+# could not watch them for change: two halves of one repository disagreeing about whether
+# a site is reachable.
+#
+# oregon-counties/src/fetch.py records what the wrong diagnosis cost -- Marion County was
+# marked `unavailable` for four tranches on the belief that our identity was being refused,
+# and a headless browser was reached for before anyone checked the protocol version. Its
+# conclusion is the one this follows: speaking HTTP/2 is NOT impersonation. The
+# User-Agent stays honest and identifying; only the protocol moves to one from 2015.
+#
+# Nothing here widens the header set or pretends to be a browser. That was never necessary.
+HTTP2_TIMEOUT = 60
+
+_client = None
+
+
+def _http_client():
+    """One HTTP/2 client, reused. Redirects followed; TLS still verified."""
+    global _client
+    if _client is None:
+        import httpx
+
+        # NO LOCAL h2 CHECK. httpx refuses to build an http2 client without `h2`
+        # (ImportError, "Using http2=True, but the 'h2' package is not installed"), so a
+        # guard here would restate a rule httpx already enforces -- one fact declared
+        # twice, with the copies free to drift. `tests/test_http2_fetch.py` asserts that
+        # refusal instead, so if httpx ever starts downgrading silently we find out from a
+        # failing test rather than from 403s nobody can explain.
+        #
+        # The real fix is the DEPENDENCY: pyproject asks for `httpx[http2]`, and the extra
+        # is what pulls `h2` in.
+        _client = httpx.Client(http2=True, follow_redirects=True,
+                               timeout=HTTP2_TIMEOUT,
+                               headers={"User-Agent": USER_AGENT})
+    return _client
+
 
 def fetch(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
+    """Fetch over HTTP/2 where the host offers it, HTTP/1.1 where it does not.
+
+    httpx negotiates via ALPN, so a host that only speaks HTTP/1.1 is unaffected -- this
+    ADDS a protocol rather than requiring one.
+    """
+    resp = _http_client().get(url)
+    resp.raise_for_status()
+    return resp.content
 
 
 def _format_for(url: str, declared: str | None) -> str:

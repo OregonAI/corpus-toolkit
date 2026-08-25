@@ -10,6 +10,16 @@ requires-python = ">=3.10"
 dependencies = [
     "pyyaml",
     "jsonschema",
+    # HTTP/2, and it is a CORRECTNESS dependency rather than a performance one
+    # (corpus-toolkit#162). A growing number of government hosts refuse HTTP/1.1 outright
+    # -- 403 on HTTP/1.1, 200 on HTTP/2, same User-Agent -- and `urllib` speaks only
+    # HTTP/1.1, so 54 oregon-counties sources could never be seeded while that repo's own
+    # ingest reached the same hosts fine. The `[http2]` extra is what pulls in `h2`;
+    # without it httpx accepts `http2=True` and silently speaks HTTP/1.1 anyway.
+    #
+    # BOUNDED ON BOTH SIDES, for the reason the extras below already record: an unbounded
+    # dependency floats onto the next major the day it ships.
+    "httpx[http2]>=0.27,<1.0",
 ]
 
 [project.optional-dependencies]
