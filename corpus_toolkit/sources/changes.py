@@ -69,6 +69,7 @@ import subprocess
 import sys
 import urllib.parse
 
+from pathlib import Path
 from typing import NamedTuple
 
 import yaml
@@ -78,6 +79,7 @@ from corpus_toolkit.config import (iter_manifest_sources,
                                    validate_watch_declarations)
 from corpus_toolkit.repo import (WatchedDocumentUnreadable, WatchedPathMissing,
                                  content_hash)
+from corpus_toolkit.sources import tls
 
 USER_AGENT = "corpus-toolkit-change-detector"
 
@@ -106,10 +108,33 @@ USER_AGENT = "corpus-toolkit-change-detector"
 HTTP2_TIMEOUT = 60
 
 _client = None
+# Host -> verifying SSL context, from `_meta/tls-chain/<host>.pem`. Empty for every corpus
+# that declares none, which is all of them until one measures a server that omits its chain.
+# See `corpus_toolkit/sources/tls.py` for why supplying an intermediate is not a trust
+# widening, and ADR 0012 for the decision.
+_chain_supplements: dict = {}
+
+
+def configure_chain_supplements(meta_dir) -> dict:
+    """Load `<meta_dir>/tls-chain/*.pem` and rebuild the client around them.
+
+    Called once, from `main`, BEFORE the first fetch. Returns what it loaded so the run can
+    say so out loud: an exception nobody can see in the log is how a workaround outlives the
+    condition it was written for.
+    """
+    global _chain_supplements, _client
+    _chain_supplements = tls.load(meta_dir)
+    _client = None
+    return _chain_supplements
 
 
 def _http_client():
-    """One HTTP/2 client, reused. Redirects followed; TLS still verified."""
+    """One HTTP/2 client, reused. Redirects followed; TLS still verified.
+
+    Where a chain supplement is declared for a host, that host is mounted on its own
+    transport carrying its own verifying context. Every OTHER host keeps the default one,
+    which is what makes this an exception rather than a setting.
+    """
     global _client
     if _client is None:
         import httpx
@@ -125,6 +150,7 @@ def _http_client():
         # is what pulls `h2` in.
         _client = httpx.Client(http2=True, follow_redirects=True,
                                timeout=HTTP2_TIMEOUT,
+                               mounts=tls.mounts(_chain_supplements),
                                headers={"User-Agent": USER_AGENT})
     return _client
 
@@ -969,6 +995,17 @@ def main():
 
     config = config_mod.load(args.config)
     _warn_recheck_is_not_honoured(config)
+
+    # BEFORE the first fetch, and SAID OUT LOUD. A supplement changes which sources this run
+    # can reach at all, so a run that used one and did not mention it reads exactly like a
+    # run against a host that was never broken -- and that is how an exception outlives its
+    # cause. `SupplementRefused` is deliberately not caught: a supplement that cannot be
+    # loaded means its sources cannot be fetched, and this file's whole position is that a
+    # failed fetch must not pass as an absence of change.
+    supplements = configure_chain_supplements(Path(args.config).resolve().parent)
+    for host in sorted(supplements):
+        print(f"TLS CHAIN SUPPLEMENT: {host} (this host serves an incomplete chain; the "
+              f"missing intermediate is supplied, verification is NOT relaxed)")
 
     if args.check_robots:
         return _report_robots(config, args.group)
