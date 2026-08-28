@@ -17,6 +17,8 @@ import time
 import unittest
 from pathlib import Path
 
+import jsonschema
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from corpus_toolkit import config as config_mod          # noqa: E402
@@ -25,9 +27,11 @@ from corpus_toolkit.config import Sibling                # noqa: E402
 from corpus_toolkit.mcp.framework import (               # noqa: E402
     CorpusFramework, clear_schemes, register_scheme,
 )
-from corpus_toolkit.remote import load_sibling_index      # noqa: E402
-from corpus_toolkit.repo import parse_frontmatter         # noqa: E402
-from corpus_toolkit.validate.frontmatter import bundled_schema  # noqa: E402
+from corpus_toolkit.remote import load_sibling_index     # noqa: E402
+from corpus_toolkit.repo import parse_frontmatter        # noqa: E402
+from corpus_toolkit.validate.frontmatter import (        # noqa: E402
+    bundled_schema, schema_with_extensions,
+)
 
 CORPUS_YML = """\
 corpus:
@@ -37,9 +41,13 @@ corpus:
   archetype: document
   schema_version: 1
   contract_version: 1
+schema:
+  doc_types:
+    - name: retention_schedule
+      verbatim: false
 content_roots:
   - path: schedules
-    doc_type: retention-schedule
+    doc_type: retention_schedule
 """
 
 SIBLING_BLOCK = """\
@@ -51,14 +59,22 @@ siblings:
 
 DOC = """\
 ---
+schema_version: 1
+corpus: records-retention
+jurisdiction: oregon
 id: schedule-166-300
 title: Retention Schedule 166-300
-doc_type: retention-schedule
+doc_type: retention_schedule
 citation: Schedule 166-300
+issuing_body: Secretary of State Archives Division
 status: current
 source_url: https://example.org/166-300
+source_format: json
 retrieved: 2026-01-01
 content_mode: summary
+last_verified: 2026-01-01
+verified_by: "@test"
+maintainer: "@test"
 ---
 
 ## At a glance
@@ -102,7 +118,7 @@ def make_corpus(root: Path, *, siblings: str = "", index_path: Path | None = Non
     if graph:
         (root / "_meta" / "graph.json").write_text(json.dumps({
             "nodes": [{"id": "schedule-166-300", "title": "Retention Schedule 166-300",
-                       "doc_type": "retention-schedule",
+                       "doc_type": "retention_schedule",
                        "path": "schedules/schedule-166-300.md"}],
             "edges": [],
         }))
@@ -120,24 +136,39 @@ class CrossCorpusTestCase(unittest.TestCase):
         return CorpusFramework(config_mod.load(cfg_path))
 
 
-class TestFixtureValidity(CrossCorpusTestCase):
+class TestFixtureValidity(unittest.TestCase):
     """DOC is this module's worked example of a valid document -- the obvious thing
     for a reader to copy into a corpus, and the literal every `.replace("status:
-    ...", ...)` call site in this file is keyed to. Nothing else in this file
-    parses DOC through the schema, so a value the enum has never admitted can sit
-    here indefinitely without failing anything (corpus-toolkit#168). This is the
-    seam that closes that gap: parse DOC exactly as production does
-    (`parse_frontmatter`) and check its `status` against the bundled schema's own
-    enum -- an independent source of truth, not a copy of the fixture's own claim."""
+    ...", ...)` call site in this file is keyed to. Nothing else in this file ever
+    parsed DOC through the schema, so a value the schema had never admitted could
+    sit here indefinitely without failing anything (corpus-toolkit#168).
 
-    def test_doc_status_is_schema_legal(self):
-        doc_path = self.tmp / "doc.md"
-        doc_path.write_text(DOC)
-        fm, _ = parse_frontmatter(doc_path)
+    This is the seam that closes that gap, run through the exact path production
+    uses: `make_corpus` writes DOC to disk under a real `_meta/corpus.yml`, then
+    `parse_frontmatter` reads it back and `schema_with_extensions(bundled_schema(),
+    config)` builds the schema DOC is actually held to -- `doc_type:
+    retention_schedule` is a corpus-declared extension, not a bundled enum member,
+    so validating against the bare `bundled_schema()` would reject a legal document
+    for the wrong reason. Every field is checked, with the same
+    `jsonschema.Draft202012Validator` class `check_file` builds (`_init_worker`)
+    and runs every corpus document through in production -- not one field picked
+    out and compared by hand.
 
-        allowed = bundled_schema()["properties"]["status"]["enum"]
+    Plain `unittest.TestCase`, not `CrossCorpusTestCase`: this test touches no MCP
+    citation-scheme registry, so it has no use for `clear_schemes()` or the
+    cleanups that reset it."""
 
-        self.assertIn(fm["status"], allowed)
+    def test_doc_is_schema_valid(self):
+        with tempfile.TemporaryDirectory(prefix="corpus-fixture-") as td:
+            repo = Path(td) / "repo"
+            cfg = make_corpus(repo)
+            config = config_mod.load(cfg)
+            fm, _ = parse_frontmatter(repo / "schedules" / "schedule-166-300.md")
+
+            schema = schema_with_extensions(bundled_schema(), config)
+            errors = list(jsonschema.Draft202012Validator(schema).iter_errors(fm))
+
+        self.assertEqual(errors, [], [e.message for e in errors])
 
 
 class TestSiblingResolution(CrossCorpusTestCase):
@@ -271,7 +302,7 @@ class TestSiblingResolution(CrossCorpusTestCase):
         (producer / "schedules" / "schedule-166-300.md").unlink()
         (producer / "schedules" / "schedule-166-999.md").write_text(
             DOC.replace("166-300", "166-999").replace("status: current",
-                                                       "status: suspended"))
+                                                      "status: suspended"))
         produced = index_mod.build_index(config_mod.load(producer / "_meta" / "corpus.yml"))
         idx = self.tmp / "produced-index.json"
         idx.write_text(json.dumps(produced))
@@ -481,7 +512,7 @@ class TestBackwardCompatibility(CrossCorpusTestCase):
 
         self.assertEqual(out["matches"], [{"id": "schedule-166-300",
                                            "title": "Retention Schedule 166-300",
-                                           "doc_type": "retention-schedule"}])
+                                           "doc_type": "retention_schedule"}])
         self.assertNotIn("resolved_via", out)
         self.assertNotIn("sibling_unavailable", out)
         self.assertNotIn("sibling_index_stale", out)
@@ -544,7 +575,7 @@ class TestGenerateIndex(CrossCorpusTestCase):
         # 4th element (v1.19.0): status. "" here because this fixture's graph nodes
         # predate status emission — and "" must read as UNKNOWN, never as current.
         self.assertEqual(written["documents"]["schedule-166-300"],
-                         ["Retention Schedule 166-300", "retention-schedule",
+                         ["Retention Schedule 166-300", "retention_schedule",
                           "schedules/schedule-166-300.md", ""])
         self.assertNotIn("generated", written)      # no wall-clock stamp
         self.assertEqual(self.run_cli("--config", str(cfg), "--output", out_rel, "--check"), 0)
@@ -576,7 +607,7 @@ class TestGenerateIndex(CrossCorpusTestCase):
         written = index_mod.build_index(config)
 
         self.assertEqual(written["documents"]["schedule-166-300"],
-                         ["Retention Schedule 166-300", "retention-schedule",
+                         ["Retention Schedule 166-300", "retention_schedule",
                           "schedules/schedule-166-300.md", "suspended"])
 
     def test_output_is_byte_stable_and_sorted(self):
