@@ -421,6 +421,279 @@ class ChangedSourcesTsvIsPublicSurfaceTest(_DriftRun):
         self.assertEqual(rows[0][3], content_hash(_body(0), "html"))
 
 
+class SourceOutcomesArtifactTest(_DriftRun):
+    """corpus-toolkit#160: `changed-sources.tsv` lists only what changed, so a source that
+    was fetched and held still, a source whose fetch failed, and a source never in this
+    run's scope are byte-identical in that file — none of them appears. `source-outcomes.json`
+    is the companion artifact that records, per source, WHAT HAPPENED, plus the run-level
+    facts (scope, per-group breakdown, totals) that otherwise exist only on stdout.
+
+    THE RED PROOF the issue demands: a run where every fetch failed must be distinguishable,
+    by reading the artifact alone, from a run where nothing changed. Both write an EMPTY
+    `changed-sources.tsv` today — that collapse is the bug this file exists to fix.
+    """
+
+    def _outcomes(self):
+        return json.loads((self.root / "source-outcomes.json").read_text())
+
+    def test_a_wholly_failed_run_is_distinguishable_from_a_no_drift_run(self):
+        # Scenario A: every fetch in the group fails.
+        self.group("oar", 3, baseline="stale")
+        for i in range(3):
+            self.bodies[f"https://example.gov/oar/{i}"] = OSError("HTTP Error 403")
+        self.run_cli()
+        failed_tsv = (self.root / "changed-sources.tsv").read_bytes()
+        failed_report = self._outcomes()
+
+        # Scenario B: a fresh corpus where every fetch succeeds and nothing changed.
+        other_root = Path(tempfile.mkdtemp())
+        (other_root / "_meta" / "sources").mkdir(parents=True)
+        (other_root / "documents").mkdir()
+        (other_root / "_meta" / "corpus.yml").write_text(CORPUS_YML)
+        for i in range(3):
+            url = f"https://example.gov/oar/{i}"
+            self.bodies[url] = _body(i)
+        (other_root / "_meta" / "sources" / "oar.yml").write_text(
+            "\n".join(["sources:"] + [textwrap.dedent(f"""\
+                  - id: "oar-{i}"
+                    url: "https://example.gov/oar/{i}"
+                    format: html
+                    sha256: "{content_hash(_body(i), 'html')}"
+            """).rstrip() for i in range(3)]) + "\n")
+        args = ["corpus-detect-changes", "--config", str(other_root / "_meta" / "corpus.yml")]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", args), \
+             mock.patch.object(changes, "fetch", self._fetch), \
+             redirect_stdout(out), redirect_stderr(err):
+            try:
+                changes.main()
+            except SystemExit:
+                pass
+        clean_tsv = (other_root / "changed-sources.tsv").read_bytes()
+        clean_report = json.loads((other_root / "source-outcomes.json").read_text())
+        shutil.rmtree(other_root, ignore_errors=True)
+
+        # The existing artifact collapses the two runs today — proving the bug is real,
+        # not merely asserting the fix.
+        self.assertEqual(failed_tsv, b"", "sanity: the failed run's tsv is empty")
+        self.assertEqual(clean_tsv, b"", "sanity: the clean run's tsv is empty")
+        self.assertEqual(failed_tsv, clean_tsv,
+                         "sanity: changed-sources.tsv alone cannot tell these apart")
+
+        # The companion artifact must not repeat that collapse.
+        self.assertNotEqual(failed_report, clean_report,
+                            "a wholly-failed run and a no-drift run produced "
+                            "indistinguishable source-outcomes.json artifacts")
+        self.assertEqual(failed_report["totals"]["fetch_failed"], 3)
+        self.assertEqual(failed_report["totals"]["unchanged"], 0)
+        self.assertEqual(clean_report["totals"]["fetch_failed"], 0)
+        self.assertEqual(clean_report["totals"]["unchanged"], 3)
+
+
+class ChangedSourcesTsvByteIdenticalGuaranteeTest(_DriftRun):
+    """The out-of-scope acceptance criterion, proven rather than reasoned about: for the
+    same inputs, `changed-sources.tsv` is byte-identical to what it was BEFORE this
+    artifact existed. `tests/fixtures/changed-sources-golden.tsv` was captured by running
+    this exact scenario against the pre-#160 code, on this branch, before a single line of
+    `source-outcomes.json` support was written — a snapshot, not a value re-derived from
+    the current implementation, so a change to the writer would actually be caught here.
+
+    REGENERATING IT IS NOT AN ORDINARY EDIT. Its worth is entirely that no current code
+    produced it; hand-editing it to match a new writer converts the proof into a
+    restatement of whatever the writer now does. If the tsv format legitimately changes,
+    that is a breaking change to public surface (AGENTS.md), and the honest move is a NEW
+    fixture captured the same way — check the commit that last changed the format out into
+    a scratch directory, run this scenario against it, and commit the bytes it wrote
+    alongside this one, keeping the old file as the record of the old contract."""
+
+    def test_tsv_bytes_are_unchanged_by_the_new_artifact(self):
+        self.group("aaa", 3, baseline="stale")
+        self.group("zzz", 1, baseline="stale")
+        self.group("bbb", 2, baseline="current")
+        self.group("ccc", 2, baseline=None)
+        self.group("ddd", 1, baseline="stale")
+        self.bodies["https://example.gov/ddd/0"] = Exception("boom")
+        self.run_cli("--open-issues")
+        golden = (Path(__file__).parent / "fixtures" / "changed-sources-golden.tsv").read_bytes()
+        actual = (self.root / "changed-sources.tsv").read_bytes()
+        self.assertEqual(actual, golden)
+
+
+class SourceOutcomesVocabularyTest(_DriftRun):
+    """The outcome vocabulary itself: each branch the fetch loop already takes must land
+    on its own, distinct outcome string — collapsing any two recreates the bug one level
+    in (the issue's own words)."""
+
+    def _by_id(self, report, sid):
+        return next(s for s in report["sources"] if s["id"] == sid)
+
+    def test_no_baseline_is_reported_as_such_not_changed_nor_unchanged(self):
+        # Fetch succeeds; the manifest recorded no sha256 at all.
+        self.group("counties", 1, baseline=None)
+        self.run_cli()
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        entry = self._by_id(report, "counties-0")
+        self.assertEqual(entry["outcome"], "no_baseline")
+        self.assertFalse(entry["had_baseline"])
+        # And it must NOT also appear as changed or unchanged.
+        self.assertNotIn(entry["outcome"], ("changed", "unchanged"))
+
+    def test_unreadable_json_and_watch_path_missing_are_distinct_outcomes(self):
+        # A watch-declared json source, hand-written so both watch exceptions are reachable.
+        (self.root / "_meta" / "sources" / "ds.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "ds-bad-json"
+                url: "https://example.gov/ds/bad"
+                format: json
+                watch: ["rowsUpdatedAt"]
+                sha256: "stale"
+              - id: "ds-missing-path"
+                url: "https://example.gov/ds/missing"
+                format: json
+                watch: ["rowsUpdatedAt"]
+                sha256: "stale"
+        """))
+        self.bodies["https://example.gov/ds/bad"] = b"<html>not json</html>"
+        self.bodies["https://example.gov/ds/missing"] = json.dumps({"other": 1}).encode()
+        self.run_cli()
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        self.assertEqual(self._by_id(report, "ds-bad-json")["outcome"], "unreadable_json")
+        self.assertEqual(self._by_id(report, "ds-missing-path")["outcome"],
+                         "watch_path_missing")
+
+    def test_fetch_failed_changed_and_unchanged_are_reported(self):
+        self.group("oar", 1, baseline="stale")     # will change
+        self.group("oam", 1, baseline="current")    # will not change
+        self.group("deq", 1, baseline="stale")
+        self.bodies["https://example.gov/deq/0"] = OSError("HTTP Error 403")
+        self.run_cli()
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        self.assertEqual(self._by_id(report, "oar-0")["outcome"], "changed")
+        self.assertEqual(self._by_id(report, "oam-0")["outcome"], "unchanged")
+        self.assertEqual(self._by_id(report, "deq-0")["outcome"], "fetch_failed")
+
+
+class SourceOutcomesRunLevelFactsTest(_DriftRun):
+    """The run-level facts the issue says exist only on stdout today: in-scope groups, the
+    per-group breakdown, and totals. `source-outcomes.json` must carry all three, counted
+    ONE way -- and the printed pair must be recoverable from them exactly, since the log
+    counts an unseeded source as changed and the artifact does not."""
+
+    def test_groups_in_scope_and_breakdown_match_what_a_full_run_touches(self):
+        self.group("oar", 2, baseline="stale")
+        self.group("oam", 1, baseline="current")
+        _, out, _ = self.run_cli()
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        self.assertEqual(sorted(report["groups_in_scope"]), ["oam", "oar"])
+        self.assertEqual(report["groups"]["oar"]["changed"], 2)
+        self.assertEqual(report["groups"]["oar"]["checked"], 2)
+        self.assertEqual(report["groups"]["oam"]["changed"], 0)
+        self.assertIn("oar 2/2", out, "the artifact's own numbers must match the log's")
+
+    def test_totals_are_readable_without_parsing_the_log(self):
+        self.group("oar", 2, baseline="stale")
+        self.group("oam", 1, baseline="current")
+        self.group("counties", 1, baseline=None)
+        self.run_cli()
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        t = report["totals"]
+        self.assertEqual(t["total"], 4)
+        self.assertEqual(t["changed"], 2)
+        self.assertEqual(t["unchanged"], 1)
+        self.assertEqual(t["no_baseline"], 1)
+        self.assertEqual(t["fetch_failed"], 0)
+
+    def test_the_printed_pair_is_recoverable_from_the_artifact_exactly(self):
+        """The log and the artifact count `changed` differently ON PURPOSE, and the
+        difference is exactly the unseeded sources: `_print_group_breakdown` counts one as
+        changed (`new != old` with `old == ""`), the artifact calls it `no_baseline`.
+
+        The first version of this artifact shipped the log's dict by reference and so held
+        both readings of the word `changed` at once — 2 by one path and 4 by the other, in
+        one file. Deriving the artifact's own numbers fixes that and creates this
+        obligation: the printed pair must still be reconstructible, or a fact the criterion
+        asked for has been lost rather than corrected.
+        """
+        self.group("oar", 2, baseline="stale")
+        self.group("counties", 2, baseline=None)
+        _, out, _ = self.run_cli()
+
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+
+        # THE HALF THAT CATCHES THE CONFLATION. Reconstructing the printed pair cannot: the
+        # log adds the two together, so a `groups` dict that folded `no_baseline` INTO
+        # `changed` reconstructs it perfectly and reads as correct. Only asking the artifact
+        # to hold them apart does, which is the whole point of counting them separately.
+        self.assertEqual(report["groups"]["counties"]["no_baseline"], 2)
+        self.assertEqual(report["groups"]["counties"]["changed"], 0,
+                         "an unseeded source was never compared, so it did not change")
+
+        for group, stats in report["groups"].items():
+            printed = stats["changed"] + stats["no_baseline"]
+            self.assertIn(f"{group} {printed}/{stats['checked']}", out,
+                          "changed + no_baseline must reconstruct the printed pair")
+
+    def test_every_in_scope_source_is_counted_exactly_once(self):
+        """`total` comes from the in-scope count and the six outcomes come from the
+        per-source records; nothing asserted they agree, so a future `continue` that
+        appended no outcome would quietly drop a source from an artifact whose entire
+        purpose is that no source is silently missing."""
+        self.group("oar", 2, baseline="stale")
+        self.group("oam", 1, baseline="current")
+        self.group("counties", 1, baseline=None)
+        self.group("deq", 1, baseline="stale")
+        self.bodies["https://example.gov/deq/0"] = OSError("HTTP Error 403")
+        self.run_cli()
+
+        t = json.loads((self.root / "source-outcomes.json").read_text())["totals"]
+        self.assertEqual(sum(t[o] for o in changes.OUTCOMES), t["total"])
+
+    def test_a_source_that_appended_no_outcome_raises_rather_than_vanishing(self):
+        """The guard behind `test_every_in_scope_source_is_counted_exactly_once`, driven at
+        the builder directly because the fetch loop currently has no branch that skips an
+        append -- which is exactly the state this must survive someone changing."""
+        with self.assertRaises(RuntimeError) as e:
+            changes._source_outcomes_report(
+                [changes.SourceOutcome("oar", "oar-0", "https://example.gov/oar/0",
+                                       "unchanged", True)],
+                n_total=2, group_filter=None)
+        self.assertIn("appended no outcome", str(e.exception))
+
+    def test_an_outcome_outside_the_vocabulary_raises_rather_than_inventing_a_key(self):
+        """`totals[o.outcome] = totals.get(o.outcome, 0) + 1` would have invented a key for
+        a typo, leaving the real outcome reading a confident zero."""
+        with self.assertRaises(RuntimeError) as e:
+            changes._source_outcomes_report(
+                [changes.SourceOutcome("oar", "oar-0", "https://example.gov/oar/0",
+                                       "chagned", True)],
+                n_total=1, group_filter=None)
+        self.assertIn("unknown outcome", str(e.exception))
+
+    def test_group_filter_narrows_scope_and_the_excluded_group_is_simply_absent(self):
+        self.group("oar", 2, baseline="stale")
+        self.group("oam", 2, baseline="stale")
+        self.run_cli("--group", "oar")
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        self.assertEqual(report["group_filter"], ["oar"])
+        self.assertEqual(report["groups_in_scope"], ["oar"])
+        self.assertNotIn("oam", report["groups"])
+        self.assertFalse(any(s["group"] == "oam" for s in report["sources"]),
+                         "a group filtered out by --group must not appear as any outcome, "
+                         "including as if it were unchanged")
+
+    def test_a_wholly_failed_run_still_writes_the_artifact(self):
+        # The run this ticket exists for: every fetch fails, and the artifact must still
+        # exist and describe the run rather than being skipped as "nothing to report".
+        self.group("oar", 3, baseline="stale")
+        for i in range(3):
+            self.bodies[f"https://example.gov/oar/{i}"] = OSError("HTTP Error 403")
+        self.run_cli()
+        self.assertTrue((self.root / "source-outcomes.json").exists())
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        self.assertEqual(report["totals"]["fetch_failed"], 3)
+        self.assertEqual(report["totals"]["total"], 3)
+
+
 class UnseededManifestIsNotDriftTest(_DriftRun):
     """corpus-toolkit#68: a run with no baseline cannot detect drift, and must say so."""
 

@@ -24,7 +24,7 @@ requiredness rules expressed per archetype. Machine form:
 | `retrieved` | ✅ | doc/hybrid docs | ISO date fetched |
 | `source_sha256` | ✅ | doc/hybrid docs | hash of OUR RENDERING of the source (the committed extraction, via hash_snapshot) — never the upstream bytes. It proves the committed text has not drifted since ingest; it CANNOT prove extraction captured everything (that is corpus-verify-extraction's job) |
 | `effective_date`, `last_reviewed`, `source_version` | – | doc/hybrid docs | transcribed exactly as source prints them |
-| `status` | ✅ | all | current, superseded, repealed, proposed, draft |
+| `status` | ✅ | all | current, superseded, repealed, proposed, draft, suspended — `suspended` is in force until recently, out of force now, expected to return: a temporary, usually dated loss of force, as distinct from `repealed`'s permanent one (corpus-toolkit#159) |
 | `content_mode` | ✅ | doc/hybrid docs | `verbatim` for jurisdiction-authored; `summary` only for third-party/external_reference |
 | `content_exception` / `migration_pending` | – | doc/hybrid docs | escape hatches, CI warns |
 | `conversion_notes` | – | doc/hybrid docs | what was stripped/normalized |

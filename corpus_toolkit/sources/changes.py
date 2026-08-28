@@ -47,6 +47,39 @@ and `--record-baseline`, a CI annotation, and a non-zero exit — because removi
 tickets and saying nothing more would report could-not-check as nothing-to-report, which
 is the same rule broken the other way round.
 
+TWO ARTIFACTS, EACH WITH ITS OWN MEANING, BOTH PUBLIC SURFACE the moment this runs inside
+a corpus repo (AGENTS.md: "anything reachable from a corpus repo is public, whether or not
+this repo calls it"). Both are written on every run that reaches the fetch loop —
+including a run that fails every fetch, which is the run each of them exists for — and
+neither is written when `--check-robots` returns before fetching anything.
+
+* `changed-sources.tsv`, at the corpus root. Four tab-separated columns —
+  `id, url, old_sha256, new_sha256` — one row per source whose hash MOVED, in manifest
+  (detection) order. STABLE SINCE ITS INTRODUCTION and pinned by test
+  (`ChangedSourcesTsvIsPublicSurfaceTest`,
+  `ChangedSourcesTsvByteIdenticalGuaranteeTest`): a corpus repo may keep reading it
+  positionally. A source that was compared and held still, one whose fetch failed, and
+  one out of this run's `--group` scope are ALL absent from it, indistinguishably — this
+  file only ever answers "what changed", never "what happened to everything else"
+  (corpus-toolkit#160).
+* `source-outcomes.json`, at the corpus root, new in corpus-toolkit#160 — the companion
+  that answers what the tsv structurally cannot. One `SourceOutcome` per source this run
+  had in scope (`changed`, `unchanged`, `no_baseline`, `fetch_failed`,
+  `unreadable_json`, or `watch_path_missing` — see `SourceOutcome`'s docstring for what
+  each means and why they do not collapse into each other), plus the per-group breakdown
+  and run totals that otherwise exist only on stdout. A source outside `--group` scope is
+  simply absent from it, same as from the tsv, and that absence is documented rather than
+  reported as a seventh outcome (`_source_outcomes_report`'s docstring). STABILITY: the
+  top-level shape (`schema_version`, `mode`, `group_filter`, `groups_in_scope`, `groups`,
+  `totals`, `sources`), the six outcome strings, and the keys of a `groups` entry
+  (`checked` plus one per outcome) are the contract; `schema_version` bumps on a breaking
+  change to any of them. `groups` is the artifact's OWN tally, counted off the same
+  per-source records as `totals` so one file never holds two readings of `changed`; the
+  log's `drift by group (changed/checked)` counts an unseeded source as changed, so the
+  printed pair is `(changed + no_baseline, checked)` and is recoverable exactly. Additive fields on a `groups` entry or a `sources`
+  entry are NOT breaking, the same convention `docs/mcp-interface-contract.md` uses for
+  the MCP tool responses this toolkit also serves.
+
 Exit codes: 0 on a run that could actually detect drift. 1 when a fetch fails under
 `--strict`, when failures are systemic (>20%), when the issue cap truncated the report
 (a capped run is not a clean run), when ANY in-scope source has no recorded baseline (it
@@ -62,6 +95,7 @@ source is still a signal, not an error.
 import argparse
 import copy
 import difflib
+import json
 import os
 import re
 import shutil
@@ -731,6 +765,121 @@ class ChangedSource(NamedTuple):
     new: str
 
 
+class SourceOutcome(NamedTuple):
+    """WHAT HAPPENED to one in-scope source this run — the record `source-outcomes.json`
+    (corpus-toolkit#160) writes one of per source, so that "was this compared" never has to
+    be inferred from a source's absence the way `changed-sources.tsv` alone requires.
+
+    `outcome` is ONE OF SIX MUTUALLY EXCLUSIVE STRINGS, chosen the same way the fetch loop
+    already branches — this does not re-decide anything, it names the branch that was
+    already taken:
+
+    * `"changed"`   — fetched, compared to a recorded baseline, and the hash moved.
+    * `"unchanged"` — fetched, compared to a recorded baseline, and it did not move.
+    * `"no_baseline"` — fetched successfully, but the manifest recorded no `sha256:` to
+      compare it against (ADR 0010: an uncompared source is not a changed source). NOT the
+      same set as `changed-sources.tsv`'s empty-`old` rows, which also include a
+      no-baseline source whose fetch then failed — see `had_baseline` below for that fact.
+    * `"fetch_failed"` — the fetch itself raised.
+    * `"unreadable_json"` — a `watch`-declared source returned a body that will not parse.
+    * `"watch_path_missing"` — a `watch`-declared source parsed, but a declared path is gone.
+
+    `had_baseline` rides along SEPARATELY from `outcome`, because a source can be both
+    unseeded AND fetch-failed — the fetch loop's own comment on `stats["uncompared"]` notes
+    exactly this — and collapsing that into a single field would force a choice between two
+    true facts. `outcome` says why nothing was compared THIS run; `had_baseline` says
+    whether a comparison was even possible had the fetch succeeded.
+    """
+    group: str
+    id: str
+    url: str
+    outcome: str
+    had_baseline: bool
+
+
+OUTCOMES = ("changed", "unchanged", "no_baseline", "fetch_failed",
+            "unreadable_json", "watch_path_missing")
+"""The outcome vocabulary, declared once (corpus-toolkit#160).
+
+A tuple rather than six string literals scattered across the builder, the docstrings and the
+glossary: `totals` is initialised FROM it, and an outcome outside it raises instead of
+inventing a key that a consumer would then read as a real count of zero for the real one.
+"""
+
+
+def _source_outcomes_report(outcomes: list[SourceOutcome], n_total: int,
+                            group_filter: list[str] | None, mode: str | None = None) -> dict:
+    """The JSON payload `source-outcomes.json` writes (corpus-toolkit#160).
+
+    Three things a consumer of `changed-sources.tsv` alone cannot get, together in one
+    place:
+
+    * `sources` — every in-scope source with its outcome, so "was this compared" is a
+      lookup rather than an inference from absence. `changed-sources.tsv` only ever lists
+      what changed; a source that was fetched and held still, one whose fetch failed, and
+      one this run never reached are all equally absent from it.
+    * `groups` and `totals` — BOTH counted off `outcomes`, in one pass, so the artifact
+      holds ONE tally. The first version shipped `per_group` by reference instead, and that
+      dict counts a no-baseline source as CHANGED (`stats["changed"]` fires on `new != old`
+      with `old == ""`), while `totals` counted the same source as `no_baseline`. Two
+      consumers reading one file got 2 and 4 for the same run — the corpus-toolkit#67
+      double-tally shape this docstring claimed to guard against, reproduced inside the
+      guard.
+
+    WHAT THE LOG PRINTS IS RECOVERABLE, EXACTLY, AND IS NOT THE SAME NUMBER.
+    `_print_group_breakdown`'s `drift by group (changed/checked)` counts an unseeded source
+    in its changed figure, so for any group the printed pair is
+    `(changed + no_baseline, checked)`. Stated here rather than left for a reader to
+    discover from a mismatch, and asserted in `tests/test_drift_reporting.py` so the two
+    cannot drift apart silently. The artifact keeps the outcome-based reading because
+    `changed` naming two different sets inside one file is the defect, not the fix.
+
+    `groups_in_scope` is the groups that actually yielded an in-scope source, which is not
+    always `group_filter` verbatim: a `--group` naming a typo'd group yields none at all,
+    and that emptiness is itself the finding (`nothing_checked` in `main`). `group_filter`
+    is kept alongside it, unmodified, so a reader can see what was ASKED for as well as what
+    was FOUND.
+
+    `mode` names the run that wrote this. A `--record-baseline seed` run writes the artifact
+    BEFORE it seeds, so every source in it reads `no_baseline` — true at the moment of
+    writing and thoroughly misleading afterwards, with nothing in the file to say the run
+    existed to fix exactly that.
+
+    A source outside `group_filter` is simply never in `outcomes` — filtered before this
+    function is called, by the same filter `manifest_sources` applies in `main`. It is
+    absent from `sources` and uncounted, and that is documented in this module's docstring
+    rather than invented as a seventh outcome string: an out-of-scope source was never
+    observed this run, which is a different fact from any of the six outcomes, all of which
+    describe an observation that was attempted.
+    """
+    if len(outcomes) != n_total:
+        # LOUD, NOT SILENT. Every `continue` in the fetch loop appends exactly one outcome;
+        # a future branch that forgets would leave a source uncounted in an artifact whose
+        # whole purpose is that no source is silently missing from it.
+        raise RuntimeError(
+            f"source-outcomes: {len(outcomes)} outcomes for {n_total} in-scope sources — "
+            f"a fetch-loop branch appended no outcome")
+    totals = {"total": n_total, **{o: 0 for o in OUTCOMES}}
+    groups: dict[str, dict] = {}
+    for o in outcomes:
+        if o.outcome not in totals:
+            raise RuntimeError(f"source-outcomes: unknown outcome {o.outcome!r} for {o.id}")
+        totals[o.outcome] += 1
+        g = groups.setdefault(o.group, {"checked": 0, **{n: 0 for n in OUTCOMES}})
+        g["checked"] += 1
+        g[o.outcome] += 1
+    return {
+        "schema_version": 1,
+        "mode": mode,
+        "group_filter": list(group_filter) if group_filter else None,
+        "groups_in_scope": sorted(groups),
+        "groups": groups,
+        "totals": totals,
+        "sources": [{"group": o.group, "id": o.id, "url": o.url, "outcome": o.outcome,
+                     "had_baseline": o.had_baseline} for o in outcomes],
+    }
+
+
 def _count_by_group(entries: list[ChangedSource]) -> dict[str, int]:
     """How many of `entries` fall in each group.
 
@@ -785,7 +934,7 @@ def _tickets_in_spend_order(changed: list[ChangedSource]) -> list[ChangedSource]
     MAX_ISSUES_PER_RUN` sources unreported and still exits non-zero; the dropped ones are
     now the tail of the largest group instead of an arbitrary prefix.
     """
-    ticketable = [c for c in changed if _was_compared(c)]
+    ticketable = [c for c in changed if _was_compared(c.old)]
     # COUNTED OFF `ticketable`, not read from `per_group["changed"]` and not derived from
     # it either. Two reasons, and the second is the one that bites. First, the sort key is
     # "how many tickets will this group buy", and after the filter that is no longer the
@@ -800,8 +949,13 @@ def _tickets_in_spend_order(changed: list[ChangedSource]) -> list[ChangedSource]
     return sorted(ticketable, key=lambda c: (per_group_ticketable[c.group], c.group))
 
 
-def _was_compared(c: ChangedSource) -> bool:
+def _was_compared(old: str) -> bool:
     """Whether this source was compared to a recorded baseline at all.
+
+    TAKES THE RECORDED BASELINE, not a `ChangedSource`, so the fetch loop can read the rule
+    too. It could not before: the loop has `old` in hand and no ChangedSource yet, so
+    `source-outcomes.json` re-implemented the test inline and this docstring's claim to be
+    the one place stopped being true the moment it did (corpus-toolkit#160 review).
 
     ADR 0010'S PER-SOURCE RULE, in one place. "An uncompared source is not a changed
     source" is read twice — once to decide whether a ticket may be filed for it
@@ -814,7 +968,7 @@ def _was_compared(c: ChangedSource) -> bool:
     `old` is the hash the manifest recorded, so an empty one means the fetched bytes were
     compared against nothing. It is a fact about the manifest, not about upstream.
     """
-    return bool(c.old)
+    return bool(old)
 
 
 class GroupFinding(NamedTuple):
@@ -855,7 +1009,7 @@ def _group_drift_findings(changed: list[ChangedSource],
     """
     by_group: dict[str, list[str]] = {}
     for c in changed:
-        if _was_compared(c):
+        if _was_compared(c.old):
             by_group.setdefault(c.group, []).append(c.id)
     out = []
     for g, ids in sorted(by_group.items()):
@@ -1015,6 +1169,10 @@ def main():
     pattern_bytes = [0] * len(patterns)
     n_normalizable = normalizable_bytes = n_normalizable_in_scope = 0
     changed, failed, watch_failed, unreadable = [], [], [], []
+    # One SourceOutcome per in-scope source, appended in the same branch that already
+    # decides what happened to it (corpus-toolkit#160) — see SourceOutcome's docstring for
+    # the vocabulary. This is `source-outcomes.json`'s per-source list, in detection order.
+    outcomes: list[SourceOutcome] = []
     # (group, id) -> how many ENTRIES with that key were not compared. Per entry, because
     # only the fetch loop knows which of two duplicate entries succeeded.
     uncompared_counts: dict[tuple[str, str], int] = {}
@@ -1113,6 +1271,7 @@ def main():
             unreadable.append(sid)
             stats["uncompared"] += 1
             uncompared_counts[(gname, sid)] = uncompared_counts.get((gname, sid), 0) + 1
+            outcomes.append(SourceOutcome(gname, sid, url, "unreadable_json", bool(old)))
             print(f"WATCH BODY UNREADABLE {sid}: {url} ({e})", file=sys.stderr)
             continue
         except WatchedPathMissing as e:
@@ -1129,6 +1288,7 @@ def main():
             watch_failed.append(sid)
             stats["uncompared"] += 1
             uncompared_counts[(gname, sid)] = uncompared_counts.get((gname, sid), 0) + 1
+            outcomes.append(SourceOutcome(gname, sid, url, "watch_path_missing", bool(old)))
             print(f"WATCH PATH MISSING {sid}: {url} ({e})", file=sys.stderr)
             continue
         except Exception as e:
@@ -1140,6 +1300,7 @@ def main():
             # 52/52 off a broken fetch -- so it predates `watch` and is fixed alongside it.
             stats["uncompared"] += 1
             uncompared_counts[(gname, sid)] = uncompared_counts.get((gname, sid), 0) + 1
+            outcomes.append(SourceOutcome(gname, sid, url, "fetch_failed", bool(old)))
             print(f"FETCH FAILED {sid}: {url} ({e})")
             continue
         fetched[(gname, sid)] = new
@@ -1158,12 +1319,38 @@ def main():
             changed.append(ChangedSource(gname, sid, url, old, new))
             stats["changed"] += 1
             print(f"CHANGED  {sid}: {old[:12]}… -> {new[:12]}…")
+        # `old` decides the outcome BEFORE `new != old` does. An unseeded source (`old ==
+        # ""`) compares unequal to everything it fetches, by construction — that is
+        # corpus-toolkit#145's bug, not a genuine comparison — so it is reported
+        # `"no_baseline"` here even though it just fed `changed` above. ADR 0010's rule
+        # ("an uncompared source is not a changed source") applies to this artifact's
+        # outcome exactly as it already applies to tickets and group findings; it does not
+        # touch `changed-sources.tsv`, which keeps its own long-documented meaning.
+        outcomes.append(SourceOutcome(
+            gname, sid, url,
+            ("changed" if new != old else "unchanged") if _was_compared(old)
+            else "no_baseline",
+            _was_compared(old)))
 
     out = config.root / "changed-sources.tsv"
     # Detection order, i.e. manifest order — unchanged by #69's reordering, which applies
     # to the capped issue spend only. The tsv is not capped, so its order carries no
     # priority meaning and re-sorting it would churn a file consumers diff.
     out.write_text("".join(f"{c.id}\t{c.url}\t{c.old}\t{c.new}\n" for c in changed))
+
+    # THE COMPANION ARTIFACT (corpus-toolkit#160), written unconditionally and BESIDE the
+    # tsv above rather than instead of it — `changed-sources.tsv` keeps its name, its four
+    # columns, its rows and their order, byte-for-byte, for the same inputs. Written here,
+    # not gated behind `--open-issues` or `args.record_baseline`, because a run that failed
+    # every fetch is exactly the run this artifact exists for (a wholly-failed run and a
+    # clean run write the SAME empty tsv today — that collapse is the bug). Not written
+    # only when `--check-robots` returns before any source is ever fetched, since there are
+    # no observations yet to report.
+    (config.root / "source-outcomes.json").write_text(
+        json.dumps(_source_outcomes_report(
+            outcomes, n_total, args.group,
+            mode=f"record-baseline:{args.record_baseline}" if args.record_baseline else None),
+                   indent=2, sort_keys=True) + "\n")
 
     recorded = None
     if args.record_baseline:

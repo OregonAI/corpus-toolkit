@@ -348,8 +348,12 @@ class RetrievalBackend(Protocol):
         `unexpected keyword argument 'con'`. An implementation free to ignore it should
         still accept it.
 
-        OPTIONAL; see REQUIRED_BACKEND_METHODS. A backend that cannot answer it simply omits it, and
-        `issuing_body_profile` is not registered for that corpus.
+        OPTIONAL; see REQUIRED_BACKEND_METHODS. A CAPABILITY gate, not an ability one, and
+        the distinction is the same one corpus-toolkit#158 corrected for
+        `documents_for_slug`: registration asks whether the method EXISTS, and `FileBackend`
+        defines it, so every file-backed corpus registers `issuing_body_profile` whether or
+        not it has anything to attribute. Only a backend that does not define the method at
+        all is left without the tool.
 
         It exists so the question stops being asked BEHIND the seam. `issuing_body_profile`
         used to reach through `ensure_index()` and run raw SQL against `docs`, which is
@@ -378,10 +382,14 @@ class RetrievalBackend(Protocol):
         would let a caller read one as complete and the other as a floor. Pass the open
         handle (`holdings_for(slug, con=con)`) so both describe one index read.
 
-        OPTIONAL, like `holdings_for`. A backend that cannot answer omits it and
-        `documents_by_agency` is not registered -- but a backend that implements it with a
-        DIFFERENT shape passes that gate and fails on every call, so the framework checks
-        the shape and names the backend rather than raising KeyError or TypeError.
+        OPTIONAL, like `holdings_for`: the registration gate is a genuine capability check,
+        `callable(getattr(fw.backend, "documents_for_slug", None))`, so a hypothetical
+        backend that omits this method does not get `documents_by_agency` registered. But
+        `FileBackend` -- what every corpus on the platform runs -- defines it, so no LIVE
+        corpus exercises that narrowing; a backend that implements it with a DIFFERENT shape
+        passes the gate and fails on every call instead, so the framework checks the shape
+        and names the backend rather than raising KeyError or TypeError (corpus-toolkit#158,
+        ADR-0011).
 
         Unlike `issuing_body_profile`, the tool over this does NOT additionally require a
         registry: "which of my documents carry this slug" needs none. It exists so an
@@ -970,10 +978,19 @@ class FileBackend:
         ORDERED BY id, and that is a contract, not an accident: a caller paginating with
         `offset` against an unordered scan silently sees documents twice and misses others.
 
-        OPTIONAL, like `holdings_for`, and gated the same way -- a backend that cannot
-        answer omits it and `documents_by_agency` is not registered. Unlike
-        `issuing_body_profile` it does NOT additionally require a registry: this question is
-        "which of my documents carry this slug", which needs no registry to answer. Whether
+        OPTIONAL, like `holdings_for` -- but on THIS backend it is not actually optional,
+        since `FileBackend` is what every corpus on the platform runs and this method is
+        right here. The gate is a genuine capability check
+        (`callable(getattr(fw.backend, "documents_for_slug", None))`), not a narrowing any
+        corpus currently exercises: it exists for a corpus that supplies its OWN
+        `retrieval_module` and omits this method, which then does not get
+        `documents_by_agency` registered rather than getting one that raises on every call.
+        Every file-backed corpus satisfies it (corpus-toolkit#158, ADR-0011) -- registration
+        does not turn on whether a corpus attributes any document to any issuing body; that
+        is `attribution.can_answer`'s question, answered inside the response, not by
+        withholding the tool. Unlike `issuing_body_profile` it does NOT additionally require
+        a registry: this question is "which of my documents carry this slug", which needs
+        no registry to answer. Whether
         the slug names a real agency is a separate question, and a corpus with no registry
         reports it as UNKNOWN rather than guessing -- the two corpora `agency_profile` needs
         (oregon-kpm, oregon-audits) declare no registry, so requiring one would leave this

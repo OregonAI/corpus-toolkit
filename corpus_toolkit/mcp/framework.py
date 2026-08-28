@@ -281,6 +281,25 @@ def _name_match(entry: dict, fields, query: str) -> tuple[str, str] | None:
     return None
 
 
+def _can_answer(unattributed: int, in_corpus: int) -> "bool | str":
+    """Whether a corpus attributes ANY document to an issuing body (corpus-toolkit#158).
+
+    THE CORPUS'S OWN COUNTS, NEVER `basis`. Two corpora report the identical `basis`
+    string while one attributes some documents and the other attributes none; only the
+    counts tell them apart, which is why the discriminator lives here and not in prose.
+
+    AN EMPTY INDEX IS `"unknown"`, NOT `False`. `unattributed >= in_corpus` is true of a
+    corpus holding nothing (0 >= 0), and reading that as "attributes nothing" states a
+    measurement nobody took -- the collapse ADR-0011 and CONTEXT.md's outranking rule both
+    forbid. `complete` already answers an empty index with `None`, and the contract already
+    calls that "unknown, not none"; two fields in one block reading the same evidence
+    opposite ways is the defect, not a nuance.
+    """
+    if in_corpus == 0:
+        return "unknown"
+    return unattributed < in_corpus
+
+
 class CorpusFramework:
     def __init__(self, config: CorpusConfig):
         self.config = config
@@ -1434,6 +1453,17 @@ class CorpusFramework:
                   "coverage: {...}}. See RetrievalBackend.documents_for_slug.")
         _counts, attribution = self._holdings(raw)
         known = self.config.issuing_body_slugs
+        # WITHHELD, NOT ZEROED (corpus-toolkit#158, ADR-0011). A corpus that attributes NO
+        # document to any issuing body answered a clean `total: 0` for every slug that
+        # exists, indistinguishable from a corpus that attributes normally and genuinely
+        # holds nothing for this one. `attribution.can_answer` names the difference;
+        # `total: null` is what stops a caller reading `total` alone from missing it, since
+        # `documents` was already `[]` in both cases and could not carry the distinction on
+        # its own.
+        # SUBSCRIPT, NOT `.get`. Every `_holdings` return path sets `can_answer`; a fifth
+        # path that forgot to would raise here rather than quietly serving the number this
+        # line exists to withhold.
+        total = None if attribution["can_answer"] is False else raw["total"]
         return self.with_envelope({
             "slug": slug,
             # NULL, NOT FALSE, where there is no registry to ask. False means "checked, and
@@ -1442,7 +1472,7 @@ class CorpusFramework:
             # first tells a caller its slug is wrong on every corpus that has no registry.
             "slug_in_registry": None if known is None else slug in known,
             "documents": raw["documents"],
-            "total": raw["total"],
+            "total": total,
             "returned": len(raw["documents"]),
             "limit": limit,
             "offset": offset,
@@ -1480,6 +1510,18 @@ class CorpusFramework:
         without the counts, or an index holding nothing at all. Unknown is not none, and a
         half-measurement is not a measurement; collapsing those is the one thing CONTEXT.md
         says a new mechanism may not do.
+
+        `can_answer` answers a DIFFERENT question from `complete` (corpus-toolkit#158,
+        ADR-0011): not "is this count the whole answer" but "can this corpus attribute
+        anything to anybody at all". A corpus can be fully non-attributing and still
+        correctly report `complete: false` for every slug -- `complete` says the count is a
+        floor, which is true whether the floor is 3 documents or 0. `can_answer` is `False`
+        exactly when `documents_with_no_issuing_body >= documents_in_corpus`: the corpus's
+        own counts, never `basis`, because two corpora can share a `basis` string while one
+        can answer and the other cannot. `"unknown"` -- a third value, not `None`, so it
+        cannot silently collapse into `False` the way two falsy values would -- when those
+        two counts are themselves not in this attribution block, which happens on the
+        DISAGREEMENT and MISSING-COVERAGE paths below.
         """
         counts = raw.get("counts") if isinstance(raw.get("counts"), dict) else raw
         coverage = raw.get("coverage") if isinstance(raw.get("coverage"), dict) else None
@@ -1555,6 +1597,7 @@ class CorpusFramework:
                         "is UNKNOWN — not yes")
             return counts, {
                 "complete": False if (in_corpus and unattributed) else None,
+                "can_answer": _can_answer(unattributed, in_corpus),
                 "basis": basis,
                 "documents_in_corpus": in_corpus,
                 "documents_with_no_issuing_body": unattributed,
@@ -1573,6 +1616,12 @@ class CorpusFramework:
                 and any(isinstance(coverage.get(k), int) for k in registry_pair)):
             return counts, {
                 "complete": None,
+                # UNKNOWN, NOT FALSE. The two counts `can_answer` needs are not in this
+                # attribution block at all -- a disagreement is a fault about WHAT the
+                # backend measured, not a measurement of attribution -- so folding it into
+                # `False` would report "attributes nothing" about a corpus this branch has
+                # made no claim about (corpus-toolkit#158).
+                "can_answer": "unknown",
                 "basis": basis,
                 "note": (f"this corpus's backend ({self.backend.name}) reported documents "
                          f"matched against an issuing-body registry, but this corpus "
@@ -1589,6 +1638,13 @@ class CorpusFramework:
                             if not isinstance(coverage.get(k), int)))
             return counts, {
                 "complete": None,
+                # UNKNOWN, NOT FALSE, for the same reason: a partial or absent coverage
+                # report has not measured `documents_with_no_issuing_body` against
+                # `documents_in_corpus`, so there is nothing here for `can_answer` to read
+                # (corpus-toolkit#158). A half-measurement is not a measurement, and treating
+                # it as `False` would be exactly the collapse CONTEXT.md forbids, one field
+                # over.
+                "can_answer": "unknown",
                 "basis": basis,
                 "note": (f"this corpus's backend ({self.backend.name}) {missing}, so "
                          "whether it holds documents this count could not see is "
@@ -1618,6 +1674,7 @@ class CorpusFramework:
             # `statewide` documents made `complete` False permanently, for a reason that
             # was 99.997% legitimate.
             "complete": None if total == 0 else (unmatched == 0 and unattributed == 0),
+            "can_answer": _can_answer(unattributed, total),
             "basis": basis,
             "documents_in_corpus": total,
             "documents_matched_to_a_registry_entry": matched,

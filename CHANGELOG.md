@@ -17,6 +17,80 @@ it can break you.
 
 ## Unreleased
 
+### Added — `source-outcomes.json`, a companion drift artifact naming what happened to every in-scope source (corpus-toolkit#160)
+
+**No action required, and `changed-sources.tsv` is unaffected — same name, same four
+columns, same rows, same order, byte-identical for the same inputs, now pinned by test.**
+The tsv lists only what changed. A source that was fetched and held still, one whose
+fetch failed, and one outside this run's `--group` scope are all equally absent from it —
+so a run in which EVERY fetch failed writes the same empty file a run with no drift does.
+Both stdout, and every corpus repo that reads the tsv, told those two runs apart by
+inference or not at all.
+
+`source-outcomes.json`, written beside the tsv at the corpus root on every run that
+reaches the fetch loop — including a wholly-failed one, which is the run it matters most
+for — records one outcome per in-scope source: `changed`, `unchanged`, `no_baseline`
+(fetched, but the manifest recorded no `sha256:` to compare against — ADR 0010's "an
+uncompared source is not a changed source" now applies to this artifact exactly as it
+already applies to tickets and group findings), `fetch_failed`, `unreadable_json`, or
+`watch_path_missing`. Six strings, not five and not seven: collapsing any two of the
+first three recreates the bug this file exists to fix one level in. Alongside the
+per-source list, it carries the run-level facts that previously existed only on stdout —
+which groups were in scope, the per-group breakdown, the totals, and `mode` — which names
+a `--record-baseline` run, since that one writes the artifact BEFORE it seeds and so reports
+every source `no_baseline` at the moment it is about to stop being true.
+
+**`groups` is the artifact's own tally**, counted off the same per-source records as
+`totals`. It is deliberately NOT the log's numbers: the log's `drift by group
+(changed/checked)` counts an unseeded source as *changed*, and shipping that dict verbatim
+put two readings of the word `changed` in one file — 2 by one path and 4 by the other on a
+run with two unseeded sources. The printed pair stays recoverable exactly, as
+`(changed + no_baseline, checked)`, and a test asserts it so the two cannot drift apart.
+
+JSON, not a fifth tsv column: run-level facts have nowhere to live in a column, and a
+column only works if the tsv starts listing every source, at which point its name means
+the opposite of its contents. The reasoning is recorded in full on corpus-toolkit#160's
+triage comment.
+
+Documented in `corpus_toolkit/sources/changes.py`'s module docstring, where the existing
+artifact already was, including the new file's stability guarantee: the top-level shape
+and the six outcome strings are the contract, additive fields are not breaking, and a
+breaking change bumps `schema_version`.
+
+### Added — `documents_by_agency` reports `attribution.can_answer` and narrows `total` to `null` for a corpus that attributes nothing (corpus-toolkit#158, ADR-0011)
+
+**This can break a consumer that does arithmetic on `total`.** `total` is now `null`, not a
+number, for a corpus that attributes nothing — a narrowing of a field the MCP interface
+contract describes as "the number of matches". Read `attribution.can_answer` first.
+`can_answer` itself is additive and stays contract v1. A corpus that attributes no document to any issuing body — measured on the
+platform: oregon-budget, oregon-legislature, federal-reference — answered a clean,
+confident `total: 0` for every slug that exists, indistinguishable from a corpus that
+attributes normally and genuinely holds nothing for that one agency. `can_answer: true |
+false | "unknown"` names the difference, computed from the corpus's own coverage counts
+(`documents_with_no_issuing_body >= documents_in_corpus`), never from `basis` prose. `total`
+is withheld (`null`) only when `can_answer` is `false`; a corpus that attributes some
+documents and holds none for one slug still answers `can_answer: true, total: 0` — that
+finding is unchanged. The registration gate is unchanged: every corpus keeps advertising
+the tool.
+
+### Added — `suspended` names a temporary loss of force in the document `status` enum (corpus-toolkit#159)
+
+**Additive — no committed document changes its value.** The five original `status` values mix
+two axes: which version of the text this is (current, superseded, proposed, draft), and
+force, where only `repealed` spoke — a *permanent* loss of it. Oregon suspends
+administrative rules with an end date the rule's own text prints, and a corpus holding one
+had to pick `repealed` (claims a permanence the text disproves), `current` (claims force
+the publisher just withdrew), or `superseded` (claims a replacement that does not exist) —
+three wrong answers.
+
+`suspended` means in force until recently, out of force now, expected to return. It travels
+wherever `status` already did without any structural change: the published index's row
+already carries `status` as an opaque string in its 4th element, and a sibling's not-current
+rendering already surfaces anything but `current` by name — both confirmed by test, not
+changed. Modelling force as its own field, separate from the version axis, was considered
+and deliberately not done here; the enum already mixes the two axes and this does not make
+that worse.
+
 ### Added — a corpus may supply an intermediate a server fails to serve (ADR 0012, executive-regulatory-frameworks#140)
 
 **Opt-in, and does nothing until a corpus declares one.** Some government hosts send their
