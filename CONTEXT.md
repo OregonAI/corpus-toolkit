@@ -68,6 +68,18 @@ empty baselines rather than a change at all (ADR 0010). It accompanies the indiv
 tickets and never replaces them.
 _Avoid_: bulk finding, group issue — both read as a diagnosis of the group
 
+**Source outcome** — the classification `source-outcomes.json` records for every source a
+drift run had in scope: `changed`, `unchanged`, `no_baseline`, `fetch_failed`,
+`unreadable_json`, or `watch_path_missing`. Introduced because `changed-sources.tsv`
+reports only `changed` — a source that was compared and held still, one whose fetch
+failed, and one out of this run's scope were all equally absent from any artifact, so a
+run in which every fetch failed and a run with no drift wrote the same empty file
+(corpus-toolkit#160). `no_baseline` is its own outcome rather than `changed` or
+`unchanged` for the same reason ADR 0010 excludes an unseeded source from a group drift
+finding: a source compared against an empty baseline was not compared at all.
+_Avoid_: "not compared" as a synonym for any single one of the non-`changed` outcomes —
+the whole point of naming six is that a consumer no longer has to guess which one applied.
+
 ## Contracts
 
 **Corpus contract** — `docs/mcp-interface-contract.md`. Seven tools, the response conventions,
@@ -130,6 +142,8 @@ _Avoid_: "boundary" — overloaded with DDD's bounded context.
 **"Could not check" is never reported as "is not there."** It appears as response convention 5,
 as `sibling_unavailable`, as `no_graph` vs `not_in_graph`, as `status: ""` meaning unknown and
 never `current`, as `attribution.can_answer` refusing to let "attributes nothing" wear the
-shape of "holds none", and as the reason a healthcheck that cannot fail is treated as worse
-than no healthcheck. If a new mechanism collapses those two answers, it is wrong regardless of what it
-is called.
+shape of "holds none", as the reason a healthcheck that cannot fail is treated as worse
+than no healthcheck, and as a source outcome refusing to let `fetch_failed` wear the shape of
+`unchanged` — the two states `changed-sources.tsv` could not tell apart, because a source
+absent from it means either one (corpus-toolkit#160). If a new mechanism collapses those two
+answers, it is wrong regardless of what it is called.

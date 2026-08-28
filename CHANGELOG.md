@@ -17,6 +17,38 @@ it can break you.
 
 ## Unreleased
 
+### Added — `source-outcomes.json`, a companion drift artifact naming what happened to every in-scope source (corpus-toolkit#160)
+
+**No action required, and `changed-sources.tsv` is unaffected — same name, same four
+columns, same rows, same order, byte-identical for the same inputs, now pinned by test.**
+The tsv lists only what changed. A source that was fetched and held still, one whose
+fetch failed, and one outside this run's `--group` scope are all equally absent from it —
+so a run in which EVERY fetch failed writes the same empty file a run with no drift does.
+Both stdout, and every corpus repo that reads the tsv, told those two runs apart by
+inference or not at all.
+
+`source-outcomes.json`, written beside the tsv at the corpus root on every run that
+reaches the fetch loop — including a wholly-failed one, which is the run it matters most
+for — records one outcome per in-scope source: `changed`, `unchanged`, `no_baseline`
+(fetched, but the manifest recorded no `sha256:` to compare against — ADR 0010's "an
+uncompared source is not a changed source" now applies to this artifact exactly as it
+already applies to tickets and group findings), `fetch_failed`, `unreadable_json`, or
+`watch_path_missing`. Six strings, not five and not seven: collapsing any two of the
+first three recreates the bug this file exists to fix one level in. Alongside the
+per-source list, it carries the run-level facts that previously existed only on stdout —
+which groups were in scope, the per-group changed/checked breakdown (the SAME numbers the
+log's `drift by group` line prints, not a second tally), and totals.
+
+JSON, not a fifth tsv column: run-level facts have nowhere to live in a column, and a
+column only works if the tsv starts listing every source, at which point its name means
+the opposite of its contents. The reasoning is recorded in full on corpus-toolkit#160's
+triage comment.
+
+Documented in `corpus_toolkit/sources/changes.py`'s module docstring, where the existing
+artifact already was, including the new file's stability guarantee: the top-level shape
+and the six outcome strings are the contract, additive fields are not breaking, and a
+breaking change bumps `schema_version`.
+
 ### Added — `documents_by_agency` reports `attribution.can_answer` and narrows `total` to `null` for a corpus that attributes nothing (corpus-toolkit#158, ADR-0011)
 
 **This can break a consumer that does arithmetic on `total`.** `total` is now `null`, not a
