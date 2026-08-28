@@ -36,7 +36,9 @@ python, system store + the intermediate          HTTP 200, chain verified
 python, that intermediate ALONE, no root         REFUSED
 ```
 
-Four refusals keep it narrow: a **self-signed** certificate in a supplement is rejected (that
+Five refusals keep it narrow: a **private key** in a supplement fails the run outright (a
+corpus adopting this punches a hole in a `*.pem` gitignore rule that exists to keep tunnel
+credentials out, so this is the other half of that hole), a **self-signed** certificate is rejected (that
 would be a new trust anchor), the **filename is the host** and is mounted on `https://<host>`
 alone, a certificate within **30 days of expiry** is rejected before it can fail a fetch, and
 every run **prints which supplements it loaded**. `tls.supplement_still_needed()` re-checks

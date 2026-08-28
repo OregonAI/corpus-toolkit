@@ -100,7 +100,17 @@ def _decode(path: Path) -> list[dict]:
 
 
 def _check(path: Path, now: datetime) -> None:
-    """Refuse a supplement that would widen trust, or that is spent."""
+    """Refuse a supplement that would widen trust, that is spent, or that holds a secret."""
+    # A PRIVATE KEY HAS NO BUSINESS HERE, and saying so is not paranoia about a mistake
+    # nobody would make. A corpus adopting this feature has to punch a hole in a `*.pem`
+    # gitignore rule that exists to keep tunnel credentials out of the repository
+    # (executive-regulatory-frameworks/.gitignore). The hole is narrowed to one directory;
+    # this is the other half, and it fails the run rather than warning, because a key that
+    # reached this directory has already been committed by the time anyone reads a warning.
+    if b"PRIVATE KEY" in path.read_bytes():
+        raise SupplementRefused(
+            f"{path.name}: contains a PRIVATE KEY block. A chain supplement is a public CA "
+            f"certificate. Treat this key as compromised and rotate it.")
     for cert in _decode(path):
         # SELF-SIGNED IS THE ONE REFUSAL THIS MODULE EXISTS TO MAKE. A self-signed
         # certificate is a root, and a root in here is a new trust anchor -- the thing the

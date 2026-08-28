@@ -118,3 +118,15 @@ def test_still_needed_says_nothing_when_the_failure_was_not_verification(monkeyp
 
     monkeypatch.setattr(httpx, "Client", _Client)
     assert tls.supplement_still_needed("h.example.gov", "https://h.example.gov/x") is None
+
+
+def test_a_private_key_in_a_supplement_is_refused(tmp_path):
+    """Adopting this feature means punching a hole in a `*.pem` gitignore rule. This is the
+    other half of that hole: a key that reached the directory fails the run outright."""
+    meta = _supplement(tmp_path, "example.gov.pem")
+    path = meta / "tls-chain" / "example.gov.pem"
+    path.write_text("-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n"
+                    + path.read_text())
+    with pytest.raises(tls.SupplementRefused) as e:
+        tls.load(meta, now=BEFORE_EXPIRY)
+    assert "PRIVATE KEY" in str(e.value)
