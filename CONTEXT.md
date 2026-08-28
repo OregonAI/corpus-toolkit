@@ -120,16 +120,6 @@ no matter what it is named.
 whether `mcp` 1.x or 2.x is installed. Used on both sides: by corpus servers, and by the
 consumer tier — see [ADR-0006](docs/adr/0006-one-package-public-client-seam.md).
 
-**Answerability** — whether a corpus can be asked a question at all, as distinct from what the
-answer is. Carried as `attribution.can_answer`: `true` the corpus attributes at least one
-document to an issuing body; `false` it attributes none, so a per-agency count of 0 is a fact
-about the corpus and not about the agency; `"unknown"` the counts needed to decide were never
-measured. Three states that may never fold into two — see
-[ADR-0011](docs/adr/0011-a-corpus-that-attributes-nothing-says-so.md). It is read from the
-corpus's own counts, never from `basis`, which two corpora share while one can answer and the
-other cannot.
-_Avoid_: "empty", "no results", "has none" — each describes an ANSWER, and the whole point of
-the field is the case where there was never a question this corpus could be asked
 
 ## Seams and adapters
 
@@ -139,6 +129,37 @@ satisfies one. The retrieval seam (`RetrievalBackend`) and the semantic seam
 (`semantic_search_module`) are the two a corpus can supply its own adapter for.
 
 _Avoid_: "boundary" — overloaded with DDD's bounded context.
+
+## Attribution and answerability
+
+**Attribution** — a corpus tying one of its documents to an entry in an issuing-body registry.
+Some corpora do it from a declared field (`plugins.issuing_body_slug_field`), some derive it
+from the path, and three attribute **nothing**: `oregon-budget`, `oregon-legislature` and
+`federal-reference` carry no issuing body on any document and never will without new work.
+
+**Answerability** — whether a corpus can answer *at all* for a given agency, which is a
+different question from whether it holds anything. Four outcomes, and the middle two are the
+ones that get collapsed:
+
+- **documents** — it attributes, and it holds some for this agency.
+- **none** — it attributes, and it holds none for this agency. A finding.
+- **cannot answer** — it attributes nothing, so zero is not a count, it is the absence of a
+  measurement. `attribution.can_answer: false`, and `total` is withheld rather than zeroed.
+- **unknown** — the coverage counts themselves are missing, so which of the above holds
+  cannot be read.
+
+The discriminator is **the corpus's own counts, not its prose**: `documents_with_no_issuing_body
+>= documents_in_corpus` means it cannot answer, whatever the reason — undeclared slug field
+today, an unbuilt crosswalk tomorrow. A reader that branches on the `basis` string calls a
+genuine *none* a *cannot answer* and deletes a finding; one that reads `total` alone calls a
+*cannot answer* a *none* and invents an absence (ADR 0011).
+
+AN EMPTY CORPUS IS *unknown*, NOT *cannot answer*. `documents_with_no_issuing_body >=
+documents_in_corpus` is satisfied by `0 >= 0`, and reading that as "attributes nothing" states
+a measurement nobody took — the same collapse one field over, and the reading `complete`
+already refuses for an identical index (corpus-toolkit#158).
+_Avoid_: "empty", "no results", "has none" — each describes an ANSWER, and the case this
+vocabulary exists for is the one where there was never a question this corpus could be asked
 
 ## The rule that outranks the vocabulary
 
