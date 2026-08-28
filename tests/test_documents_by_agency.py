@@ -144,6 +144,41 @@ def test_zero_documents_with_unattributed_ones_present_is_not_none(tmp_path):
     assert got["attribution"]["complete"] is False, (
         "an empty answer from a corpus that cannot see all of itself read as complete")
     assert got["attribution"]["documents_with_no_issuing_body"] == 1
+    # THE OTHER HALF OF corpus-toolkit#158: this corpus attributes ONE of its two documents
+    # (DOGAMI), so it CAN answer -- `total: 0` for a slug it genuinely holds nothing for
+    # (DAS) is a real finding and must stay one, distinguishable from a corpus that
+    # attributes nothing at all reporting the same clean zero.
+    assert got["attribution"]["can_answer"] is True, (
+        "a corpus that attributes at least one document was reported unable to answer")
+    assert got["total"] == 0, (
+        "a genuine none-found answer from an answerable corpus was withheld as null")
+
+
+# ---------- corpus-toolkit#158: a corpus that attributes nothing says so ----------
+
+def test_a_corpus_that_attributes_nothing_reports_it_cannot_answer(tmp_path):
+    """THE RED PROOF for corpus-toolkit#158. A corpus where every document carries no
+    issuing-body slug at all answered `total: 0` for any agency asked -- indistinguishable
+    from a corpus that attributes normally and genuinely holds nothing for that agency.
+    Measured on the platform (ADR-0011): oregon-budget (1,762 documents),
+    oregon-legislature (6,137) and federal-reference (43) all attribute zero documents to
+    any issuing body and all three answered a clean, confident zero for every slug that
+    exists.
+
+    The discriminator is the corpus's own counts --
+    `documents_with_no_issuing_body >= documents_in_corpus` -- never the `basis` prose,
+    which two corpora can share while one can answer and the other cannot."""
+    root = _corpus(tmp_path, {
+        "reports/u-1.md": _report(1, None),
+        "reports/u-2.md": _report(2, None),
+    })
+
+    got = _fw(root).documents_by_agency(DOGAMI)
+
+    assert got["attribution"]["can_answer"] is False, (
+        "a corpus attributing NO document to any issuing body did not say it cannot answer")
+    assert got["total"] is None, (
+        "a non-attributing corpus reported a numeric total instead of withholding it")
 
 
 REGISTRY = {"entries": [{"slug": DOGAMI, "name": "Department of Geology and Mineral Industries"},
@@ -203,6 +238,8 @@ def test_a_fully_attributed_corpus_reports_a_complete_answer(tmp_path):
 
     assert [d["id"] for d in got["documents"]] == ["appr-1"]
     assert got["attribution"]["complete"] is True
+    assert got["attribution"]["can_answer"] is True
+    assert got["total"] == 1
 
 
 def test_every_response_carries_the_envelope(tmp_path):
@@ -342,6 +379,41 @@ def test_a_partial_measurement_is_not_promoted_to_a_measurement(tmp_path):
         "the diagnostic naming what the backend did not report was lost")
     assert "declares no issuing-body registry" not in attribution["note"], (
         "the note asserted a config fact the branch never checked, and it was false")
+    # corpus-toolkit#158: `can_answer` needs `documents_in_corpus` and
+    # `documents_with_no_issuing_body`, neither of which this half-measurement reports —
+    # `unknown`, not `False`, or a half-measurement would be read as "attributes nothing".
+    assert attribution["can_answer"] == "unknown"
+
+
+class _NoCoverage:
+    """A backend on the pre-coverage shape: `holdings_for` returns bare counts, no
+    `coverage` key at all -- v1.25.0's shape, still accepted (corpus-toolkit#158)."""
+    name = "no-coverage"
+    def __init__(self, config, semantic=None): self.config = config
+    def search(self, *a, **kw): return []
+    def get(self, *a, **kw): return None
+    def exists(self, *a, **kw): return False
+    def overview(self, *a, **kw): return {}
+    def health(self, *a, **kw): return {"reachable": True, "documents": 10}
+    def holdings_for(self, slug, **kw):
+        return {"full_text": 1}
+
+
+def test_a_backend_with_no_coverage_at_all_is_unknown_not_false(tmp_path):
+    """The OTHER absence `can_answer` must not fold into `False`: a backend that reports no
+    `coverage` block whatsoever -- not even a partial one -- has not measured
+    `documents_with_no_issuing_body` against `documents_in_corpus`, so there is nothing for
+    the discriminator to read. `unknown`, per the acceptance criteria: coverage counts
+    absent OR unreadable both land here, never on `False`."""
+    root = _corpus(tmp_path, {"reports/a-1.md": _report(1, DOGAMI)})
+    fw = _fw(root)
+    fw.backend = _NoCoverage(fw.config)
+
+    _counts, attribution = fw._holdings(fw.backend.holdings_for(DOGAMI))
+
+    assert attribution["complete"] is None
+    assert attribution["can_answer"] == "unknown"
+    assert "documents_in_corpus" not in attribution
 
 
 def test_a_declared_but_unreadable_registry_is_not_reported_as_no_registry(tmp_path):
@@ -443,7 +515,11 @@ def test_a_declared_sentinel_is_not_served_as_an_agency(tmp_path):
     assert "sentinel" in got["error"].lower(), got
     # NO `attribution` BLOCK. The four-answer table describes answers; this is not one, and
     # attaching a completeness claim to a refusal invites reading the refusal as an answer.
+    # `can_answer` lives inside `attribution` (corpus-toolkit#158), so this one assertion
+    # already covers it -- stated explicitly because the acceptance criterion is its own:
+    # `can_answer` must never appear on a refusal.
     assert "attribution" not in got
+    assert got["total"] == 0, "a refusal's total is a page-size zero, never a withheld null"
 
 
 def test_an_empty_slug_does_not_return_the_unattributed_documents(tmp_path):
@@ -590,6 +666,8 @@ def test_a_sentinel_corpus_whose_backend_omits_the_bucket_is_unknown(tmp_path):
 
     assert att["complete"] is None
     assert "declared_no_body" in att["note"]
+    assert att["can_answer"] == "unknown", (
+        "a sentinel corpus whose backend omitted a required bucket was not marked unknown")
 
 
 def test_the_registered_tool_passes_limit_and_offset_through_in_that_order(tmp_path):
@@ -720,12 +798,19 @@ def test_a_backend_config_disagreement_is_reported_as_itself(tmp_path):
                         "coverage": self.holdings_for(slug)["coverage"]}
         '''))
 
-    att = _fw(root).documents_by_agency(DOGAMI)["attribution"]
+    got = _fw(root).documents_by_agency(DOGAMI)
+    att = got["attribution"]
 
     assert att["complete"] is None
     assert "disagree" in att["note"], f"reported as a property, not as a fault: {att}"
     assert "documents_in_corpus" not in att, (
         "a disagreement was answered with counts measured against nothing known")
+    assert att["can_answer"] == "unknown", (
+        "corpus-toolkit#158: a fault reported as `False` would say this corpus attributes "
+        "nothing, a claim this disagreement has no counts to support")
+    assert got["total"] == 0, (
+        "`unknown` must not null `total` the way `False` does — only a corpus KNOWN to "
+        "attribute nothing withholds it")
 
 
 def test_a_backend_returning_the_right_keys_with_wrong_types_names_the_backend(tmp_path):

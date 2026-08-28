@@ -216,11 +216,21 @@ def test_an_unreadable_registry_is_not_reported_as_this_body_being_unregistered(
 
 def test_documents_by_agency_answers_with_the_slug_unchecked(tmp_path):
     """`slug_in_registry: null` is this tool's "was not checked here", and the tool is
-    deliberately not registry-gated — so a broken registry must degrade it, not kill it."""
+    deliberately not registry-gated — so a broken registry must degrade it, not kill it.
+
+    This fixture's one document carries no `issuing_body_slug_field` and sits outside any
+    `scoped: true` root, so it is itself unattributed — `documents_in_corpus == 1 ==
+    documents_with_no_issuing_body`. Before corpus-toolkit#158 this answered a plain
+    `total: 0`, the exact collapse ADR-0011 closes: indistinguishable from a corpus that
+    attributes normally and genuinely holds nothing for `DAS`. The registry being unreadable
+    is a SEPARATE finding (`slug_in_registry: null`) from the corpus attributing nothing;
+    both are true here at once."""
     out = _fw(_corpus(tmp_path, MALFORMED)).documents_by_agency(DAS)
 
     assert out["slug_in_registry"] is None
-    assert out["total"] == 0
+    assert out["attribution"]["can_answer"] is False, (
+        "this corpus's one document is unattributed, so it cannot answer for any agency")
+    assert out["total"] is None, "a non-attributing corpus reported a numeric total"
     assert "could not be read" in out["attribution"]["note"], out["attribution"]
 
 

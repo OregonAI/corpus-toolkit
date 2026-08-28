@@ -528,7 +528,9 @@ before reading `attribution`.
 
 `total` is the number of matches, not the page size, and documents are ordered
 by `id` — paging by `offset` against an unordered scan repeats some documents
-and skips others.
+and skips others. **`total` is `null`, not `0`, when `attribution.can_answer`
+is `false`** (below) — the count is withheld rather than set to a number that
+reads as a finding it is not.
 
 **Four answers that must not collapse into each other:**
 
@@ -538,6 +540,38 @@ and skips others.
 | non-empty | `false` | a **floor** — this corpus holds documents attributed to nobody |
 | empty | `true` | this corpus genuinely holds nothing for that slug |
 | empty | `null` | nobody measured. **Not** the same as none |
+
+**`attribution.can_answer: true \| false \| "unknown"`** (corpus-toolkit#158, ADR-0011)
+answers a question `complete` does not: not "is this count the whole answer" but "can this
+corpus attribute *anything* to *anybody*". A corpus that attributes no document to any
+issuing body used to answer a clean, confident `total: 0` for every slug that exists —
+oregon-budget, oregon-legislature and federal-reference all did, indistinguishable from a
+corpus that attributes normally and genuinely holds nothing for that one agency. The three
+values:
+
+- **`true`** — the corpus attributes at least one document to an issuing body. A slug it
+  holds nothing for still answers `total: 0` here — a genuine finding, distinguishable from
+  the case below because `can_answer` says which one occurred.
+- **`false`** — the corpus attributes no document to any issuing body. `total` is `null` on
+  this response; the `documents` list is `[]`, as it always was, but is no longer the only
+  signal.
+- **`"unknown"`** — a **third, distinct value**, not `null` and not folded into `false`: the
+  coverage counts `can_answer` is computed from are themselves absent or unreadable (a
+  partial coverage report, a backend/config disagreement, or the pre-coverage bare-counts
+  shape). `total` is **not** nulled here — nulling it would assert `false` by another name
+  about a corpus this response has made no claim about.
+
+The discriminator is the corpus's own counts — `attribution.documents_with_no_issuing_body
+>= attribution.documents_in_corpus` — **never** `attribution.basis`: two corpora can share
+the exact same `basis` string while one can answer and the other cannot, so prose is not a
+safe substitute for the counts underneath it.
+
+`can_answer` is **additive and stays contract v1** — the precedent is remote resolution
+shipping additive at toolkit v1.1.0. `total: null` **narrows** a field this page has
+described as "the number of matches"; a consumer doing arithmetic on `total` without
+checking `attribution.can_answer` first breaks, which is the same discipline this contract
+already requires of `error` (an `error` response omits `attribution` entirely, and
+`can_answer` never appears on a refusal — branch on `error` before reading either).
 
 `slug_in_registry` answers a different question and is deliberately separate:
 `null` means the slug **was not checked here** — either the corpus declares no

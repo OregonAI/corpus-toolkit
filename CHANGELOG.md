@@ -17,6 +17,21 @@ it can break you.
 
 ## Unreleased
 
+### Added — `documents_by_agency` reports `attribution.can_answer` and narrows `total` to `null` for a corpus that attributes nothing (corpus-toolkit#158, ADR-0011)
+
+**`can_answer` is additive and stays contract v1; `total: null` narrows a field this page
+describes as "the number of matches", read `attribution.can_answer` before doing arithmetic
+on `total`.** A corpus that attributes no document to any issuing body — measured on the
+platform: oregon-budget, oregon-legislature, federal-reference — answered a clean,
+confident `total: 0` for every slug that exists, indistinguishable from a corpus that
+attributes normally and genuinely holds nothing for that one agency. `can_answer: true |
+false | "unknown"` names the difference, computed from the corpus's own coverage counts
+(`documents_with_no_issuing_body >= documents_in_corpus`), never from `basis` prose. `total`
+is withheld (`null`) only when `can_answer` is `false`; a corpus that attributes some
+documents and holds none for one slug still answers `can_answer: true, total: 0` — that
+finding is unchanged. The registration gate is unchanged: every corpus keeps advertising
+the tool.
+
 ### Added — `suspended` names a temporary loss of force in the document `status` enum (corpus-toolkit#159)
 
 **Additive — no committed document changes its value.** The five original `status` values mix
