@@ -114,6 +114,30 @@ satisfies one. The retrieval seam (`RetrievalBackend`) and the semantic seam
 
 _Avoid_: "boundary" — overloaded with DDD's bounded context.
 
+## Attribution and answerability
+
+**Attribution** — a corpus tying one of its documents to an entry in an issuing-body registry.
+Some corpora do it from a declared field (`plugins.issuing_body_slug_field`), some derive it
+from the path, and three attribute **nothing**: `oregon-budget`, `oregon-legislature` and
+`federal-reference` carry no issuing body on any document and never will without new work.
+
+**Answerability** — whether a corpus can answer *at all* for a given agency, which is a
+different question from whether it holds anything. Four outcomes, and the middle two are the
+ones that get collapsed:
+
+- **documents** — it attributes, and it holds some for this agency.
+- **none** — it attributes, and it holds none for this agency. A finding.
+- **cannot answer** — it attributes nothing, so zero is not a count, it is the absence of a
+  measurement. `attribution.can_answer: false`, and `total` is withheld rather than zeroed.
+- **unknown** — the coverage counts themselves are missing, so which of the above holds
+  cannot be read.
+
+The discriminator is **the corpus's own counts, not its prose**: `documents_with_no_issuing_body
+>= documents_in_corpus` means it cannot answer, whatever the reason — undeclared slug field
+today, an unbuilt crosswalk tomorrow. A reader that branches on the `basis` string calls a
+genuine *none* a *cannot answer* and deletes a finding; one that reads `total` alone calls a
+*cannot answer* a *none* and invents an absence (ADR 0011).
+
 ## The rule that outranks the vocabulary
 
 **"Could not check" is never reported as "is not there."** It appears as response convention 5,
