@@ -120,16 +120,6 @@ no matter what it is named.
 whether `mcp` 1.x or 2.x is installed. Used on both sides: by corpus servers, and by the
 consumer tier — see [ADR-0006](docs/adr/0006-one-package-public-client-seam.md).
 
-**Answerability** — whether a corpus can be asked a question at all, as distinct from what the
-answer is. Carried as `attribution.can_answer`: `true` the corpus attributes at least one
-document to an issuing body; `false` it attributes none, so a per-agency count of 0 is a fact
-about the corpus and not about the agency; `"unknown"` the counts needed to decide were never
-measured. Three states that may never fold into two — see
-[ADR-0011](docs/adr/0011-a-corpus-that-attributes-nothing-says-so.md). It is read from the
-corpus's own counts, never from `basis`, which two corpora share while one can answer and the
-other cannot.
-_Avoid_: "empty", "no results", "has none" — each describes an ANSWER, and the whole point of
-the field is the case where there was never a question this corpus could be asked
 
 ## Seams and adapters
 
@@ -163,6 +153,13 @@ The discriminator is **the corpus's own counts, not its prose**: `documents_with
 today, an unbuilt crosswalk tomorrow. A reader that branches on the `basis` string calls a
 genuine *none* a *cannot answer* and deletes a finding; one that reads `total` alone calls a
 *cannot answer* a *none* and invents an absence (ADR 0011).
+
+AN EMPTY CORPUS IS *unknown*, NOT *cannot answer*. `documents_with_no_issuing_body >=
+documents_in_corpus` is satisfied by `0 >= 0`, and reading that as "attributes nothing" states
+a measurement nobody took — the same collapse one field over, and the reading `complete`
+already refuses for an identical index (corpus-toolkit#158).
+_Avoid_: "empty", "no results", "has none" — each describes an ANSWER, and the case this
+vocabulary exists for is the one where there was never a question this corpus could be asked
 
 ## The rule that outranks the vocabulary
 
