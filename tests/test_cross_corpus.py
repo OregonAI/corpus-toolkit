@@ -25,7 +25,9 @@ from corpus_toolkit.config import Sibling                # noqa: E402
 from corpus_toolkit.mcp.framework import (               # noqa: E402
     CorpusFramework, clear_schemes, register_scheme,
 )
-from corpus_toolkit.remote import load_sibling_index     # noqa: E402
+from corpus_toolkit.remote import load_sibling_index      # noqa: E402
+from corpus_toolkit.repo import parse_frontmatter         # noqa: E402
+from corpus_toolkit.validate.frontmatter import bundled_schema  # noqa: E402
 
 CORPUS_YML = """\
 corpus:
@@ -53,7 +55,7 @@ id: schedule-166-300
 title: Retention Schedule 166-300
 doc_type: retention-schedule
 citation: Schedule 166-300
-status: active
+status: current
 source_url: https://example.org/166-300
 retrieved: 2026-01-01
 content_mode: summary
@@ -116,6 +118,26 @@ class CrossCorpusTestCase(unittest.TestCase):
 
     def framework(self, cfg_path: Path) -> CorpusFramework:
         return CorpusFramework(config_mod.load(cfg_path))
+
+
+class TestFixtureValidity(CrossCorpusTestCase):
+    """DOC is this module's worked example of a valid document -- the obvious thing
+    for a reader to copy into a corpus, and the literal every `.replace("status:
+    ...", ...)` call site in this file is keyed to. Nothing else in this file
+    parses DOC through the schema, so a value the enum has never admitted can sit
+    here indefinitely without failing anything (corpus-toolkit#168). This is the
+    seam that closes that gap: parse DOC exactly as production does
+    (`parse_frontmatter`) and check its `status` against the bundled schema's own
+    enum -- an independent source of truth, not a copy of the fixture's own claim."""
+
+    def test_doc_status_is_schema_legal(self):
+        doc_path = self.tmp / "doc.md"
+        doc_path.write_text(DOC)
+        fm, _ = parse_frontmatter(doc_path)
+
+        allowed = bundled_schema()["properties"]["status"]["enum"]
+
+        self.assertIn(fm["status"], allowed)
 
 
 class TestSiblingResolution(CrossCorpusTestCase):
@@ -248,8 +270,8 @@ class TestSiblingResolution(CrossCorpusTestCase):
         make_corpus(producer, graph=False)
         (producer / "schedules" / "schedule-166-300.md").unlink()
         (producer / "schedules" / "schedule-166-999.md").write_text(
-            DOC.replace("166-300", "166-999").replace("status: active",
-                                                      "status: suspended"))
+            DOC.replace("166-300", "166-999").replace("status: current",
+                                                       "status: suspended"))
         produced = index_mod.build_index(config_mod.load(producer / "_meta" / "corpus.yml"))
         idx = self.tmp / "produced-index.json"
         idx.write_text(json.dumps(produced))
@@ -548,7 +570,7 @@ class TestGenerateIndex(CrossCorpusTestCase):
         repo = self.tmp / "repo"
         cfg = make_corpus(repo, graph=False)
         (repo / "schedules" / "schedule-166-300.md").write_text(
-            DOC.replace("status: active", "status: suspended"))
+            DOC.replace("status: current", "status: suspended"))
         config = config_mod.load(cfg)
 
         written = index_mod.build_index(config)
