@@ -36,8 +36,16 @@ already applies to tickets and group findings), `fetch_failed`, `unreadable_json
 `watch_path_missing`. Six strings, not five and not seven: collapsing any two of the
 first three recreates the bug this file exists to fix one level in. Alongside the
 per-source list, it carries the run-level facts that previously existed only on stdout —
-which groups were in scope, the per-group changed/checked breakdown (the SAME numbers the
-log's `drift by group` line prints, not a second tally), and totals.
+which groups were in scope, the per-group breakdown, the totals, and `mode` — which names
+a `--record-baseline` run, since that one writes the artifact BEFORE it seeds and so reports
+every source `no_baseline` at the moment it is about to stop being true.
+
+**`groups` is the artifact's own tally**, counted off the same per-source records as
+`totals`. It is deliberately NOT the log's numbers: the log's `drift by group
+(changed/checked)` counts an unseeded source as *changed*, and shipping that dict verbatim
+put two readings of the word `changed` in one file — 2 by one path and 4 by the other on a
+run with two unseeded sources. The printed pair stays recoverable exactly, as
+`(changed + no_baseline, checked)`, and a test asserts it so the two cannot drift apart.
 
 JSON, not a fifth tsv column: run-level facts have nowhere to live in a column, and a
 column only works if the tsv starts listing every source, at which point its name means

@@ -496,7 +496,15 @@ class ChangedSourcesTsvByteIdenticalGuaranteeTest(_DriftRun):
     artifact existed. `tests/fixtures/changed-sources-golden.tsv` was captured by running
     this exact scenario against the pre-#160 code, on this branch, before a single line of
     `source-outcomes.json` support was written — a snapshot, not a value re-derived from
-    the current implementation, so a change to the writer would actually be caught here."""
+    the current implementation, so a change to the writer would actually be caught here.
+
+    REGENERATING IT IS NOT AN ORDINARY EDIT. Its worth is entirely that no current code
+    produced it; hand-editing it to match a new writer converts the proof into a
+    restatement of whatever the writer now does. If the tsv format legitimately changes,
+    that is a breaking change to public surface (AGENTS.md), and the honest move is a NEW
+    fixture captured the same way — check the commit that last changed the format out into
+    a scratch directory, run this scenario against it, and commit the bytes it wrote
+    alongside this one, keeping the old file as the record of the old contract."""
 
     def test_tsv_bytes_are_unchanged_by_the_new_artifact(self):
         self.group("aaa", 3, baseline="stale")
@@ -567,9 +575,9 @@ class SourceOutcomesVocabularyTest(_DriftRun):
 
 class SourceOutcomesRunLevelFactsTest(_DriftRun):
     """The run-level facts the issue says exist only on stdout today: in-scope groups, the
-    per-group breakdown, and totals. `source-outcomes.json` must carry all three, and the
-    per-group breakdown must be the SAME numbers `_print_group_breakdown` prints — not a
-    second tally that could disagree with it."""
+    per-group breakdown, and totals. `source-outcomes.json` must carry all three, counted
+    ONE way -- and the printed pair must be recoverable from them exactly, since the log
+    counts an unseeded source as changed and the artifact does not."""
 
     def test_groups_in_scope_and_breakdown_match_what_a_full_run_touches(self):
         self.group("oar", 2, baseline="stale")
@@ -578,7 +586,7 @@ class SourceOutcomesRunLevelFactsTest(_DriftRun):
         report = json.loads((self.root / "source-outcomes.json").read_text())
         self.assertEqual(sorted(report["groups_in_scope"]), ["oam", "oar"])
         self.assertEqual(report["groups"]["oar"]["changed"], 2)
-        self.assertEqual(report["groups"]["oar"]["total"], 2)
+        self.assertEqual(report["groups"]["oar"]["checked"], 2)
         self.assertEqual(report["groups"]["oam"]["changed"], 0)
         self.assertIn("oar 2/2", out, "the artifact's own numbers must match the log's")
 
@@ -594,6 +602,72 @@ class SourceOutcomesRunLevelFactsTest(_DriftRun):
         self.assertEqual(t["unchanged"], 1)
         self.assertEqual(t["no_baseline"], 1)
         self.assertEqual(t["fetch_failed"], 0)
+
+    def test_the_printed_pair_is_recoverable_from_the_artifact_exactly(self):
+        """The log and the artifact count `changed` differently ON PURPOSE, and the
+        difference is exactly the unseeded sources: `_print_group_breakdown` counts one as
+        changed (`new != old` with `old == ""`), the artifact calls it `no_baseline`.
+
+        The first version of this artifact shipped the log's dict by reference and so held
+        both readings of the word `changed` at once — 2 by one path and 4 by the other, in
+        one file. Deriving the artifact's own numbers fixes that and creates this
+        obligation: the printed pair must still be reconstructible, or a fact the criterion
+        asked for has been lost rather than corrected.
+        """
+        self.group("oar", 2, baseline="stale")
+        self.group("counties", 2, baseline=None)
+        _, out, _ = self.run_cli()
+
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+
+        # THE HALF THAT CATCHES THE CONFLATION. Reconstructing the printed pair cannot: the
+        # log adds the two together, so a `groups` dict that folded `no_baseline` INTO
+        # `changed` reconstructs it perfectly and reads as correct. Only asking the artifact
+        # to hold them apart does, which is the whole point of counting them separately.
+        self.assertEqual(report["groups"]["counties"]["no_baseline"], 2)
+        self.assertEqual(report["groups"]["counties"]["changed"], 0,
+                         "an unseeded source was never compared, so it did not change")
+
+        for group, stats in report["groups"].items():
+            printed = stats["changed"] + stats["no_baseline"]
+            self.assertIn(f"{group} {printed}/{stats['checked']}", out,
+                          "changed + no_baseline must reconstruct the printed pair")
+
+    def test_every_in_scope_source_is_counted_exactly_once(self):
+        """`total` comes from the in-scope count and the six outcomes come from the
+        per-source records; nothing asserted they agree, so a future `continue` that
+        appended no outcome would quietly drop a source from an artifact whose entire
+        purpose is that no source is silently missing."""
+        self.group("oar", 2, baseline="stale")
+        self.group("oam", 1, baseline="current")
+        self.group("counties", 1, baseline=None)
+        self.group("deq", 1, baseline="stale")
+        self.bodies["https://example.gov/deq/0"] = OSError("HTTP Error 403")
+        self.run_cli()
+
+        t = json.loads((self.root / "source-outcomes.json").read_text())["totals"]
+        self.assertEqual(sum(t[o] for o in changes.OUTCOMES), t["total"])
+
+    def test_a_source_that_appended_no_outcome_raises_rather_than_vanishing(self):
+        """The guard behind `test_every_in_scope_source_is_counted_exactly_once`, driven at
+        the builder directly because the fetch loop currently has no branch that skips an
+        append -- which is exactly the state this must survive someone changing."""
+        with self.assertRaises(RuntimeError) as e:
+            changes._source_outcomes_report(
+                [changes.SourceOutcome("oar", "oar-0", "https://example.gov/oar/0",
+                                       "unchanged", True)],
+                n_total=2, group_filter=None)
+        self.assertIn("appended no outcome", str(e.exception))
+
+    def test_an_outcome_outside_the_vocabulary_raises_rather_than_inventing_a_key(self):
+        """`totals[o.outcome] = totals.get(o.outcome, 0) + 1` would have invented a key for
+        a typo, leaving the real outcome reading a confident zero."""
+        with self.assertRaises(RuntimeError) as e:
+            changes._source_outcomes_report(
+                [changes.SourceOutcome("oar", "oar-0", "https://example.gov/oar/0",
+                                       "chagned", True)],
+                n_total=1, group_filter=None)
+        self.assertIn("unknown outcome", str(e.exception))
 
     def test_group_filter_narrows_scope_and_the_excluded_group_is_simply_absent(self):
         self.group("oar", 2, baseline="stale")

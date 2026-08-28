@@ -70,9 +70,13 @@ neither is written when `--check-robots` returns before fetching anything.
   and run totals that otherwise exist only on stdout. A source outside `--group` scope is
   simply absent from it, same as from the tsv, and that absence is documented rather than
   reported as a seventh outcome (`_source_outcomes_report`'s docstring). STABILITY: the
-  top-level shape (`schema_version`, `group_filter`, `groups_in_scope`, `groups`,
-  `totals`, `sources`) and the six outcome strings are the contract; `schema_version`
-  bumps on a breaking change to either. Additive fields on a `groups` entry or a `sources`
+  top-level shape (`schema_version`, `mode`, `group_filter`, `groups_in_scope`, `groups`,
+  `totals`, `sources`), the six outcome strings, and the keys of a `groups` entry
+  (`checked` plus one per outcome) are the contract; `schema_version` bumps on a breaking
+  change to any of them. `groups` is the artifact's OWN tally, counted off the same
+  per-source records as `totals` so one file never holds two readings of `changed`; the
+  log's `drift by group (changed/checked)` counts an unseeded source as changed, so the
+  printed pair is `(changed + no_baseline, checked)` and is recoverable exactly. Additive fields on a `groups` entry or a `sources`
   entry are NOT breaking, the same convention `docs/mcp-interface-contract.md` uses for
   the MCP tool responses this toolkit also serves.
 
@@ -793,8 +797,18 @@ class SourceOutcome(NamedTuple):
     had_baseline: bool
 
 
-def _source_outcomes_report(outcomes: list[SourceOutcome], per_group: dict,
-                            n_total: int, group_filter: list[str] | None) -> dict:
+OUTCOMES = ("changed", "unchanged", "no_baseline", "fetch_failed",
+            "unreadable_json", "watch_path_missing")
+"""The outcome vocabulary, declared once (corpus-toolkit#160).
+
+A tuple rather than six string literals scattered across the builder, the docstrings and the
+glossary: `totals` is initialised FROM it, and an outcome outside it raises instead of
+inventing a key that a consumer would then read as a real count of zero for the real one.
+"""
+
+
+def _source_outcomes_report(outcomes: list[SourceOutcome], n_total: int,
+                            group_filter: list[str] | None, mode: str | None = None) -> dict:
     """The JSON payload `source-outcomes.json` writes (corpus-toolkit#160).
 
     Three things a consumer of `changed-sources.tsv` alone cannot get, together in one
@@ -804,36 +818,62 @@ def _source_outcomes_report(outcomes: list[SourceOutcome], per_group: dict,
       lookup rather than an inference from absence. `changed-sources.tsv` only ever lists
       what changed; a source that was fetched and held still, one whose fetch failed, and
       one this run never reached are all equally absent from it.
-    * `groups` — the SAME `per_group` dict `_print_group_breakdown` prints, so a consumer
-      reads the identical numbers a human reading the log would, not a second tally that
-      could disagree with the first (the corpus-toolkit#67 failure mode this file already
-      guards against elsewhere).
-    * `totals` — counted OFF `outcomes` itself, one pass, rather than re-summed from the
-      separate `failed`/`watch_failed`/`unreadable`/`changed` lists main() also keeps. Two
-      tallies of the same run disagreeing is exactly the bug class corpus-toolkit#67 named.
+    * `groups` and `totals` — BOTH counted off `outcomes`, in one pass, so the artifact
+      holds ONE tally. The first version shipped `per_group` by reference instead, and that
+      dict counts a no-baseline source as CHANGED (`stats["changed"]` fires on `new != old`
+      with `old == ""`), while `totals` counted the same source as `no_baseline`. Two
+      consumers reading one file got 2 and 4 for the same run — the corpus-toolkit#67
+      double-tally shape this docstring claimed to guard against, reproduced inside the
+      guard.
 
-    `groups_in_scope` is `per_group`'s own keys — the groups that actually yielded an
-    in-scope source — which is not always `group_filter` verbatim: a `--group` naming a
-    typo'd group yields no keys at all, and that emptiness is itself the finding
-    (`nothing_checked` in `main`). `group_filter` is kept alongside it, unmodified, so a
-    reader can see what was ASKED for as well as what was FOUND.
+    WHAT THE LOG PRINTS IS RECOVERABLE, EXACTLY, AND IS NOT THE SAME NUMBER.
+    `_print_group_breakdown`'s `drift by group (changed/checked)` counts an unseeded source
+    in its changed figure, so for any group the printed pair is
+    `(changed + no_baseline, checked)`. Stated here rather than left for a reader to
+    discover from a mismatch, and asserted in `tests/test_drift_reporting.py` so the two
+    cannot drift apart silently. The artifact keeps the outcome-based reading because
+    `changed` naming two different sets inside one file is the defect, not the fix.
+
+    `groups_in_scope` is the groups that actually yielded an in-scope source, which is not
+    always `group_filter` verbatim: a `--group` naming a typo'd group yields none at all,
+    and that emptiness is itself the finding (`nothing_checked` in `main`). `group_filter`
+    is kept alongside it, unmodified, so a reader can see what was ASKED for as well as what
+    was FOUND.
+
+    `mode` names the run that wrote this. A `--record-baseline seed` run writes the artifact
+    BEFORE it seeds, so every source in it reads `no_baseline` — true at the moment of
+    writing and thoroughly misleading afterwards, with nothing in the file to say the run
+    existed to fix exactly that.
 
     A source outside `group_filter` is simply never in `outcomes` — filtered before this
-    function is ever called, the same filter `manifest_sources` applies in `main`. It is
-    absent from `sources` and uncounted in `totals`, and that is documented in this
-    module's docstring rather than invented as a seventh outcome string: an out-of-scope
-    source was never observed this run, which is a different fact from any of the six
-    outcomes above, all of which describe an observation that was attempted.
+    function is called, by the same filter `manifest_sources` applies in `main`. It is
+    absent from `sources` and uncounted, and that is documented in this module's docstring
+    rather than invented as a seventh outcome string: an out-of-scope source was never
+    observed this run, which is a different fact from any of the six outcomes, all of which
+    describe an observation that was attempted.
     """
-    totals = {"total": n_total, "changed": 0, "unchanged": 0, "no_baseline": 0,
-              "fetch_failed": 0, "unreadable_json": 0, "watch_path_missing": 0}
+    if len(outcomes) != n_total:
+        # LOUD, NOT SILENT. Every `continue` in the fetch loop appends exactly one outcome;
+        # a future branch that forgets would leave a source uncounted in an artifact whose
+        # whole purpose is that no source is silently missing from it.
+        raise RuntimeError(
+            f"source-outcomes: {len(outcomes)} outcomes for {n_total} in-scope sources — "
+            f"a fetch-loop branch appended no outcome")
+    totals = {"total": n_total, **{o: 0 for o in OUTCOMES}}
+    groups: dict[str, dict] = {}
     for o in outcomes:
-        totals[o.outcome] = totals.get(o.outcome, 0) + 1
+        if o.outcome not in totals:
+            raise RuntimeError(f"source-outcomes: unknown outcome {o.outcome!r} for {o.id}")
+        totals[o.outcome] += 1
+        g = groups.setdefault(o.group, {"checked": 0, **{n: 0 for n in OUTCOMES}})
+        g["checked"] += 1
+        g[o.outcome] += 1
     return {
         "schema_version": 1,
+        "mode": mode,
         "group_filter": list(group_filter) if group_filter else None,
-        "groups_in_scope": sorted(per_group),
-        "groups": per_group,
+        "groups_in_scope": sorted(groups),
+        "groups": groups,
         "totals": totals,
         "sources": [{"group": o.group, "id": o.id, "url": o.url, "outcome": o.outcome,
                      "had_baseline": o.had_baseline} for o in outcomes],
@@ -894,7 +934,7 @@ def _tickets_in_spend_order(changed: list[ChangedSource]) -> list[ChangedSource]
     MAX_ISSUES_PER_RUN` sources unreported and still exits non-zero; the dropped ones are
     now the tail of the largest group instead of an arbitrary prefix.
     """
-    ticketable = [c for c in changed if _was_compared(c)]
+    ticketable = [c for c in changed if _was_compared(c.old)]
     # COUNTED OFF `ticketable`, not read from `per_group["changed"]` and not derived from
     # it either. Two reasons, and the second is the one that bites. First, the sort key is
     # "how many tickets will this group buy", and after the filter that is no longer the
@@ -909,8 +949,13 @@ def _tickets_in_spend_order(changed: list[ChangedSource]) -> list[ChangedSource]
     return sorted(ticketable, key=lambda c: (per_group_ticketable[c.group], c.group))
 
 
-def _was_compared(c: ChangedSource) -> bool:
+def _was_compared(old: str) -> bool:
     """Whether this source was compared to a recorded baseline at all.
+
+    TAKES THE RECORDED BASELINE, not a `ChangedSource`, so the fetch loop can read the rule
+    too. It could not before: the loop has `old` in hand and no ChangedSource yet, so
+    `source-outcomes.json` re-implemented the test inline and this docstring's claim to be
+    the one place stopped being true the moment it did (corpus-toolkit#160 review).
 
     ADR 0010'S PER-SOURCE RULE, in one place. "An uncompared source is not a changed
     source" is read twice — once to decide whether a ticket may be filed for it
@@ -923,7 +968,7 @@ def _was_compared(c: ChangedSource) -> bool:
     `old` is the hash the manifest recorded, so an empty one means the fetched bytes were
     compared against nothing. It is a fact about the manifest, not about upstream.
     """
-    return bool(c.old)
+    return bool(old)
 
 
 class GroupFinding(NamedTuple):
@@ -964,7 +1009,7 @@ def _group_drift_findings(changed: list[ChangedSource],
     """
     by_group: dict[str, list[str]] = {}
     for c in changed:
-        if _was_compared(c):
+        if _was_compared(c.old):
             by_group.setdefault(c.group, []).append(c.id)
     out = []
     for g, ids in sorted(by_group.items()):
@@ -1283,8 +1328,9 @@ def main():
         # touch `changed-sources.tsv`, which keeps its own long-documented meaning.
         outcomes.append(SourceOutcome(
             gname, sid, url,
-            "no_baseline" if not old else ("changed" if new != old else "unchanged"),
-            bool(old)))
+            ("changed" if new != old else "unchanged") if _was_compared(old)
+            else "no_baseline",
+            _was_compared(old)))
 
     out = config.root / "changed-sources.tsv"
     # Detection order, i.e. manifest order — unchanged by #69's reordering, which applies
@@ -1301,7 +1347,9 @@ def main():
     # only when `--check-robots` returns before any source is ever fetched, since there are
     # no observations yet to report.
     (config.root / "source-outcomes.json").write_text(
-        json.dumps(_source_outcomes_report(outcomes, per_group, n_total, args.group),
+        json.dumps(_source_outcomes_report(
+            outcomes, n_total, args.group,
+            mode=f"record-baseline:{args.record_baseline}" if args.record_baseline else None),
                    indent=2, sort_keys=True) + "\n")
 
     recorded = None

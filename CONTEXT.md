@@ -76,9 +76,12 @@ failed, and one out of this run's scope were all equally absent from any artifac
 run in which every fetch failed and a run with no drift wrote the same empty file
 (corpus-toolkit#160). `no_baseline` is its own outcome rather than `changed` or
 `unchanged` for the same reason ADR 0010 excludes an unseeded source from a group drift
-finding: a source compared against an empty baseline was not compared at all.
+finding: there was no recorded hash to compare the fetched bytes against, so neither word
+would be true of it.
 _Avoid_: "not compared" as a synonym for any single one of the non-`changed` outcomes —
-the whole point of naming six is that a consumer no longer has to guess which one applied.
+four of the six describe a source nothing compared, for four different reasons with four
+different remedies, and the whole point of naming them is that a consumer no longer has to
+guess which one applied.
 
 ## Contracts
 
