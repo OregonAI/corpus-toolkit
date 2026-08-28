@@ -348,8 +348,12 @@ class RetrievalBackend(Protocol):
         `unexpected keyword argument 'con'`. An implementation free to ignore it should
         still accept it.
 
-        OPTIONAL; see REQUIRED_BACKEND_METHODS. A backend that cannot answer it simply omits it, and
-        `issuing_body_profile` is not registered for that corpus.
+        OPTIONAL; see REQUIRED_BACKEND_METHODS. A CAPABILITY gate, not an ability one, and
+        the distinction is the same one corpus-toolkit#158 corrected for
+        `documents_for_slug`: registration asks whether the method EXISTS, and `FileBackend`
+        defines it, so every file-backed corpus registers `issuing_body_profile` whether or
+        not it has anything to attribute. Only a backend that does not define the method at
+        all is left without the tool.
 
         It exists so the question stops being asked BEHIND the seam. `issuing_body_profile`
         used to reach through `ensure_index()` and run raw SQL against `docs`, which is

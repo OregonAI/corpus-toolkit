@@ -105,6 +105,17 @@ no matter what it is named.
 whether `mcp` 1.x or 2.x is installed. Used on both sides: by corpus servers, and by the
 consumer tier — see [ADR-0006](docs/adr/0006-one-package-public-client-seam.md).
 
+**Answerability** — whether a corpus can be asked a question at all, as distinct from what the
+answer is. Carried as `attribution.can_answer`: `true` the corpus attributes at least one
+document to an issuing body; `false` it attributes none, so a per-agency count of 0 is a fact
+about the corpus and not about the agency; `"unknown"` the counts needed to decide were never
+measured. Three states that may never fold into two — see
+[ADR-0011](docs/adr/0011-a-corpus-that-attributes-nothing-says-so.md). It is read from the
+corpus's own counts, never from `basis`, which two corpora share while one can answer and the
+other cannot.
+_Avoid_: "empty", "no results", "has none" — each describes an ANSWER, and the whole point of
+the field is the case where there was never a question this corpus could be asked
+
 ## Seams and adapters
 
 Used as in `docs/agents/` and throughout `corpus_toolkit/mcp/`: a **seam** is where a module's
@@ -118,6 +129,7 @@ _Avoid_: "boundary" — overloaded with DDD's bounded context.
 
 **"Could not check" is never reported as "is not there."** It appears as response convention 5,
 as `sibling_unavailable`, as `no_graph` vs `not_in_graph`, as `status: ""` meaning unknown and
-never `current`, and as the reason a healthcheck that cannot fail is treated as worse than no
-healthcheck. If a new mechanism collapses those two answers, it is wrong regardless of what it
+never `current`, as `attribution.can_answer` refusing to let "attributes nothing" wear the
+shape of "holds none", and as the reason a healthcheck that cannot fail is treated as worse
+than no healthcheck. If a new mechanism collapses those two answers, it is wrong regardless of what it
 is called.

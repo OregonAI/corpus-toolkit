@@ -19,9 +19,10 @@ it can break you.
 
 ### Added — `documents_by_agency` reports `attribution.can_answer` and narrows `total` to `null` for a corpus that attributes nothing (corpus-toolkit#158, ADR-0011)
 
-**`can_answer` is additive and stays contract v1; `total: null` narrows a field this page
-describes as "the number of matches", read `attribution.can_answer` before doing arithmetic
-on `total`.** A corpus that attributes no document to any issuing body — measured on the
+**This can break a consumer that does arithmetic on `total`.** `total` is now `null`, not a
+number, for a corpus that attributes nothing — a narrowing of a field the MCP interface
+contract describes as "the number of matches". Read `attribution.can_answer` first.
+`can_answer` itself is additive and stays contract v1. A corpus that attributes no document to any issuing body — measured on the
 platform: oregon-budget, oregon-legislature, federal-reference — answered a clean,
 confident `total: 0` for every slug that exists, indistinguishable from a corpus that
 attributes normally and genuinely holds nothing for that one agency. `can_answer: true |

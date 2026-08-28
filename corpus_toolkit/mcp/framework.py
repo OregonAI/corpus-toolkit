@@ -281,6 +281,25 @@ def _name_match(entry: dict, fields, query: str) -> tuple[str, str] | None:
     return None
 
 
+def _can_answer(unattributed: int, in_corpus: int) -> "bool | str":
+    """Whether a corpus attributes ANY document to an issuing body (corpus-toolkit#158).
+
+    THE CORPUS'S OWN COUNTS, NEVER `basis`. Two corpora report the identical `basis`
+    string while one attributes some documents and the other attributes none; only the
+    counts tell them apart, which is why the discriminator lives here and not in prose.
+
+    AN EMPTY INDEX IS `"unknown"`, NOT `False`. `unattributed >= in_corpus` is true of a
+    corpus holding nothing (0 >= 0), and reading that as "attributes nothing" states a
+    measurement nobody took -- the collapse ADR-0011 and CONTEXT.md's outranking rule both
+    forbid. `complete` already answers an empty index with `None`, and the contract already
+    calls that "unknown, not none"; two fields in one block reading the same evidence
+    opposite ways is the defect, not a nuance.
+    """
+    if in_corpus == 0:
+        return "unknown"
+    return unattributed < in_corpus
+
+
 class CorpusFramework:
     def __init__(self, config: CorpusConfig):
         self.config = config
@@ -1441,7 +1460,10 @@ class CorpusFramework:
         # `total: null` is what stops a caller reading `total` alone from missing it, since
         # `documents` was already `[]` in both cases and could not carry the distinction on
         # its own.
-        total = None if attribution.get("can_answer") is False else raw["total"]
+        # SUBSCRIPT, NOT `.get`. Every `_holdings` return path sets `can_answer`; a fifth
+        # path that forgot to would raise here rather than quietly serving the number this
+        # line exists to withhold.
+        total = None if attribution["can_answer"] is False else raw["total"]
         return self.with_envelope({
             "slug": slug,
             # NULL, NOT FALSE, where there is no registry to ask. False means "checked, and
@@ -1575,11 +1597,7 @@ class CorpusFramework:
                         "is UNKNOWN — not yes")
             return counts, {
                 "complete": False if (in_corpus and unattributed) else None,
-                # THE CORPUS'S OWN COUNTS, NOT `basis` (corpus-toolkit#158). `unattributed
-                # >= in_corpus` is the only discriminator: two corpora can report the exact
-                # same `basis` string while one attributes some documents and the other
-                # attributes none.
-                "can_answer": False if unattributed >= in_corpus else True,
+                "can_answer": _can_answer(unattributed, in_corpus),
                 "basis": basis,
                 "documents_in_corpus": in_corpus,
                 "documents_with_no_issuing_body": unattributed,
@@ -1656,12 +1674,7 @@ class CorpusFramework:
             # `statewide` documents made `complete` False permanently, for a reason that
             # was 99.997% legitimate.
             "complete": None if total == 0 else (unmatched == 0 and unattributed == 0),
-            # THE CORPUS'S OWN COUNTS, NOT `basis` (corpus-toolkit#158). A corpus with a
-            # registry can share its `basis` string with a registry-less corpus while one
-            # attributes some documents and the other attributes none; only the counts tell
-            # them apart. `unattributed >= total` covers an empty index too (0 >= 0): an
-            # index holding nothing cannot attribute anything to anybody either.
-            "can_answer": False if unattributed >= total else True,
+            "can_answer": _can_answer(unattributed, total),
             "basis": basis,
             "documents_in_corpus": total,
             "documents_matched_to_a_registry_entry": matched,

@@ -867,3 +867,35 @@ def test_a_subclass_overriding_holdings_for_still_works(tmp_path):
     got = _fw(root).documents_by_agency(DOGAMI)
 
     assert [d["id"] for d in got["documents"]] == ["appr-1"]
+
+
+def test_an_empty_corpus_is_unknown_not_a_corpus_that_attributes_nothing(tmp_path):
+    """`unattributed >= in_corpus` is true of an empty index (0 >= 0), and reading that as
+    `False` states a measurement nobody took.
+
+    `complete` already answers an empty index with `None`, and the contract already calls
+    that "unknown, not none". Two fields in the same block reading identical evidence
+    opposite ways -- one declining to measure, the other asserting a definite negative --
+    is the collapse ADR-0011 closes, reappearing one field over. It also withheld `total`
+    on a corpus that has nothing to withhold.
+    """
+    root = _corpus(tmp_path, {})
+
+    got = _fw(root).documents_by_agency(DOGAMI)
+
+    assert got["attribution"]["can_answer"] == "unknown"
+    assert got["attribution"]["complete"] is None, (
+        "the two fields must read the same evidence the same way")
+    assert got["total"] == 0, "an empty corpus withholds nothing; it holds nothing"
+
+
+def test_a_slug_absent_from_the_registry_still_reports_it_cannot_answer(tmp_path):
+    """Acceptance criterion: `can_answer: false` and `total: null` hold "for every slug
+    including ones absent from the registry". A slug nobody has heard of takes a different
+    path through `slug_in_registry`, and the criterion had no test."""
+    root = _corpus(tmp_path, {"reports/u-1.md": _report(1, None)})
+
+    got = _fw(root).documents_by_agency("no-such-agency-anywhere")
+
+    assert got["attribution"]["can_answer"] is False
+    assert got["total"] is None
