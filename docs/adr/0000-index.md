@@ -18,8 +18,9 @@ in that repo's own `docs/adr/`.
 | [0009](0009-the-crosswalk-is-reference-data.md) | The agency crosswalk is reference data, not a corpus |
 | [0010](0010-a-group-drift-finding-reports-correlation-not-cause.md) | A group drift finding reports correlation, not cause |
 | [0011](0011-a-corpus-that-attributes-nothing-says-so.md) | A corpus that attributes nothing says so, rather than answering zero |
+| [0012](0012-completing-a-chain-is-not-weakening-verification.md) | Completing a chain is not weakening verification |
 
-0011 was decided on 2026-08-26, grilling corpus-toolkit#158. 0010 was decided on 2026-08-22, grilling corpus-toolkit#132. The first nine were decided together on 2026-08-12, in a review of the platform's cross-repo shape
+0012 was decided on 2026-08-27, grilling executive-regulatory-frameworks#264 and #140. 0011 was decided on 2026-08-26, grilling corpus-toolkit#158. 0010 was decided on 2026-08-22, grilling corpus-toolkit#132. The first nine were decided together on 2026-08-12, in a review of the platform's cross-repo shape
 following `PLATFORM-REVIEW-2026-08-01.md`. That review's own three named weaknesses had all
 been closed by then; these record the shape questions that replaced them — chiefly that the
 platform grew a consumer tier while all of its governance was built for the first tier.

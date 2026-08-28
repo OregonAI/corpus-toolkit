@@ -15,6 +15,41 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## Unreleased
+
+### Added — a corpus may supply an intermediate a server fails to serve (ADR 0012, executive-regulatory-frameworks#140)
+
+**Opt-in, and does nothing until a corpus declares one.** Some government hosts send their
+leaf certificate without the intermediate that links it to a root. Browsers paper over it;
+strict clients do not, and a source that cannot be fetched is a source that is never
+compared — while the run still reports `success`. ERF sat at 45 unmonitored DHS/OHA sources
+for three weeks that way, at 3.3% of the run and so under the 20% systemic guard.
+
+Drop the missing intermediate at `_meta/tls-chain/<host>.pem` and `corpus-detect-changes`
+mounts it for **that host only**. Verification is not relaxed anywhere: measured, a supplement
+is not a trust anchor, because OpenSSL still requires the path to terminate at a self-signed
+certificate the system already trusts.
+
+```
+python, system store only                        CERTIFICATE_VERIFY_FAILED
+python, system store + the intermediate          HTTP 200, chain verified
+python, that intermediate ALONE, no root         REFUSED
+```
+
+Five refusals keep it narrow: a **private key** in a supplement fails the run outright (a
+corpus adopting this punches a hole in a `*.pem` gitignore rule that exists to keep tunnel
+credentials out, so this is the other half of that hole), a **self-signed** certificate is rejected (that
+would be a new trust anchor), the **filename is the host** and is mounted on `https://<host>`
+alone, a certificate within **30 days of expiry** is rejected before it can fail a fetch, and
+every run **prints which supplements it loaded**. `tls.supplement_still_needed()` re-checks
+the host without its supplement so the exception can be retired when the server is fixed —
+and answers `None`, never "fixed", when the request failed for any other reason.
+
+The `check-links` reusable workflow gains **`chain-supplements: true`**, which appends those
+same PEMs to the runner's CA bundle and points lychee at it. Whether lychee honours
+`SSL_CERT_FILE` is **not assumed** — it depends on its TLS backend — so a corpus turning this
+on should drop its `exclude-urls` entry in the same PR and let the run answer.
+
 ## v1.30.0 — 2026-08-25
 
 ### Fixed — the change detector speaks HTTP/2, so hosts that refuse HTTP/1.1 can be watched (corpus-toolkit#162)

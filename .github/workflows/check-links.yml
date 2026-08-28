@@ -43,6 +43,23 @@ on:
         description: seconds lychee waits between retries
         type: number
         default: 2
+      chain-supplements:
+        description: >-
+          Set true when the corpus carries `_meta/tls-chain/*.pem` (ADR 0012) and its link
+          check should use them. The PEMs are appended to the runner's CA bundle and lychee
+          is pointed at it with SSL_CERT_FILE.
+
+          WHETHER LYCHEE HONOURS IT IS NOT ASSUMED. lychee is Rust, and the answer depends on
+          whether its TLS backend reads the environment (native-tls/OpenSSL does; rustls with
+          a baked-in root store does not). A corpus turning this on should REMOVE its
+          `exclude-urls` entry for the host in the same PR and let the run answer the
+          question — and if the run is red, put the entry back with lychee's backend named as
+          the cause, so the mute stops being attributed to the upstream server.
+
+          Note this only completes a chain; it is not a bypass, for the same measured reason
+          ADR 0012 records.
+        type: boolean
+        default: false
 
 jobs:
   links:
@@ -61,8 +78,28 @@ jobs:
           done <<< "${{ inputs.exclude-urls }}"
           echo "flags=$flags" >> "$GITHUB_OUTPUT"
           echo "lychee exclude flags: $flags"
+      # A BUNDLE, NOT A REPLACEMENT. The runner's own CA file is copied first and the
+      # supplements appended, so this can only ever ADD a missing link to a chain — pointing
+      # SSL_CERT_FILE at the supplements alone would leave every other host in the corpus
+      # unverifiable, which is the inverse of the intent.
+      - name: Build CA bundle from chain supplements
+        id: ca
+        if: inputs.chain-supplements
+        run: |
+          shopt -s nullglob
+          pems=(_meta/tls-chain/*.pem)
+          if [ ${#pems[@]} -eq 0 ]; then
+            echo "chain-supplements: true but _meta/tls-chain/ holds no .pem — nothing to add" >&2
+            exit 1
+          fi
+          bundle="$RUNNER_TEMP/ca-bundle.pem"
+          cat /etc/ssl/certs/ca-certificates.crt "${pems[@]}" > "$bundle"
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "appended to the runner CA bundle: ${pems[*]}"
       - name: External links
         uses: lycheeverse/lychee-action@v2
+        env:
+          SSL_CERT_FILE: ${{ steps.ca.outputs.bundle }}
         with:
           args: --no-progress --accept ${{ inputs.accept-codes }} --max-retries ${{ inputs.max-retries }} --retry-wait-time ${{ inputs.retry-wait-time }} ${{ steps.excludes.outputs.flags }} './**/*.md' 'llms.txt'
       - uses: actions/checkout@v4
