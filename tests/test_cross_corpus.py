@@ -234,6 +234,40 @@ class TestSiblingResolution(CrossCorpusTestCase):
         self.assertIn("SUSPENDED — not current text", hit["note"])
         self.assertNotIn("superseded", hit["note"].lower())
 
+    def test_the_index_a_producer_writes_is_the_one_a_consumer_reads(self):
+        """The two halves are otherwise disjoint, and neither joins them.
+
+        `test_status_flows_into_the_index_row_unchanged` asserts `build_index` puts
+        `status` in the row's 4th element; the test above asserts `_resolve_in_sibling`
+        renders a 4th element it was HANDED, from a literal fixture. Neither proves the
+        row a producer writes is the row a consumer parses, so a positional change on
+        either side would leave both green. Here the sibling index IS `build_index`'s
+        own output, written to disk and read back through the real sibling path.
+        """
+        producer = self.tmp / "producer"
+        make_corpus(producer, graph=False)
+        (producer / "schedules" / "schedule-166-300.md").unlink()
+        (producer / "schedules" / "schedule-166-999.md").write_text(
+            DOC.replace("166-300", "166-999").replace("status: active",
+                                                      "status: suspended"))
+        produced = index_mod.build_index(config_mod.load(producer / "_meta" / "corpus.yml"))
+        idx = self.tmp / "produced-index.json"
+        idx.write_text(json.dumps(produced))
+
+        consumer = self.tmp / "consumer"
+        cfg = make_corpus(consumer)
+        cfg.write_text(cfg.read_text().replace("id: records-retention", "id: consumer")
+                       + f"siblings:\n  - id: records-retention\n    index_path: {idx}\n"
+                         "    web_base: https://example.invalid/\n")
+        register_scheme("schedule", r"Schedule\s+(?P<num>\d+-\d+)", "schedule-{num}",
+                        corpus="records-retention")
+
+        out = self.framework(cfg).resolve_citation("Schedule 166-999")
+
+        hit = out["matches"][0]
+        self.assertEqual(hit["status"], "suspended")
+        self.assertIn("SUSPENDED — not current text", hit["note"])
+
     def test_scheme_names_an_undeclared_sibling(self):
         cfg = make_corpus(self.tmp / "repo")             # no siblings: block at all
         register_scheme("oar-rule", r"OAR\s+(?P<num>\d+-\d+-\d+)", "oar-{num}",

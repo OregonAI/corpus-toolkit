@@ -1,11 +1,9 @@
 """The document frontmatter schema's `status` enum (corpus-toolkit#159).
 
-`suspended` means IN FORCE UNTIL RECENTLY, OUT OF FORCE NOW, EXPECTED TO RETURN -- a
-temporary, usually dated loss of force, distinct from `repealed`'s permanent one. Oregon
-suspends administrative rules with an end date the rule's own text prints; before this
-value existed, a corpus holding such a rule had to pick `repealed` (claims a permanence
-its own text disproves), `current` (claims force the publisher just withdrew), or
-`superseded` (claims a replacement that does not exist) -- three wrong answers.
+What `suspended` MEANS is stated once, in the schema's own `description`, and
+`test_status_description_distinguishes_suspended_from_repealed` is what holds it there.
+Restating it here would put a fourth copy in a file nothing checks against the other
+three.
 
 SEAM: `corpus_toolkit.validate.frontmatter.bundled_schema()`, driven directly through
 `jsonschema.Draft202012Validator` -- the same validator class `check_file` builds
@@ -58,8 +56,11 @@ def test_status_outside_the_enum_still_fails():
     """The enum stays closed: a value nobody declared (`vacated`) is not quietly
     admitted alongside `suspended`."""
     errors = _errors(_document(status="vacated"))
-    assert any(err.path and err.path[0] == "status" for err in errors), \
-        [e.message for e in errors]
+    # `validator == "enum"`, not merely a status-pathed error: `status: 5` raises TWO
+    # status-pathed errors (`type` and `enum`), so the looser assertion would pass on a
+    # schema whose enum had been deleted but whose `type: string` still fired.
+    assert any(err.validator == "enum" and err.path and err.path[0] == "status"
+               for err in errors), [e.message for e in errors]
 
 
 def test_status_description_distinguishes_suspended_from_repealed():

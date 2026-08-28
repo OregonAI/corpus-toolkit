@@ -19,7 +19,7 @@ it can break you.
 
 ### Added — `suspended` names a temporary loss of force in the document `status` enum (corpus-toolkit#159)
 
-**Additive — no committed document changes value.** The five original `status` values mix
+**Additive — no committed document changes its value.** The five original `status` values mix
 two axes: which version of the text this is (current, superseded, proposed, draft), and
 force, where only `repealed` spoke — a *permanent* loss of it. Oregon suspends
 administrative rules with an end date the rule's own text prints, and a corpus holding one
