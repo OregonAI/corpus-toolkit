@@ -15,7 +15,7 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
-## Unreleased
+## v1.31.0 — 2026-08-28
 
 ### Added — `source-outcomes.json`, a companion drift artifact naming what happened to every in-scope source (corpus-toolkit#160)
 
