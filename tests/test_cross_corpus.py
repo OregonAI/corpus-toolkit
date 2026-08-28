@@ -212,6 +212,28 @@ class TestSiblingResolution(CrossCorpusTestCase):
         self.assertEqual(out["matches"][0]["id"], "oar-166-300-0040")
         self.assertIsNone(out.get("note"))
 
+    def test_suspended_sibling_document_is_surfaced_not_flattened_to_superseded(self):
+        """Acceptance criterion (corpus-toolkit#159): `suspended` travels the same
+        4th-element path `superseded` always did, and the not-current rendering in
+        `_resolve_in_sibling` already treats it correctly without change -- confirmed
+        here rather than assumed. Without the enum value, a corpus holding a suspended
+        rule had no truthful way to populate this row in the first place; this is what
+        a sibling resolving into one now sees."""
+        idx = self.tmp / "sibling-index.json"
+        suspended_index = json.loads(json.dumps(SIBLING_INDEX))
+        suspended_index["documents"]["oar-166-300-0040"].append("suspended")
+        idx.write_text(json.dumps(suspended_index))
+        cfg = make_corpus(self.tmp / "repo", index_path=idx)
+        register_scheme("oar-rule", r"OAR\s+(?P<num>\d+-\d+-\d+)", "oar-{num}",
+                        corpus="executive-regulatory-frameworks")
+
+        out = self.framework(cfg).resolve_citation("OAR 166-300-0040")
+
+        hit = out["matches"][0]
+        self.assertEqual(hit["status"], "suspended")
+        self.assertIn("SUSPENDED — not current text", hit["note"])
+        self.assertNotIn("superseded", hit["note"].lower())
+
     def test_scheme_names_an_undeclared_sibling(self):
         cfg = make_corpus(self.tmp / "repo")             # no siblings: block at all
         register_scheme("oar-rule", r"OAR\s+(?P<num>\d+-\d+-\d+)", "oar-{num}",
@@ -481,6 +503,25 @@ class TestGenerateIndex(CrossCorpusTestCase):
         self.assertEqual(self.run_cli("--config", str(cfg), "--output", out_rel, "--check"), 0)
         written = json.loads((repo / out_rel).read_text())
         self.assertEqual(written["n_documents"], 2)
+
+    def test_status_flows_into_the_index_row_unchanged(self):
+        """Acceptance criterion (corpus-toolkit#159): `status` already travels as an
+        opaque string on the index row's 4th element -- confirmed here rather than
+        assumed, so a sibling resolving into a suspended document learns that via this
+        row instead of being told `superseded`. `build_index` never inspects the
+        enum; a schema-illegal value would flow through identically, which is the
+        point -- the toolkit is not the place that closes the enum, the schema is."""
+        repo = self.tmp / "repo"
+        cfg = make_corpus(repo, graph=False)
+        (repo / "schedules" / "schedule-166-300.md").write_text(
+            DOC.replace("status: active", "status: suspended"))
+        config = config_mod.load(cfg)
+
+        written = index_mod.build_index(config)
+
+        self.assertEqual(written["documents"]["schedule-166-300"],
+                         ["Retention Schedule 166-300", "retention-schedule",
+                          "schedules/schedule-166-300.md", "suspended"])
 
     def test_output_is_byte_stable_and_sorted(self):
         repo = self.tmp / "repo"

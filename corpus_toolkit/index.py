@@ -15,10 +15,11 @@ Shape:
      "documents": {"<doc_id>": ["<title>", "<doc_type>", "<repo path>", "<status>"], ...}}
 
 The 4th element (v1.19.0, corpus-toolkit#25) is the document's `status` — current /
-superseded / repealed / proposed / draft, or "" for UNKNOWN (a graph built before its
-corpus emitted status). "" must never be read as "current": before this field existed, a
-sibling resolving into federal-reference could serve superseded federal text as current
-law, with only a title-string convention in the way.
+superseded / repealed / proposed / draft / suspended (corpus-toolkit#159), or "" for
+UNKNOWN (a graph built before its corpus emitted status). "" must never be read as
+"current": before this field existed, a sibling resolving into federal-reference could
+serve superseded federal text as current law, with only a title-string convention in
+the way.
 
 Derived from `_meta/graph.json`'s nodes when that file exists (it already
 carries id/title/doc_type/path), otherwise by walking the configured content

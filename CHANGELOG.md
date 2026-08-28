@@ -17,6 +17,24 @@ it can break you.
 
 ## Unreleased
 
+### Added — `suspended` names a temporary loss of force in the document `status` enum (corpus-toolkit#159)
+
+**Additive — no committed document changes value.** The five original `status` values mix
+two axes: which version of the text this is (current, superseded, proposed, draft), and
+force, where only `repealed` spoke — a *permanent* loss of it. Oregon suspends
+administrative rules with an end date the rule's own text prints, and a corpus holding one
+had to pick `repealed` (claims a permanence the text disproves), `current` (claims force
+the publisher just withdrew), or `superseded` (claims a replacement that does not exist) —
+three wrong answers.
+
+`suspended` means in force until recently, out of force now, expected to return. It travels
+wherever `status` already did without any structural change: the published index's row
+already carries `status` as an opaque string in its 4th element, and a sibling's not-current
+rendering already surfaces anything but `current` by name — both confirmed by test, not
+changed. Modelling force as its own field, separate from the version axis, was considered
+and deliberately not done here; the enum already mixes the two axes and this does not make
+that worse.
+
 ### Added — a corpus may supply an intermediate a server fails to serve (ADR 0012, executive-regulatory-frameworks#140)
 
 **Opt-in, and does nothing until a corpus declares one.** Some government hosts send their
