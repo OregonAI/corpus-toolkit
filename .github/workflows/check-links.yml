@@ -82,20 +82,42 @@ jobs:
       # supplements appended, so this can only ever ADD a missing link to a chain — pointing
       # SSL_CERT_FILE at the supplements alone would leave every other host in the corpus
       # unverifiable, which is the inverse of the intent.
-      - name: Build CA bundle from chain supplements
+      # ALWAYS BUILD A BUNDLE, even when this corpus declares no supplement. The step
+      # below hands lychee `SSL_CERT_FILE` unconditionally, and AN ENV VAR SET TO THE
+      # EMPTY STRING IS STILL SET: when this step was `if: inputs.chain-supplements` and
+      # skipped, lychee received `SSL_CERT_FILE=''`, tried to read a certificate out of
+      # `''`, and refused to build a client at all --
+      #
+      #   [WARN] Error loading CA root certificate: failed to read PEM from file:
+      #          No such file or directory (os error 2) at ''
+      #   Error: Failed to create request client
+      #     2: unexpected error: No CA certificates were loaded from the system
+      #
+      # That broke the link check in EVERY corpus that had not opted in, on the v1.31.0
+      # pin: seven of them at once, none of which had asked for the feature. An opt-in
+      # input must be inert for a corpus that does not set it, and this one was not.
+      #
+      # So the default is a byte-copy of the runner's own bundle -- the same certificates
+      # lychee would have used, reached by one code path instead of two.
+      - name: Build the CA bundle lychee will use
         id: ca
-        if: inputs.chain-supplements
         run: |
-          shopt -s nullglob
-          pems=(_meta/tls-chain/*.pem)
-          if [ ${#pems[@]} -eq 0 ]; then
-            echo "chain-supplements: true but _meta/tls-chain/ holds no .pem — nothing to add" >&2
-            exit 1
-          fi
+          set -euo pipefail
           bundle="$RUNNER_TEMP/ca-bundle.pem"
-          cat /etc/ssl/certs/ca-certificates.crt "${pems[@]}" > "$bundle"
+          cp /etc/ssl/certs/ca-certificates.crt "$bundle"
+          if [ "${{ inputs.chain-supplements }}" = "true" ]; then
+            shopt -s nullglob
+            pems=(_meta/tls-chain/*.pem)
+            if [ ${#pems[@]} -eq 0 ]; then
+              echo "chain-supplements: true but _meta/tls-chain/ holds no .pem — nothing to add" >&2
+              exit 1
+            fi
+            cat "${pems[@]}" >> "$bundle"
+            echo "appended to the runner CA bundle: ${pems[*]}"
+          else
+            echo "no chain supplements declared; using the runner's CA bundle unchanged"
+          fi
           echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
-          echo "appended to the runner CA bundle: ${pems[*]}"
       - name: External links
         uses: lycheeverse/lychee-action@v2
         env:

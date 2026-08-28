@@ -15,6 +15,31 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## v1.31.1 — 2026-08-28
+
+### Fixed — the link check works again for a corpus that declared no chain supplement (corpus-toolkit#173)
+
+**A v1.31.0 regression. If you pinned v1.31.0 and your CI runs `check-links`, it is red;
+this is the fix.** v1.31.0 added the optional `chain-supplements:` input and, with it, an
+unconditional `SSL_CERT_FILE` handed to lychee — pointing at a bundle that only got built
+when the input was set. **An env var set to the empty string is still set**, so every corpus
+that had not opted in received `SSL_CERT_FILE=''` and lychee refused to build an HTTP client
+at all:
+
+```
+[WARN] Error loading CA root certificate: failed to read PEM from file:
+       No such file or directory (os error 2) at ''
+Error: Failed to create request client
+  2: unexpected error: No CA certificates were loaded from the system
+```
+
+Seven corpora went red on the v1.31.0 pin PR, none of which had asked for the feature. An
+opt-in input must be inert for a corpus that does not set it, and this one was not.
+
+The bundle is now built on every run: a byte-copy of the runner's own CA file, with
+supplements appended only when `chain-supplements: true`. Same certificates, one code path.
+No corpus needs to change anything except the pin.
+
 ## v1.31.0 — 2026-08-28
 
 ### Added — `source-outcomes.json`, a companion drift artifact naming what happened to every in-scope source (corpus-toolkit#160)
