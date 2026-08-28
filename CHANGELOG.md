@@ -43,6 +43,11 @@ every run **prints which supplements it loaded**. `tls.supplement_still_needed()
 the host without its supplement so the exception can be retired when the server is fixed —
 and answers `None`, never "fixed", when the request failed for any other reason.
 
+The `check-links` reusable workflow gains **`chain-supplements: true`**, which appends those
+same PEMs to the runner's CA bundle and points lychee at it. Whether lychee honours
+`SSL_CERT_FILE` is **not assumed** — it depends on its TLS backend — so a corpus turning this
+on should drop its `exclude-urls` entry in the same PR and let the run answer.
+
 ## v1.30.0 — 2026-08-25
 
 ### Fixed — the change detector speaks HTTP/2, so hosts that refuse HTTP/1.1 can be watched (corpus-toolkit#162)
