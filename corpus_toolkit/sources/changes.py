@@ -47,11 +47,11 @@ and `--record-baseline`, a CI annotation, and a non-zero exit — because removi
 tickets and saying nothing more would report could-not-check as nothing-to-report, which
 is the same rule broken the other way round.
 
-TWO ARTIFACTS, EACH WITH ITS OWN MEANING, BOTH PUBLIC SURFACE the moment this runs inside
+THREE ARTIFACTS, EACH WITH ITS OWN MEANING, ALL PUBLIC SURFACE the moment this runs inside
 a corpus repo (AGENTS.md: "anything reachable from a corpus repo is public, whether or not
-this repo calls it"). Both are written on every run that reaches the fetch loop —
+this repo calls it"). All three are written on every run that reaches the fetch loop —
 including a run that fails every fetch, which is the run each of them exists for — and
-neither is written when `--check-robots` returns before fetching anything.
+none is written when `--check-robots` returns before fetching anything.
 
 * `changed-sources.tsv`, at the corpus root. Four tab-separated columns —
   `id, url, old_sha256, new_sha256` — one row per source whose hash MOVED, in manifest
@@ -79,6 +79,26 @@ neither is written when `--check-robots` returns before fetching anything.
   printed pair is `(changed + no_baseline, checked)` and is recoverable exactly. Additive fields on a `groups` entry or a `sources`
   entry are NOT breaking, the same convention `docs/mcp-interface-contract.md` uses for
   the MCP tool responses this toolkit also serves.
+* `access-failures.json`, at the corpus root, new in corpus-toolkit#166 — the ONE artifact
+  here that is not a per-run snapshot: it carries `{(group, id): consecutive fetch-failure
+  count}` FORWARD across separate invocations, so a source that fails every scheduled run
+  can be told apart from one that failed once, which `source-outcomes.json` alone cannot do
+  (it is rebuilt from nothing every run). Read at the start of the fetch loop, folded with
+  this run's own outcomes (`_update_access_failure_streaks`: `fetch_failed` increments, any
+  other outcome — the fetch succeeded — resets), and written back before `--open-issues`
+  ever runs. A source outside this run's `--group` scope keeps whatever streak was already
+  recorded for it, untouched — see that function's docstring for why zeroing it would be
+  "could not check" wearing the shape of "is fine now" (CONTEXT.md's outranking rule). At
+  `ACCESS_FAILURE_STREAK_THRESHOLD` (currently 3) consecutive failures, `--open-issues`
+  files ONE `Source access failing: <id>` ticket, out of the SAME `MAX_ISSUES_PER_RUN`
+  budget the drift tickets and group findings already share — see
+  `ACCESS_FAILURE_STREAK_THRESHOLD`'s docstring for why a run count, not a calendar window.
+  UNLIKE the manifest, this is not curated data a human reviews — it is machine bookkeeping,
+  the same kind STATUS.md already is, and it needs the SAME kind of commit step in the
+  calling workflow to survive an ephemeral runner (corpus-toolkit's own
+  `detect-upstream-changes.yml` gained one alongside this change). A workflow that never
+  commits it degrades safely: the streak restarts at zero, which only delays an escalation,
+  never invents a false one.
 
 Exit codes: 0 on a run that could actually detect drift. 1 when a fetch fails under
 `--strict`, when failures are systemic (>20%), when the issue cap truncated the report
@@ -726,6 +746,60 @@ def _rewrite_problem(before: str, after: str, updates: dict[str, str],
     return None
 
 
+ACCESS_FAILURES_FILE = "access-failures.json"
+"""Name only, at `config.root` — declared once so the reader and the writer cannot name two
+different files (corpus-toolkit#166)."""
+
+
+def _load_access_failure_streaks(config) -> dict[tuple[str, str], int]:
+    """{(group, id): consecutive fetch failures recorded as of the LAST run}, from
+    `access-failures.json` at the corpus root.
+
+    Missing, unreadable, or schema-mismatched is `{}`, never a crash. A run that cannot read
+    its own bookkeeping must still be able to check sources — the streak merely restarts at
+    zero for everyone, which delays an escalation rather than ever inventing one, the same
+    direction every other defensive default in this file errs in (an unseeded baseline does
+    not crash the run either). This is NOT "could not check reported as not there" (CONTEXT.md):
+    nothing here claims the sources were fine, only that how many times in a row they failed
+    is not currently known.
+    """
+    path = config.root / ACCESS_FAILURES_FILE
+    try:
+        raw = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        return {}
+    out: dict[tuple[str, str], int] = {}
+    groups = raw.get("consecutive_fetch_failures")
+    if not isinstance(groups, dict):
+        return {}
+    for gname, ids in groups.items():
+        if not isinstance(ids, dict):
+            continue
+        for sid, n in ids.items():
+            if isinstance(n, int) and n > 0:
+                out[(gname, sid)] = n
+    return out
+
+
+def _write_access_failure_streaks(config, streaks: dict[tuple[str, str], int]) -> None:
+    """Write `access-failures.json` at the corpus root. Entries at 0 are PRUNED, not written
+    at 0 — the file's whole content is "who is currently on a failing streak", so a source
+    that recovered leaves no trace rather than a zero a future reader has to filter out.
+
+    Grouped back into `{group: {id: n}}` on write, the shape a corpus's own manifest already
+    uses (group files of sources), so a human skimming this file recognises the layout.
+    """
+    groups: dict[str, dict[str, int]] = {}
+    for (gname, sid), n in streaks.items():
+        if n > 0:
+            groups.setdefault(gname, {})[sid] = n
+    payload = {"schema_version": 1, "consecutive_fetch_failures": groups}
+    (config.root / ACCESS_FAILURES_FILE).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 def _print_group_breakdown(per_group: dict) -> None:
     """changed/checked per group, on EVERY run (corpus-toolkit#67 item 1).
 
@@ -878,6 +952,109 @@ def _source_outcomes_report(outcomes: list[SourceOutcome], n_total: int,
         "sources": [{"group": o.group, "id": o.id, "url": o.url, "outcome": o.outcome,
                      "had_baseline": o.had_baseline} for o in outcomes],
     }
+
+
+def _update_access_failure_streaks(outcomes: list[SourceOutcome],
+                                   previous: dict[tuple[str, str], int]
+                                   ) -> dict[tuple[str, str], int]:
+    """This run's outcomes folded into `previous` — the pure merge, no filesystem involved.
+
+    ONLY the (group, id) keys THIS RUN OBSERVED are touched. Everything else in `previous`
+    rides through unmodified — a `--group oar` run says nothing about `oam`, so `oam`'s
+    recorded streak is neither bumped nor reset. Silently zeroing an out-of-scope group's
+    streak would report "could not check" as "is fine now", the one collapse CONTEXT.md's
+    outranking rule forbids everywhere else in this file.
+
+    An outcome of anything OTHER THAN `fetch_failed` resets the streak (by omission — the
+    entry is simply not carried forward), because every other outcome means the fetch itself
+    succeeded: bytes arrived, whether or not they compared clean. This counter is about
+    ACCESS specifically, not about drift, so a source that was reached at all is not on an
+    access-failure streak regardless of what its comparison found.
+    """
+    out = dict(previous)
+    for o in outcomes:
+        key = (o.group, o.id)
+        if o.outcome == "fetch_failed":
+            out[key] = previous.get(key, 0) + 1
+        else:
+            out.pop(key, None)
+    return out
+
+
+class PersistentAccessFailure(NamedTuple):
+    """One source whose consecutive fetch-failure streak reached the threshold this run —
+    the escalation candidate `_open_access_failure_ticket` may file a ticket for
+    (corpus-toolkit#166).
+
+    `group` is FIRST, matching `ChangedSource`, so this type is a drop-in for
+    `_count_by_group` (which reads only `.group`) — the same allocation policy #69 already
+    established for the ticket budget applies here without a second implementation of it.
+    """
+    group: str
+    id: str
+    url: str
+    consecutive_failures: int
+
+
+ACCESS_FAILURE_STREAK_THRESHOLD = 3
+"""How many CONSECUTIVE scheduled runs a source must fail to fetch before it is escalated
+(corpus-toolkit#166) — the band between `--strict` (fails on any single failure) and the
+20% systemic guard, where a source can fail every run forever and nothing says so today.
+
+A RUN COUNT, not a calendar window, because this file has no idea what cadence is calling
+it — `--group` alone lets one manifest run monthly-cadence groups and quarterly ones from
+the same corpus (see executive-regulatory-frameworks/.github/workflows/scheduled.yml, whose
+`monthly-drift` and `full-sweep` jobs check DIFFERENT groups on DIFFERENT crons). A
+duration-based threshold would silently mean something different for each.
+
+3, not lower, because the live case that motivated this (ERF#140, 45 sources unfetchable for
+22 days) makes a single transient blip the wrong bar — the issue's own framing is "a weekly
+run failing TWICE may be a transient", i.e. two is explicitly not enough. 3, not higher: the
+platform's actual schedules are monthly and quarterly (see scheduled.yml above), so a much
+larger threshold would let a genuinely stuck source run for the better part of a year, unlike
+`MAX_ISSUES_PER_RUN`, before anything says so — the opposite failure this ticket exists to
+fix. Not the same knob as `MAX_ISSUES_PER_RUN` (out of scope for corpus-toolkit#166) and not
+the 20% systemic threshold: both are about ONE run; this is about many.
+"""
+
+
+def _persistent_access_failures(outcomes: list[SourceOutcome],
+                                streaks: dict[tuple[str, str], int]
+                                ) -> list[PersistentAccessFailure]:
+    """Sources whose streak, AFTER this run's update, is at or above the threshold.
+
+    `>=`, not `==`: `_open_access_failure_ticket` is `_file_once`-deduplicated exactly like
+    `_open_issue` and `_open_group_finding`, so a source still failing on run 4, 5, 6 after
+    crossing the threshold on run 3 keeps landing here and keeps finding its own ticket
+    already open — "reported once, not once per run" is enforced by the dedup search, not by
+    only ever calling this at the exact moment of crossing. That also makes the mechanism
+    self-healing if the streak file is ever unreadable for one run: the next run that CAN
+    read it re-derives the same candidate rather than needing to have caught an exact tick.
+
+    Filtered on THIS RUN's outcome as well as the streak number, not the streak alone: a
+    source that just recovered is not a candidate even if a caller passed a stale streak for
+    it — the outcome is the ground truth for whether the fetch worked just now.
+    """
+    out = []
+    for o in outcomes:
+        if o.outcome != "fetch_failed":
+            continue
+        n = streaks.get((o.group, o.id), 0)
+        if n >= ACCESS_FAILURE_STREAK_THRESHOLD:
+            out.append(PersistentAccessFailure(o.group, o.id, o.url, n))
+    return out
+
+
+def _access_failures_in_spend_order(failures: list[PersistentAccessFailure]
+                                    ) -> list[PersistentAccessFailure]:
+    """Deterministic order for spending `MAX_ISSUES_PER_RUN` on these — the SAME policy
+    `_tickets_in_spend_order` uses (corpus-toolkit#69: ascending per-group count, then group
+    name, then detection order), reused rather than reinvented because the issue this
+    function exists for (corpus-toolkit#166) asks for exactly that: share the budget and its
+    allocation policy, not invent a second one.
+    """
+    per_group = _count_by_group(failures)
+    return sorted(failures, key=lambda f: (per_group[f.group], f.group))
 
 
 def _count_by_group(entries: list[ChangedSource]) -> dict[str, int]:
@@ -1094,6 +1271,43 @@ def _open_group_finding(group: str, changed_ids: list[str], compared: int,
     return _file_once(f"Group drifted: {group}", body, f"group {group}")
 
 
+def _open_access_failure_ticket(group: str, source_id: str, url: str,
+                                consecutive_failures: int) -> bool:
+    """Open one persistent-access-failure ticket (corpus-toolkit#166): a source that has
+    failed to fetch on `consecutive_failures` scheduled runs in a row, at or past
+    `ACCESS_FAILURE_STREAK_THRESHOLD`.
+
+    THE TITLE CARRIES NO COUNT, for the identical reason `_open_group_finding` gives: the
+    dedup search in `_file_once` is `in:title "<title>"`, so a title that moves while the
+    source is still failing — `Source access failing: oar-7 (6 runs)` today, `(9 runs)` next
+    month — breaks the search and the same unresolved condition files a fresh ticket every
+    time it is checked. The count belongs in the body, which IS free to change on an edit
+    this function does not perform (each failing run re-opens the search, finds the ticket
+    already there, and stops).
+
+    THE WORDING STATES ONLY WHAT WAS MEASURED: that our crawler could not fetch this URL on
+    N consecutive scheduled runs. It does not say the document was removed, moved, or that
+    upstream did anything at all — "45 sources unfetchable" is true, "45 sources removed
+    upstream" is not, and nothing this tool observes can tell the two apart (the issue's own
+    framing, and CONTEXT.md's outranking rule: "could not check" is never reported as "is
+    not there"). Compare `_open_group_finding`'s "changed together, not why" — the same
+    discipline, applied to access instead of content.
+    """
+    body = (f"Automated detection: this source has failed to fetch on "
+            f"{consecutive_failures} consecutive scheduled run(s).\n\n"
+            f"This is a fact about OUR ACCESS to the URL below, not a claim about what "
+            f"upstream did. A fetch failure this persistent has usually meant a host that "
+            f"started refusing or challenging this crawler, a URL that moved or 404s, or a "
+            f"DNS or TLS change — the tool cannot tell which, only that {consecutive_failures} "
+            f"attempts in a row did not get a response it could hash.\n\n"
+            f"- **Group**: {group}\n"
+            f"- **Source id**: {source_id}\n"
+            f"- **Source URL**: {url}\n"
+            f"- **Consecutive failed fetches**: {consecutive_failures}\n")
+    return _file_once(f"Source access failing: {source_id}", body,
+                      f"access failure {source_id}")
+
+
 def _drifting_groups_in_spend_order(changed: list[ChangedSource]) -> list[str]:
     """Every group that drifted, in the order the budget is spent on them.
 
@@ -1173,6 +1387,11 @@ def main():
     # decides what happened to it (corpus-toolkit#160) — see SourceOutcome's docstring for
     # the vocabulary. This is `source-outcomes.json`'s per-source list, in detection order.
     outcomes: list[SourceOutcome] = []
+    # LAST RUN'S consecutive-fetch-failure streaks (corpus-toolkit#166), read BEFORE the
+    # fetch loop so this run's own outcomes can be folded onto them once it is done. Missing
+    # or unreadable reads as `{}` — see `_load_access_failure_streaks`'s docstring for why
+    # that is not the same collapse CONTEXT.md's outranking rule forbids.
+    previous_access_streaks = _load_access_failure_streaks(config)
     # (group, id) -> how many ENTRIES with that key were not compared. Per entry, because
     # only the fetch loop knows which of two duplicate entries succeeded.
     uncompared_counts: dict[tuple[str, str], int] = {}
@@ -1352,6 +1571,22 @@ def main():
             mode=f"record-baseline:{args.record_baseline}" if args.record_baseline else None),
                    indent=2, sort_keys=True) + "\n")
 
+    # THE CROSS-RUN COUNTER (corpus-toolkit#166), updated and written HERE, beside
+    # `source-outcomes.json` and for the same reason: a wholly-failed run is exactly the run
+    # this exists to remember, so it is unconditional, not gated behind `--open-issues` or
+    # `--record-baseline`. Only sources THIS run observed are touched — see
+    # `_update_access_failure_streaks`'s docstring for why an out-of-scope `--group` run must
+    # not silently reset a group it never looked at.
+    #
+    # UNLIKE the source manifest, this file is not curated data a human reviews line by
+    # line — it is machine bookkeeping, the same kind STATUS.md already is, and like
+    # STATUS.md it needs a commit step in the calling workflow to actually persist past one
+    # ephemeral run; corpus-toolkit's own reusable workflow gains that step alongside this
+    # change. A workflow that never commits it degrades safely: the streak restarts at zero,
+    # which only delays an escalation, never invents one.
+    access_streaks = _update_access_failure_streaks(outcomes, previous_access_streaks)
+    _write_access_failure_streaks(config, access_streaks)
+
     recorded = None
     if args.record_baseline:
         recorded = _record_baselines(config, fetched, in_scope, args.record_baseline,
@@ -1362,6 +1597,14 @@ def main():
     # and the workflow output. Computing it twice is how the three "not compared" counts
     # of corpus-toolkit#67 came to disagree with each other.
     ticketable = _tickets_in_spend_order(changed)
+
+    # SOURCES CROSSING THE PERSISTENT-ACCESS-FAILURE THRESHOLD THIS RUN (corpus-toolkit#166),
+    # computed off the UPDATED streaks so a source failing its Nth consecutive run is a
+    # candidate the moment N is reached, not one run later. Independent of `changed`/
+    # `ticketable`: a persistently unfetchable source never produced a hash to compare, so it
+    # cannot be drift, and a corpus with zero content changes can still owe this report.
+    access_failures = _access_failures_in_spend_order(
+        _persistent_access_failures(outcomes, access_streaks))
 
     # A run with no baseline at all cannot detect drift: every source compares unequal to
     # `''`, so 100% "changed" is a fact about the manifest, not about upstream. Measured,
@@ -1408,7 +1651,14 @@ def main():
     findings = _group_drift_findings(changed, per_group)
     findings_attempted = findings_opened = 0
     filed_findings: list[str] = []
-    if args.open_issues and ticketable and not inert:
+    # corpus-toolkit#166: same budget as the drift tickets and findings, not a second one —
+    # `access_attempted` is added into every cap check below alongside `findings_attempted`.
+    access_attempted = access_opened = 0
+    filed_access_failures: list[str] = []
+    # `ticketable OR access_failures`, not `ticketable` alone: a persistently unfetchable
+    # source produced no hash and is never in `ticketable`, so a corpus with zero drifted
+    # sources but one source stuck failing every fetch must still enter this block.
+    if args.open_issues and (ticketable or access_failures) and not inert:
         _ensure_label()
         # BEFORE the individual tickets, and out of the same budget (ADR 0010). Before,
         # because the spend order is smallest-drifting-group-first and therefore reaches
@@ -1418,15 +1668,31 @@ def main():
         # cap: a corpus with 27 bulk-drifting groups would file 27 issues past a limit of
         # 25. There is at most one finding per group, so filing them first cannot flood.
         for f in findings:
-            if attempted + findings_attempted >= MAX_ISSUES_PER_RUN:
+            if attempted + findings_attempted + access_attempted >= MAX_ISSUES_PER_RUN:
                 capped = True
                 break
             findings_attempted += 1
             if _open_group_finding(f.group, f.ids, f.compared, f.in_scope):
                 findings_opened += 1
                 filed_findings.append(f.group)
+        # AFTER the group findings, BEFORE the per-source drift tickets: an access-failure
+        # escalation is rarer and more actionable than the typical drift ticket pool (it
+        # took several consecutive runs to even qualify), so it should not be starved by a
+        # large `ticketable` the way corpus-toolkit#69 found happening to whole groups —
+        # while a group finding, having already replaced up to hundreds of individual
+        # tickets, still goes first.
+        if not capped:
+            for pf in access_failures:
+                if attempted + findings_attempted + access_attempted >= MAX_ISSUES_PER_RUN:
+                    capped = True
+                    break
+                access_attempted += 1
+                if _open_access_failure_ticket(pf.group, pf.id, pf.url,
+                                               pf.consecutive_failures):
+                    access_opened += 1
+                    filed_access_failures.append(pf.id)
         for c in ticketable:
-            if attempted + findings_attempted >= MAX_ISSUES_PER_RUN:
+            if attempted + findings_attempted + access_attempted >= MAX_ISSUES_PER_RUN:
                 capped = True
                 break
             attempted += 1
@@ -1605,6 +1871,16 @@ def main():
                         "run: it reports that they changed together and asserts nothing "
                         "about why, and the individual tickets stand alongside it "
                         "(ADR 0010).")
+            # corpus-toolkit#166, same reasoning as the findings line above: an escalation
+            # that was attempted and does not exist afterwards is not a report.
+            if access_attempted:
+                print(f"{access_opened} persistent access-failure ticket(s) opened or "
+                      f"already open, {access_attempted - access_opened} failed"
+                      + (": " + ", ".join(filed_access_failures)
+                         if filed_access_failures else "")
+                      + f". Each names a source our crawler could not fetch on "
+                        f"{ACCESS_FAILURE_STREAK_THRESHOLD}+ consecutive scheduled runs — a "
+                        f"fact about OUR ACCESS, not a claim about what upstream did.")
         if capped:
             # `ticketable`, not `changed`: a source with no recorded baseline was never a
             # candidate for a ticket, so counting it here inflates the one number an

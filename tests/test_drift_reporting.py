@@ -137,6 +137,8 @@ class _DriftRun(unittest.TestCase):
         # Same idea for the group findings of ADR 0010: a finding that was ATTEMPTED and
         # does not exist afterwards is a different outcome from one that was never due.
         self.failing_findings: set[str] = set()
+        # Same idea again for corpus-toolkit#166's persistent-access-failure tickets.
+        self.failing_access_tickets: set[str] = set()
         self.root = Path(tempfile.mkdtemp())
         (self.root / "_meta" / "sources").mkdir(parents=True)
         (self.root / "documents").mkdir()
@@ -197,9 +199,14 @@ class _DriftRun(unittest.TestCase):
              mock.patch.object(changes, "_open_group_finding",
                                side_effect=lambda g, *a, **k: g not in self.failing_findings
                                ) as group_finding, \
+             mock.patch.object(changes, "_open_access_failure_ticket",
+                               side_effect=lambda g, sid, *a, **k:
+                                   sid not in self.failing_access_tickets
+                               ) as access_ticket, \
              redirect_stdout(out), redirect_stderr(err):
             self.open_issue = open_issue
             self.group_finding = group_finding
+            self.access_ticket = access_ticket
             try:
                 changes.main()
                 code = 0
@@ -1817,6 +1824,306 @@ class GroupFindingIssueTest(unittest.TestCase):
             body = self._opt(create, "--body")
             self.assertNotIn("actions/runs", body,
                              f"a run link was built with {var} missing:\n{body}")
+
+
+class AccessFailureStreakStateTest(unittest.TestCase):
+    """corpus-toolkit#166: the counter that lets a persistent fetch failure be told apart
+    from a first-time one has to survive between separate `main()` invocations — a plain
+    Python dict built and dropped inside one run cannot. These tests exercise the read/write
+    pair directly, on a real file at `config.root`, the same seam `source-outcomes.json`
+    already writes to.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "_meta" / "sources").mkdir(parents=True)
+        (self.root / "_meta" / "corpus.yml").write_text(CORPUS_YML)
+        self.config = changes.config_mod.load(str(self.root / "_meta" / "corpus.yml"))
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_a_fresh_corpus_has_no_recorded_streaks(self):
+        # No file on disk yet — could not check is not zero-and-fine, but here there is
+        # nothing to be wrong about either: a corpus that has never recorded a streak
+        # starts at zero for everyone, same as `sha256: ''` starts a baseline at "unseeded"
+        # rather than crashing.
+        self.assertEqual(changes._load_access_failure_streaks(self.config), {})
+
+    def test_a_written_streak_is_read_back_by_a_later_run(self):
+        changes._write_access_failure_streaks(
+            self.config, {("oar", "oar-0"): 2, ("oam", "oam-1"): 1})
+        streaks = changes._load_access_failure_streaks(self.config)
+        self.assertEqual(streaks[("oar", "oar-0")], 2)
+        self.assertEqual(streaks[("oam", "oam-1")], 1)
+
+    def test_an_unreadable_file_is_treated_as_no_recorded_streaks_not_a_crash(self):
+        (self.root / "access-failures.json").write_text("not json")
+        self.assertEqual(changes._load_access_failure_streaks(self.config), {})
+
+    def test_zero_streaks_are_pruned_rather_than_written_as_noise(self):
+        changes._write_access_failure_streaks(
+            self.config, {("oar", "oar-0"): 2, ("oar", "oar-1"): 0})
+        streaks = changes._load_access_failure_streaks(self.config)
+        self.assertEqual(streaks, {("oar", "oar-0"): 2})
+
+
+class UpdateAccessFailureStreaksTest(unittest.TestCase):
+    """The pure merge: this run's outcomes folded into the streaks a previous run recorded.
+
+    Deliberately separate from the file I/O (AccessFailureStreakStateTest) and from `main`,
+    the same reason `_count_by_group` and `_tickets_in_spend_order` are pure functions over
+    plain data — the rule that decides who is on a streak has to be testable without a
+    filesystem or a fetch loop.
+    """
+
+    def _mk_outcome(self, group, sid, outcome):
+        return changes.SourceOutcome(group, sid, f"https://x/{sid}", outcome, True)
+
+    def test_a_first_failure_starts_the_streak_at_one(self):
+        out = changes._update_access_failure_streaks(
+            [self._mk_outcome("oar", "oar-0", "fetch_failed")], {})
+        self.assertEqual(out[("oar", "oar-0")], 1)
+
+    def test_a_second_consecutive_failure_increments_the_streak(self):
+        out = changes._update_access_failure_streaks(
+            [self._mk_outcome("oar", "oar-0", "fetch_failed")], {("oar", "oar-0"): 1})
+        self.assertEqual(out[("oar", "oar-0")], 2)
+
+    def test_a_success_resets_the_streak_rather_than_holding_it(self):
+        out = changes._update_access_failure_streaks(
+            [self._mk_outcome("oar", "oar-0", "unchanged")], {("oar", "oar-0"): 5})
+        self.assertNotIn(("oar", "oar-0"), out, "a recovered source must not still read as failing")
+
+    def test_a_group_outside_this_runs_scope_keeps_its_recorded_streak(self):
+        # `--group oar` checked nothing in `oam` this run. Erasing oam's recorded streak
+        # here would be "could not check" wearing the shape of "is fine now" — the same
+        # collapse CONTEXT.md's outranking rule refuses everywhere else in this file.
+        out = changes._update_access_failure_streaks(
+            [self._mk_outcome("oar", "oar-0", "fetch_failed")], {("oam", "oam-1"): 4})
+        self.assertEqual(out[("oam", "oam-1")], 4)
+        self.assertEqual(out[("oar", "oar-0")], 1)
+
+    def test_no_baseline_and_watch_outcomes_reset_the_streak_too(self):
+        # Every outcome OTHER than fetch_failed means the fetch itself succeeded — bytes
+        # arrived. A streak specifically about ACCESS must not stay elevated over a source
+        # that our crawler plainly reached.
+        for outcome in ("changed", "unchanged", "no_baseline", "unreadable_json",
+                        "watch_path_missing"):
+            with self.subTest(outcome=outcome):
+                out = changes._update_access_failure_streaks(
+                    [self._mk_outcome("oar", "oar-0", outcome)], {("oar", "oar-0"): 2})
+                self.assertNotIn(("oar", "oar-0"), out)
+
+
+class PersistentAccessFailureCandidatesTest(unittest.TestCase):
+    """Which sources have crossed the escalation threshold THIS run."""
+
+    def _mk_outcome(self, group, sid, outcome="fetch_failed"):
+        return changes.SourceOutcome(group, sid, f"https://x/{sid}", outcome, True)
+
+    def test_below_threshold_is_not_a_candidate(self):
+        outcomes = [self._mk_outcome("oar", "oar-0")]
+        streaks = {("oar", "oar-0"): changes.ACCESS_FAILURE_STREAK_THRESHOLD - 1}
+        self.assertEqual(changes._persistent_access_failures(outcomes, streaks), [])
+
+    def test_at_threshold_is_a_candidate_exactly_once_not_once_per_run(self):
+        outcomes = [self._mk_outcome("oar", "oar-0")]
+        streaks = {("oar", "oar-0"): changes.ACCESS_FAILURE_STREAK_THRESHOLD}
+        found = changes._persistent_access_failures(outcomes, streaks)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].group, "oar")
+        self.assertEqual(found[0].id, "oar-0")
+        self.assertEqual(found[0].consecutive_failures, changes.ACCESS_FAILURE_STREAK_THRESHOLD)
+
+    def test_a_source_that_recovered_this_run_is_never_a_candidate(self):
+        # Its outcome this run is not fetch_failed even though the pre-update streak (not
+        # passed here — `streaks` is the UPDATED map) would have been high; this asserts the
+        # candidate filter itself also checks the outcome, not only the number, so a
+        # caller that forgets to reset a recovered source's streak first is still safe.
+        outcomes = [self._mk_outcome("oar", "oar-0", "unchanged")]
+        streaks = {("oar", "oar-0"): changes.ACCESS_FAILURE_STREAK_THRESHOLD}
+        self.assertEqual(changes._persistent_access_failures(outcomes, streaks), [])
+
+
+class AccessFailuresInSpendOrderTest(unittest.TestCase):
+    """Shares `_count_by_group`'s allocation policy (corpus-toolkit#69) rather than inventing
+    a second one — `_count_by_group` only reads `.group`, and `PersistentAccessFailure`
+    carries one for exactly this reason.
+    """
+
+    def _pf(self, group, sid, n=3):
+        return changes.PersistentAccessFailure(group, sid, f"https://x/{sid}", n)
+
+    def test_the_smaller_group_files_first(self):
+        failures = [self._pf("big", "big-0"), self._pf("big", "big-1"),
+                   self._pf("small", "small-0")]
+        ordered = changes._access_failures_in_spend_order(failures)
+        self.assertEqual(ordered[0].group, "small")
+
+
+class AccessFailureTicketTest(unittest.TestCase):
+    """What the persistent-access-failure ticket actually files. Same seam `_open_issue`
+    and `_open_group_finding` use — `_file_once`'s title-search dedup — and the same
+    wording discipline CONTEXT.md's outranking rule states: this is a fact about OUR
+    ACCESS, never a claim about what happened upstream.
+    """
+
+    def _file(self, group="oar", sid="oar-0", url="https://example.gov/oar/0",
+              n=changes.ACCESS_FAILURE_STREAK_THRESHOLD, already_open=False):
+        side_effect = ([_completed(0, "1")] if already_open else
+                       [_completed(0, "0"), _completed(0, "https://github.com/o/r/issues/9")])
+        with mock.patch.object(changes.shutil, "which", return_value="/usr/bin/gh"), \
+             mock.patch.object(changes.subprocess, "run", side_effect=side_effect) as run:
+            ok = changes._open_access_failure_ticket(group, sid, url, n)
+        return ok, run.call_args_list
+
+    def test_an_already_open_ticket_is_not_filed_again(self):
+        ok, calls = self._file(already_open=True)
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1, "a second ticket was filed for a condition already tracked")
+
+    def test_the_title_names_the_source_and_carries_no_count(self):
+        # Same ADR-0010 reasoning `_open_group_finding` documents: a count in the title
+        # means the search misses tomorrow and the same unresolved condition files again.
+        ok, calls = self._file(sid="oar-7", n=3)
+        title = calls[1].args[0][calls[1].args[0].index("--title") + 1]
+        self.assertEqual(title, "Source access failing: oar-7")
+        _, later_calls = self._file(sid="oar-7", n=9)
+        later_title = later_calls[1].args[0][later_calls[1].args[0].index("--title") + 1]
+        self.assertEqual(title, later_title, "the title moved while the condition persisted")
+        self.assertNotIn("3", title)
+        self.assertNotIn("9", title)
+
+    def test_the_body_states_the_streak_and_the_url(self):
+        ok, calls = self._file(sid="oar-7", url="https://example.gov/oar/7", n=5)
+        body = calls[1].args[0][calls[1].args[0].index("--body") + 1]
+        self.assertIn("5", body)
+        self.assertIn("https://example.gov/oar/7", body)
+
+    def test_the_body_never_claims_the_source_was_removed_upstream(self):
+        """The measured fact is our access; nothing here can tell whether upstream still
+        serves the document, moved it, or never existed. "45 sources unfetchable" is true;
+        "45 sources removed upstream" is not (corpus-toolkit#166)."""
+        ok, calls = self._file()
+        body = calls[1].args[0][calls[1].args[0].index("--body") + 1].lower()
+        for claim in ("removed", "no longer exists", "deleted", "gone", "retired"):
+            self.assertNotIn(claim, body, f"body asserts {claim!r}, a claim about upstream")
+        self.assertIn("our access", body)
+
+    def test_the_body_names_it_a_fact_about_access_not_content(self):
+        ok, calls = self._file()
+        body = calls[1].args[0][calls[1].args[0].index("--body") + 1]
+        self.assertIn(str(changes.ACCESS_FAILURE_STREAK_THRESHOLD), body)
+
+
+class PersistentAccessFailureEscalationTest(_DriftRun):
+    """corpus-toolkit#166: a source failing every fetch forever must be reported once — not
+    once per run (that would be `--strict`, retired for exactly this reason) and not never
+    (today's gap: default mode tolerates an isolated failure with no escalation at all).
+
+    Each `run_cli()` call here is one SEPARATE scheduled run over the SAME manifest on disk,
+    driving `main()` fresh each time — the seam that makes a cross-run counter observable at
+    all without a real cron.
+    """
+
+    def test_a_source_failing_its_first_run_is_not_escalated(self):
+        self.group("oar", 1, baseline="current")
+        self.bodies["https://example.gov/oar/0"] = OSError("HTTP Error 403")
+        self.run_cli("--open-issues")
+        self.access_ticket.assert_not_called()
+
+    def test_a_source_failing_fewer_than_the_threshold_is_not_escalated(self):
+        self.group("oar", 1, baseline="current")
+        self.bodies["https://example.gov/oar/0"] = OSError("HTTP Error 403")
+        for _ in range(changes.ACCESS_FAILURE_STREAK_THRESHOLD - 1):
+            self.run_cli("--open-issues")
+        self.access_ticket.assert_not_called()
+
+    def test_a_source_failing_its_nth_consecutive_run_is_escalated_and_the_first_is_not(self):
+        # THE RED PROOF: before this feature exists, run 1 and run N produce IDENTICAL
+        # treatment — `FETCH FAILED` on stdout and nothing else, every time. This asserts
+        # they differ: no ticket through run N-1, exactly one ticket attempted on run N,
+        # naming this source, with a streak count that reads N.
+        self.group("oar", 1, baseline="current")
+        self.bodies["https://example.gov/oar/0"] = OSError("HTTP Error 403")
+        for _ in range(changes.ACCESS_FAILURE_STREAK_THRESHOLD - 1):
+            self.run_cli("--open-issues")
+            self.access_ticket.assert_not_called()
+        self.run_cli("--open-issues")
+        self.access_ticket.assert_called_once()
+        call_args = self.access_ticket.call_args.args
+        self.assertEqual(call_args[0], "oar")
+        self.assertEqual(call_args[1], "oar-0")
+        self.assertEqual(call_args[3], changes.ACCESS_FAILURE_STREAK_THRESHOLD)
+
+    def test_a_source_that_recovers_resets_the_streak(self):
+        self.group("oar", 1, baseline="current")
+        url = "https://example.gov/oar/0"
+        self.bodies[url] = OSError("HTTP Error 403")
+        for _ in range(changes.ACCESS_FAILURE_STREAK_THRESHOLD - 1):
+            self.run_cli("--open-issues")
+        self.bodies[url] = _body(0)  # recovers — one successful fetch
+        self.run_cli("--open-issues")
+        self.bodies[url] = OSError("HTTP Error 403")
+        for _ in range(changes.ACCESS_FAILURE_STREAK_THRESHOLD - 1):
+            self.run_cli("--open-issues")
+            self.access_ticket.assert_not_called()
+
+    def test_the_ticket_keeps_being_attempted_on_every_run_past_the_threshold(self):
+        # `_file_once`'s own title-search dedup (tested in AccessFailureTicketTest) is what
+        # keeps this from actually creating a second GitHub issue; main() itself does not
+        # need to remember "already reported" because the tracker already does. `run_cli`
+        # patches a FRESH mock in on every call, so the attempts are summed across runs
+        # rather than read off one mock's cumulative count.
+        self.group("oar", 1, baseline="current")
+        self.bodies["https://example.gov/oar/0"] = OSError("HTTP Error 403")
+        attempts = 0
+        for _ in range(changes.ACCESS_FAILURE_STREAK_THRESHOLD + 2):
+            self.run_cli("--open-issues")
+            attempts += self.access_ticket.call_count
+        self.assertEqual(attempts, 3)
+
+    def test_a_group_out_of_this_runs_scope_is_not_silently_reset(self):
+        self.group("oar", 1, baseline="current")
+        self.group("oam", 1, baseline="current")
+        self.bodies["https://example.gov/oar/0"] = OSError("HTTP Error 403")
+        self.bodies["https://example.gov/oam/0"] = OSError("HTTP Error 403")
+        for _ in range(changes.ACCESS_FAILURE_STREAK_THRESHOLD - 1):
+            self.run_cli("--open-issues", "--group", "oar")
+        # oam was never in scope across those runs, so its streak must still be at zero,
+        # not accidentally advanced or reset — check by running it alone once, which must
+        # not itself be a false escalation.
+        self.run_cli("--open-issues", "--group", "oam")
+        self.access_ticket.assert_not_called()
+        # oar, meanwhile, keeps the streak it earned while it WAS in scope.
+        self.run_cli("--open-issues", "--group", "oar")
+        self.access_ticket.assert_called_once()
+
+    def test_the_ticket_shares_the_issue_budget_with_drift_tickets(self):
+        # "reuse the existing budget... rather than invent a second one" — a run whose
+        # budget is already exhausted by group drift findings (filed before either the
+        # access tickets or the per-source ones, ADR 0010) must not file the access ticket
+        # on top of the cap. MAX_ISSUES_PER_RUN 2-source groups, every source changed and
+        # compared, produces exactly MAX_ISSUES_PER_RUN group findings — the whole budget,
+        # before the access-failure loop is ever reached.
+        for i in range(changes.MAX_ISSUES_PER_RUN):
+            self.group(f"g{i}", 2, baseline="stale")
+        self.group("failing", 1, baseline="current")
+        url = "https://example.gov/failing/0"
+        self.bodies[url] = OSError("HTTP Error 403")
+        for _ in range(changes.ACCESS_FAILURE_STREAK_THRESHOLD):
+            self.run_cli("--open-issues")
+        self.access_ticket.assert_not_called()
+
+    def test_the_body_never_asserts_the_source_was_removed_upstream(self):
+        self.group("oar", 1, baseline="current")
+        self.bodies["https://example.gov/oar/0"] = OSError("HTTP Error 403")
+        for _ in range(changes.ACCESS_FAILURE_STREAK_THRESHOLD):
+            code, out, err = self.run_cli("--open-issues")
+        combined = (out + err).lower()
+        for claim in ("removed upstream", "no longer exists", "was deleted"):
+            self.assertNotIn(claim, combined)
 
 
 if __name__ == "__main__":

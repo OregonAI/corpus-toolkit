@@ -83,6 +83,20 @@ four of the six describe a source nothing compared, for four different reasons w
 different remedies, and the whole point of naming them is that a consumer no longer has to
 guess which one applied.
 
+**Persistent access failure** — a source whose `fetch_failed` outcome has recurred on
+`ACCESS_FAILURE_STREAK_THRESHOLD` or more CONSECUTIVE scheduled runs, tracked in
+`access-failures.json` across separate invocations rather than within one (corpus-toolkit#166).
+Named apart from a `Source changed:` ticket because it is a different claim: a source that
+fails to fetch was never compared to anything, so it cannot be drift, and the ticket says only
+that OUR ACCESS to the URL has failed repeatedly — never that upstream removed, moved, or
+changed anything, which nothing this tool observes can tell. The gap it closes sits between
+`--strict` (fails a run on any single failure) and the 20% systemic guard (fails a run whose
+failures are widespread): a source failing every run forever, at low volume, previously
+produced identical output — `FETCH FAILED` on stdout — on its first failure and its thirtieth.
+_Avoid_: describing it as drift, or folding it into `Source changed:` — the whole point is that
+these are sources nothing has been compared for, the same reason `no_baseline` is its own
+source outcome rather than `changed`.
+
 ## Contracts
 
 **Corpus contract** — `docs/mcp-interface-contract.md`. Seven tools, the response conventions,
@@ -148,5 +162,8 @@ never `current`, as `attribution.can_answer` refusing to let "attributes nothing
 shape of "holds none", as the reason a healthcheck that cannot fail is treated as worse
 than no healthcheck, and as a source outcome refusing to let `fetch_failed` wear the shape of
 `unchanged` — the two states `changed-sources.tsv` could not tell apart, because a source
-absent from it means either one (corpus-toolkit#160). If a new mechanism collapses those two
+absent from it means either one (corpus-toolkit#160). It appears again as
+`_update_access_failure_streaks` refusing to reset a source's recorded streak just because a
+`--group` run never looked at it this time (corpus-toolkit#166) — an out-of-scope source is
+"could not check", not "is failing no longer". If a new mechanism collapses those two
 answers, it is wrong regardless of what it is called.
