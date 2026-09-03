@@ -102,3 +102,18 @@ def test_propagate_pin_requests_auto_merge_and_refuses_over_a_stale_pr():
     runs = "\n".join(str(s.get("run", "")) for s in steps)
     assert "gh pr merge --auto" in runs
     assert "toolkit-pin-" in runs and "still has a bump PR open from an earlier release" in runs
+
+
+def test_the_drift_workflow_files_nothing_and_merges_its_own_pr():
+    """ADR 0015: no `issues: write`, no `--open-issues`, a `groups` input, auto-merge."""
+    d = _load("detect-upstream-changes")
+    inputs = d["on"]["workflow_call"]["inputs"]
+    assert "groups" in inputs and inputs["groups"].get("default", "") == ""
+    job = d["jobs"]["detect"]
+    assert "issues" not in job["permissions"], "the run files no issues; the permission must go with it"
+    assert job["permissions"].get("pull-requests") == "write"
+    runs = "\n".join(str(s.get("run", "")) for s in job["steps"])
+    assert "--open-issues" not in runs
+    assert "--group" in runs and 'refs/heads/${BRANCH}' in runs and "gh pr merge --auto" in runs
+    assert "DRIFT.md" in runs and "drift-state.json" in runs and "git add -u" in runs
+

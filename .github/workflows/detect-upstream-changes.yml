@@ -1,6 +1,19 @@
 # Reusable workflow: scheduled upstream change detection.
-# Re-fetches manifest sources, diffs hashes (documents) or schemas (APIs),
-# opens an issue per drifted source. Also regenerates STATUS.md.
+# Re-fetches manifest sources, diffs hashes (documents) or schemas (APIs), seeds any source
+# that has no baseline yet, and writes the ROLLING drift report — DRIFT.md, rendered from
+# drift-state.json — plus STATUS.md. Files no issues (ADR 0015). Everything the run wrote
+# lands in one PR on a stable branch that merges itself when the corpus's checks are green.
+#
+# WHY A REPORT AND NOT TICKETS. Until v1.34.0 this filed one issue per changed source (cap
+# 25), one per whole-group change and one per persistent access failure. Measured
+# 2026-09-02: 90 of the org's 172 open issues were those, none read. The claims are the same
+# and now live in DRIFT.md, in the corpus, where somebody about to re-ingest will look.
+#
+# WHY THE PR MERGES ITSELF. Since 2026-09-03 every public corpus protects `main` with
+# required status checks and no required reviews (ADR-0014), so `gh pr merge --auto` lands
+# the state the moment the checks pass. The v1.32.0 obligation — "merge the chore PR at
+# least as often as the schedule runs or the streaks reset" — is gone. Where auto-merge is
+# unavailable (a private repo on this plan) the request is declined and the PR waits.
 name: detect-upstream-changes
 on:
   workflow_call:
@@ -17,15 +30,24 @@ on:
         type: string
         required: false
         default: ""
+      groups:
+        description: >-
+          Newline-separated source groups to check this run (each becomes a `--group`).
+          Empty = every group. This is how a corpus runs different groups on different
+          cadences — executive-regulatory-frameworks checks thirteen monthly groups on the
+          5th and everything quarterly — without a bespoke job of its own: state for the
+          groups NOT in scope is held, not cleared (ADR 0013's rule, now shared by
+          drift-state.json).
+        type: string
+        default: ""
 
 jobs:
   detect:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      issues: write
-      # STATUS.md now arrives as a PR rather than a push to a protected default branch,
-      # so the job needs to be able to open one.
+      # The report arrives as a PR, so the job needs to be able to open one. `issues:
+      # write` is deliberately GONE: this workflow files nothing (ADR 0015).
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
@@ -39,52 +61,37 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get update -q && sudo apt-get install -y poppler-utils
       - run: pip install ./.toolkit
-      # This step now FAILS the job when the run could not do its job: the issue cap
-      # truncated the report, or no in-scope source has a recorded baseline
-      # (corpus-toolkit#67, #68). Both used to conclude `success` with the explanation on
-      # stderr near the end of a multi-thousand-line log, where it went unread through two
-      # occurrences. Do not paper over it with `continue-on-error` — a green check is
-      # exactly the wrong answer. Seed the manifest (`--record-baseline`) or fix the group
-      # the breakdown names.
-      - name: Detect drift and open issues
+      # RED MEANS THE RUN COULD NOT DO ITS JOB, never that upstream changed: systemic fetch
+      # failure (>20%), nothing in scope, a refused manifest rewrite, or a watched source
+      # that arrived and still could not be compared (`RunVerdict` in changes.py, mirrored
+      # in DRIFT.md's "Last run"). Do not paper over it with `continue-on-error`.
+      - name: Detect drift, seed what has no baseline, write DRIFT.md
+        id: detect
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: corpus-detect-changes --config _meta/corpus.yml --open-issues
+          GROUPS: ${{ inputs.groups }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r g; do
+            g="${g//[[:space:]]/}"
+            [ -n "$g" ] && args+=(--group "$g")
+          done <<< "$GROUPS"
+          corpus-detect-changes --config _meta/corpus.yml "${args[@]}"
       # `if: always()` so STATUS.md still regenerates on a red drift step. The freshness
-      # report is independent of whether drift reporting was truncated, and losing it is
-      # not a useful consequence of a capped run.
+      # report is independent of whether the drift run could compare anything.
       - name: Regenerate STATUS.md
         if: always()
         run: corpus-generate-status --config _meta/corpus.yml --output STATUS.md
-      # STATUS.md GOES THROUGH REVIEW LIKE ANYTHING ELSE (corpus-toolkit#: protected main).
-      # This used to `git push` straight to the default branch. Where that branch is
-      # protected -- which is every corpus that requires a PR review -- the push is declined
-      # (`GH006: protected branch hook declined`) and the whole scheduled run goes red, so
-      # the drift report it exists to deliver is buried under a failure about a generated
-      # file. oregon-budget and oregon-legislature had been red every week since 2026-08-10
-      # for exactly this, federal-reference and corpus-template since 2026-08-03.
+      # EVERYTHING THE RUN WROTE, IN ONE PR, ON A STABLE BRANCH. `git add -u` picks up the
+      # manifest files seeding edited; the explicit adds cover the artifacts that may not be
+      # tracked yet in a corpus that has never run this revision. A run that changed
+      # nothing opens nothing. The branch is force-pushed: both the state and the report
+      # are regenerated whole, so an older copy has no information in it.
       #
-      # The fix is not to ignore the rejection: STATUS.md would then silently stop updating
-      # and nothing would say so. It opens a PR instead, on a STABLE branch, so a run that
-      # finds nothing new updates the existing PR rather than filing another.
-      #
-      # access-failures.json RIDES ALONG (corpus-toolkit#166). Without this it is written
-      # into the runner's own working tree and destroyed with it -- every run then reloads
-      # empty state, `consecutive_failures` can never exceed 1, and `first_failed_at` resets
-      # to today every time, so NEITHER escalation arm can ever fire; access-failure.json's
-      # entire reason to exist is surviving to the next run. `git add` guards a missing file
-      # rather than failing the step -- the detect step above can die before reaching the
-      # fetch loop that writes it, and `if: always()` means this step still runs then.
-      #
-      # THE CAVEAT THE ADR NAMES STILL APPLIES AND THIS STEP DOES NOT REMOVE IT: a streak
-      # this run wrote only feeds the NEXT run's escalation decision once this PR is
-      # MERGED. An unmerged PR means the next run's checkout still sees whatever state the
-      # default branch last had (often none), so a corpus whose weekly chore PR is not
-      # reviewed weekly will see both arms undercount for as long as it sits open -- the
-      # same latency STATUS.md already accepts, now shared by a file whose whole job is
-      # counting across runs. Merging it is this corpus's own responsibility, same as
-      # STATUS.md and a `--record-baseline` manifest diff already are.
-      - name: Open a PR for generated state (STATUS.md, access-failures.json) if changed
+      # THE STATE MUST LAND OR THE ROLLING VIEW DOES NOT ROLL. drift-state.json and
+      # access-failures.json feed the NEXT run; a run whose PR never merges starts from
+      # whatever `main` last had. That is what `gh pr merge --auto` is for.
+      - name: Open (or update) the drift PR and ask it to merge itself
         if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -92,23 +99,24 @@ jobs:
           set -euo pipefail
           git config user.name "corpus-bot"
           git config user.email "actions@github.com"
-          git add STATUS.md
-          git add access-failures.json 2>/dev/null || true
+          git add -u
+          for f in DRIFT.md drift-state.json source-outcomes.json access-failures.json STATUS.md; do
+            [ -f "$f" ] && git add "$f"
+          done
           if git diff --cached --quiet; then
-            echo "STATUS.md and access-failures.json are unchanged."
+            echo "Nothing the run wrote differs from main."
             exit 0
           fi
-          BRANCH="chore/status-md"
-          git commit -m "chore: regenerate STATUS.md, update access-failure streaks"
-          # Force-with-lease is wrong here: the branch is this job's alone and its previous
-          # head is deliberately discarded, because both files are regenerated whole and an
-          # older copy has no information in it.
+          BRANCH="chore/drift"
+          git commit -m "chore: drift run — DRIFT.md, state, seeded baselines, STATUS.md"
           git push --force origin "HEAD:refs/heads/${BRANCH}"
           if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
-            echo "Updated the open STATUS.md/access-failures.json PR."
+            echo "Updated the open drift PR."
           else
             gh pr create --head "$BRANCH" \
-              --title "chore: regenerate STATUS.md, update access-failure streaks" \
-              --body "Generated by the scheduled drift run. Both files are derived, so this PR is the review step for files no human writes. Merge promptly: access-failures.json's fetch-failure streaks only carry over to the next scheduled run once this is merged (corpus-toolkit#166)." \
-              || echo "::warning::could not open the STATUS.md/access-failures.json PR; the branch ${BRANCH} carries the change"
+              --title "chore: drift run — DRIFT.md, state, seeded baselines" \
+              --body "Generated by the scheduled drift run (ADR 0015). DRIFT.md is the rolling report: every source whose upstream differs from the baseline this corpus mirrors, since when, plus access-failure streaks. Baselines seeded this run are manifest edits in this PR. Merging is what lets the next run start from this state; the PR asks to merge itself once the checks pass." \
+              || echo "::warning::could not open the drift PR; the branch ${BRANCH} carries the change"
           fi
+          gh pr merge --auto --squash "$BRANCH" \
+            || echo "::notice::auto-merge unavailable here (private repo, or main not protected with required checks) — merge chore/drift by hand"

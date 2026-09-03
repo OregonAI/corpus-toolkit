@@ -87,10 +87,10 @@ guess which one applied.
 **Access failure** — a source whose fetch has failed for `access-failures.json`'s two
 persisted counts, `consecutive_failures` and `first_failed_at`, to reach the operator's
 threshold: 2 consecutive failed runs, or 14 elapsed days since the first of those
-failures, whichever comes first (corpus-toolkit#166). It escalates once, to one `Access
-failure:` issue under its own `access-failure` label, never `source-change` — the two
-labels keep a fact about OUR access to a source out of the queue that tracks a fact about
-what changed. `fetch_failed` (a `Source outcome`, above) is the per-run observation; an
+failures, whichever comes first (corpus-toolkit#166). It is marked **escalated** in `DRIFT.md`
+(ADR 0015; until v1.34.0 it filed one `Access failure:` issue) — a section of its own, never
+mixed into the changed-since-baseline list, because it is a fact about OUR access to a
+source and not about what changed. `fetch_failed` (a `Source outcome`, above) is the per-run observation; an
 access failure is what a streak of that observation becomes once it crosses the threshold
 and stops being noise. The state artifact holds a source only while its MOST RECENT
 observation was `fetch_failed`; any other outcome clears it, and a source or a whole group
@@ -99,6 +99,15 @@ still failing.
 _Avoid_: "drift", "changed" for this — an access failure asserts nothing about upstream,
 only that the tool's own fetches have not been arriving; conflating the two is the exact
 confusion the separate label exists to prevent.
+
+**Drift report** — `DRIFT.md` at a corpus root, rendered every drift run from
+`drift-state.json` (ADR 0015): every source whose upstream differs from the baseline the
+manifest records and since when, the groups whose every compared source changed, the
+access-failure streaks, what the run seeded. Rolling by construction — a changed source
+stays listed until re-ingested or its baseline accepted with `--record-baseline=refresh`.
+Generated but NOT `--check`-gated: it records observations no local command can reproduce.
+_Avoid_: "drift ticket", "Source changed: issue" — a drift run files nothing since v1.34.0,
+and the 89 tickets it used to file were closed on 2026-09-03 with a pointer to this file.
 
 ## Contracts
 

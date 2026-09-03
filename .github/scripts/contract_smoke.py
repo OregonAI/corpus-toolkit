@@ -20,6 +20,8 @@ This does exactly that:
      verify rather than passing vacuously over an empty tree
   3. run the same CLIs the reusable workflows run — validate-frontmatter,
      verify-provenance, generate-index --check — against it
+     and, since ADR 0015, corpus-detect-changes against two locally served sources:
+     seed, change one, detect exactly that one, re-render the report from state
   4. run the template's OWN Dockerfile build commands against the candidate toolkit,
      extracted from its `RUN` instructions rather than copied (corpus-toolkit#100)
   5. build the MCP server the way `corpus-mcp-serve` does and CALL every mandatory core
@@ -299,6 +301,92 @@ def run_cli_gates(dest: Path) -> None:
         "generate-index --check")
     # The template's own generated-artifact gate must pass on a freshly built corpus.
     run([sys.executable, "src/build_graph.py", "--check"], dest, "build_graph --check")
+
+
+def check_drift(dest: Path) -> None:
+    """The one CLI the gate never ran: `corpus-detect-changes`, end to end (ADR 0015).
+
+    The largest module on the platform, the only one that rewrites curated data (the
+    manifest's baselines) and the one whose failure mode — inert for weeks, reporting
+    success — is the hardest to see from a unit test. Two sources are served from a local
+    HTTP server; the first run must SEED both (no baseline recorded) and write DRIFT.md;
+    one file is then changed and the second run must report exactly that one as changed,
+    with a first-observed date, and the other as unchanged. Both runs exit 0: drift is a
+    signal, not an error. Finally `corpus-drift-report` must re-render the same report
+    from the state files alone.
+    """
+    import http.server
+    import socketserver
+    import threading
+    import yaml as _yaml
+
+    served = dest / "_scratch_upstream"
+    served.mkdir()
+    (served / "a.html").write_text("<html><body><p>Rule A, version one.</p></body></html>")
+    (served / "b.html").write_text("<html><body><p>Rule B, version one.</p></body></html>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):  # keep the gate log readable
+            pass
+    handler = lambda *a, **k: Quiet(*a, directory=str(served), **k)
+    httpd = socketserver.TCPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        cfg_path = dest / "_meta" / "corpus.yml"
+        cfg = _yaml.safe_load(cfg_path.read_text())
+        manifest = dest / cfg["source_manifest_path"]
+        manifest.write_text(
+            "sources:\n"
+            f"  - id: rule-a\n    url: http://127.0.0.1:{port}/a.html\n    format: html\n    sha256: \"\"\n"
+            f"  - id: rule-b\n    url: http://127.0.0.1:{port}/b.html\n    format: html\n    sha256: \"\"\n")
+        cfg_s = str(cfg_path)
+        out = run(["corpus-detect-changes", "--config", cfg_s], dest, "detect-changes (seed run)")
+        if "2 source(s) had no recorded baseline and were SEEDED" not in out:
+            raise GateFailure("seed run: the two unseeded sources were not reported as seeded")
+        seeded = _yaml.safe_load(manifest.read_text())["sources"]
+        if not all(s["sha256"] for s in seeded):
+            raise GateFailure(f"seed run: manifest baselines not written: {seeded}")
+        drift_md = dest / "DRIFT.md"
+        state_p = dest / "drift-state.json"
+        if not drift_md.is_file() or not state_p.is_file():
+            raise GateFailure("seed run: DRIFT.md / drift-state.json not written")
+        if "## Seeded this run (2)" not in drift_md.read_text():
+            raise GateFailure("seed run: DRIFT.md does not list the two seeded sources")
+
+        (served / "b.html").write_text("<html><body><p>Rule B, version TWO.</p></body></html>")
+        out = run(["corpus-detect-changes", "--config", cfg_s], dest, "detect-changes (drift run)")
+        if "1 changed, 0 fetch failure(s)" not in out:
+            raise GateFailure(f"drift run: expected exactly one changed source, got:\n{out}")
+        state = json.loads(state_p.read_text())
+        by_id = {s["id"]: s for s in state["sources"]}
+        if by_id["rule-b"]["outcome"] != "changed" or not by_id["rule-b"]["first_changed_at"]:
+            raise GateFailure(f"drift run: rule-b not recorded as changed-since: {by_id['rule-b']}")
+        if by_id["rule-a"]["outcome"] != "unchanged":
+            raise GateFailure(f"drift run: rule-a should be unchanged: {by_id['rule-a']}")
+        if state["last_run"]["red_reasons"]:
+            raise GateFailure(f"drift run: verdict red for no reason: {state['last_run']}")
+        text = drift_md.read_text()
+        if "## Changed since baseline (1)" not in text or "`rule-b`" not in text:
+            raise GateFailure("drift run: DRIFT.md does not list rule-b under changed since baseline")
+
+        before = text
+        run(["corpus-drift-report", "--config", cfg_s], dest, "drift-report (re-render)")
+        after = drift_md.read_text()
+        strip = lambda s: "\n".join(l for l in s.splitlines() if not l.startswith("**Generated by"))
+        if strip(before) != strip(after):
+            raise GateFailure("corpus-drift-report re-rendered a different report from the same state")
+        run(["corpus-drift-report", "--config", cfg_s, "--check"], dest, "drift-report --check")
+        # Leave the scratch corpus's manifest as the later legs expect it (no sources).
+        manifest.write_text("sources: []\n")
+        for f in ("DRIFT.md", "drift-state.json", "source-outcomes.json",
+                  "access-failures.json", "changed-sources.tsv"):
+            (dest / f).unlink(missing_ok=True)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        shutil.rmtree(served, ignore_errors=True)
 
 
 def check_mcp_tools(dest: Path) -> None:
@@ -1020,6 +1108,7 @@ def main() -> int:
         ("the template's CMD argv and requirements extras",
          lambda: check_template_start_surface(args.template)),
         ("toolkit CLI gates", lambda: run_cli_gates(dest)),
+        ("drift: seed, detect, report (ADR 0015)", lambda: check_drift(dest)),
         ("mandatory MCP contract tools", lambda: check_mcp_tools(dest)),
         # The hybrid leg reuses the SAME scratch corpus: flip the archetype, add the
         # minimal tools fixture, and assert #38's enforcement in both directions. An

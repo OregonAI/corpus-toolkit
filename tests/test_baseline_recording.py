@@ -12,7 +12,9 @@ unreported ones per week, concluding `success`.
 The manifest is CURATED DATA a human reviews in a PR, so the tests below pin the limits of
 what the recorder may touch as hard as they pin that it writes at all:
 
-  * it writes only under an explicit flag, never as a side effect of a drift run;
+  * since ADR 0015 it writes automatically whenever any in-scope source is unseeded — the
+    edit rides the same reviewed PR as the rest of the run's state — and `--record-baseline`
+    (bare, or `seed`) is a synonym for that default;
   * seed mode fills EMPTY baselines only — overwriting a recorded one is accepting an
     upstream change without review, and needs `--record-baseline=refresh` to say so;
   * a failed fetch leaves the recorded value byte-for-byte alone;
@@ -116,7 +118,7 @@ class SeedAnEmptyManifestTest(_CorpusFixture):
         self.assertEqual(code, 0, err)
         self.assertIn(HASH_A, path.read_text())
         self.assertIn(HASH_B, path.read_text())
-        self.assertIn("2 baseline(s) recorded", out)
+        self.assertIn("2 baseline(s) written", out)
 
         code, out, err = self.run_cli()
         self.assertEqual(code, 0, err)
@@ -138,18 +140,10 @@ class SeedAnEmptyManifestTest(_CorpusFixture):
         self.assertIn("# filled at first fetch", after,
                       "a curator's comment must survive; a yaml round-trip would eat it")
 
-    def test_recording_opens_no_issues(self):
-        self.write_manifest(self.MANIFEST)
-        with mock.patch.object(changes, "_open_issue") as open_issue:
-            code, out, err = self.run_cli("--record-baseline", "--open-issues")
-        open_issue.assert_not_called()
-        self.assertEqual(code, 2, "seeding is not a drift report; the combination is refused")
-        self.assertIn("--record-baseline", err)
-        self.assertIn("--open-issues", err)
-        self.assertNotIn("unrecognized", err,
-                         "must be REFUSED with a reason, not rejected as an unknown flag")
-        self.assertIn("seeding", err.lower(),
-                      "the refusal has to say why, or an operator just drops one flag")
+    # `test_recording_opens_no_issues` retired (ADR 0015): `--open-issues` and its
+    # combination refusal with `--record-baseline` no longer exist, and no run of
+    # `corpus-detect-changes` files anything — there is no seam left here to patch or
+    # assert against.
 
     def test_a_source_with_no_sha256_key_at_all_gets_one(self):
         path = self.write_manifest("""\
@@ -356,7 +350,7 @@ class MalformedBaselineValueTest(_CorpusFixture):
         code, out, err = self.run_cli("--record-baseline")
         self.assertEqual(code, 0, err)
         self.assertIn(HASH_A, path.read_text())
-        self.assertIn("1 baseline(s) recorded", out)
+        self.assertIn("1 baseline(s) written", out)
 
 
 class WatchDoesNotBreakBaselineRecordingTest(_CorpusFixture):
@@ -397,7 +391,7 @@ class WatchDoesNotBreakBaselineRecordingTest(_CorpusFixture):
 
         code, out, err = self.run_cli("--record-baseline")
 
-        self.assertIn("1 baseline(s) recorded", out,
+        self.assertIn("1 baseline(s) written", out,
                       f"a `watch:` block above `sha256:` broke the rewrite:\n{out}{err}")
         self.assertIn(self.watched_hash, path.read_text())
         self.assertEqual(path.read_text().count("sha256:"), 1,
@@ -409,7 +403,7 @@ class WatchDoesNotBreakBaselineRecordingTest(_CorpusFixture):
 
         code, out, err = self.run_cli("--record-baseline")
 
-        self.assertIn("1 baseline(s) recorded", out)
+        self.assertIn("1 baseline(s) written", out)
         self.assertIn(self.watched_hash, path.read_text())
 
     def test_the_shape_oregon_records_retention_actually_ships(self):
@@ -440,7 +434,7 @@ class WatchDoesNotBreakBaselineRecordingTest(_CorpusFixture):
         code, out, err = self.run_cli("--record-baseline")
 
         text = path.read_text()
-        self.assertIn("2 baseline(s) recorded", out, f"{out}{err}")
+        self.assertIn("2 baseline(s) written", out, f"{out}{err}")
         a_block, b_block = text.split("- id: schedule-aviation")
         self.assertIn(HASH_A, a_block)
         self.assertIn(content_hash(BODY_B, "html"), b_block)
@@ -462,7 +456,7 @@ class WatchDoesNotBreakBaselineRecordingTest(_CorpusFixture):
 
         code, out, err = self.run_cli("--record-baseline")
 
-        self.assertIn("1 baseline(s) recorded", out, f"{out}{err}")
+        self.assertIn("1 baseline(s) written", out, f"{out}{err}")
         self.assertIn(HASH_A, path.read_text())
         self.assertEqual(path.read_text().count("sha256:"), 1)
 
@@ -491,7 +485,7 @@ class WatchDoesNotBreakBaselineRecordingTest(_CorpusFixture):
         code, out, err = self.run_cli("--record-baseline")
 
         text = path.read_text()
-        self.assertIn("1 baseline(s) recorded", out, f"{out}{err}")
+        self.assertIn("1 baseline(s) written", out, f"{out}{err}")
         self.assertIn("aaaaaaaaaaaa", text, "the attachment's own digest was overwritten")
         self.assertIn(HASH_A, text)
         self.assertLess(text.index(HASH_A), text.index("attachments:"),
@@ -532,7 +526,7 @@ class ShaAboveIdTest(_CorpusFixture):
     keys last-wins, so the INSERTED value is what the re-parse check reads back and
     `actual == expected` holds; the line diff sees one added line carrying a value in
     `updates`, which is the shape it is designed to allow. The run reports
-    `1 baseline(s) recorded` and exits 0, leaving a stale `sha256: ""` above a live one in a
+    `1 baseline(s) written` and exits 0, leaving a stale `sha256: ""` above a live one in a
     file a human reviews — and on the next run the manifest parses to the new value, so the
     source reads as current and the stale key is never noticed.
     """
@@ -551,7 +545,7 @@ class ShaAboveIdTest(_CorpusFixture):
         self.assertEqual(text.count("sha256:"), 1,
                          f"a duplicate sha256 key was inserted:\n{text}")
         self.assertIn(HASH_A, text)
-        self.assertIn("1 baseline(s) recorded", out)
+        self.assertIn("1 baseline(s) written", out)
 
     def test_a_nested_sha_above_id_is_still_not_claimed(self):
         """The backward scan needs the same key-column rule the forward one has. Without it
@@ -573,7 +567,7 @@ class ShaAboveIdTest(_CorpusFixture):
         text = path.read_text()
         self.assertIn("aaaaaaaaaaaa", text, "the attachment's own digest was overwritten")
         self.assertIn(HASH_A, text)
-        self.assertIn("1 baseline(s) recorded", out, f"{out}{err}")
+        self.assertIn("1 baseline(s) written", out, f"{out}{err}")
         self.assertLess(text.index("aaaaaaaaaaaa"), text.index(HASH_A))
 
 
@@ -628,7 +622,7 @@ class CrossFileDuplicateIdTest(_CorpusFixture):
         b = (self.root / "_meta" / "sources" / "b.yml").read_text()
         self.assertIn(HASH_A, a)
         self.assertIn(HASH_B, b)
-        self.assertIn("2 baseline(s) recorded", out, f"{out}{err}")
+        self.assertIn("2 baseline(s) written", out, f"{out}{err}")
 
 
 if __name__ == "__main__":
