@@ -115,7 +115,9 @@ jobs:
             fi
             echo "tag $GITHUB_REF_NAME agrees with pyproject $V"
           else
-            LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 | sed 's/^v//')
+            # `|| true`: under pipefail a grep with no match (a shallow checkout has no tags)
+            # would fail the pipeline, and this branch is the warn-only PR path.
+            LATEST=$(git tag --sort=-v:refname | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | head -1 | sed 's/^v//')
             echo "latest tag: ${LATEST:-none}"
             if [ -n "$LATEST" ] && [ "$V" = "$LATEST" ]; then
               echo "::notice::version is unchanged from the latest tag — fine for a PR that"
