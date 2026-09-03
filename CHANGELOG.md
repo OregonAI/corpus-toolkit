@@ -15,6 +15,20 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## Unreleased
+
+### Fixed — the drift PR needs a bot token, and a PR that could not be opened is now a red step (ADR 0015 follow-up)
+
+**Action required if you call `detect-upstream-changes.yml`: add `secrets: inherit` to the
+calling job, and define one org secret, `DRIFT_BOT_TOKEN`, with contents and pull-requests
+write on the corpora.** Measured on the first v1.34.0 runs: with the built-in token
+`gh pr create` fails — "GitHub Actions is not permitted to create or approve pull requests"
+— and even where that setting is on, a PR the built-in token opens triggers no workflow
+runs, so required checks never report and auto-merge never fires. Four corpora ran green
+with their whole first drift state stranded on `chore/drift`; the same path is why no
+`chore/status-md` PR ever existed after v1.30.0. The step now fails, naming the remedy,
+instead of warning; the checkout, push and PR use `DRIFT_BOT_TOKEN` when present.
+
 ## v1.34.0 — 2026-09-03
 
 ### Changed — a drift run files no issues: DRIFT.md, drift-state.json, auto-seeding, a self-merging PR (ADR 0015)

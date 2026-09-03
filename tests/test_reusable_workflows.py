@@ -117,3 +117,18 @@ def test_the_drift_workflow_files_nothing_and_merges_its_own_pr():
     assert "--group" in runs and 'refs/heads/${BRANCH}' in runs and "gh pr merge --auto" in runs
     assert "DRIFT.md" in runs and "drift-state.json" in runs and "git add -u" in runs
 
+
+def test_the_drift_workflow_takes_a_bot_token_and_fails_when_it_cannot_open_the_pr():
+    """Measured 2026-09-03: four first runs pushed their state and warned that no PR could be
+    opened, green. A PR the built-in token opens also runs no CI. So: a declared secret, used
+    for the checkout, the push and the PR; and a red step when the PR does not exist."""
+    d = _load("detect-upstream-changes")
+    assert "DRIFT_BOT_TOKEN" in d["on"]["workflow_call"].get("secrets", {})
+    job = d["jobs"]["detect"]
+    first_checkout = job["steps"][0]
+    assert "DRIFT_BOT_TOKEN" in str(first_checkout.get("with", {}).get("token", ""))
+    pr_step = next(s for s in job["steps"] if "drift PR" in s.get("name", ""))
+    assert "DRIFT_BOT_TOKEN" in str(pr_step["env"]["GITHUB_TOKEN"])
+    assert "exit 1" in pr_step["run"] and "could not open the drift PR" not in pr_step["run"], \
+        "a PR that could not be opened must fail the step, not warn"
+
