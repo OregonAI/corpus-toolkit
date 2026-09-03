@@ -1194,3 +1194,14 @@ Adopting it in a corpus repo: nothing, if you call the reusable workflow at `@v1
 add a second cron so drift runs monthly while full validation stays weekly (the shape
 oregon-audits already had), and delete `.github/ISSUE_TEMPLATE/source-change.md`.
 
+### Unreleased (v1.34.1) — pass `secrets: inherit` to the drift workflow; define `DRIFT_BOT_TOKEN` once (ADR 0015 follow-up)
+
+**Action required in every corpus's `scheduled.yml`**: every job that `uses:`
+`detect-upstream-changes.yml` gets `secrets: inherit`. **Action required once, at the org**:
+an org secret `DRIFT_BOT_TOKEN` — a fine-grained token (or GitHub App token) with contents
+and pull-requests write on the corpora — visible to those repos. Until both are in place a
+drift run pushes its state to `chore/drift` and then FAILS at the PR step, saying so; open
+that PR by hand to land the state. Why the built-in token cannot do this job is in the
+workflow's `secrets:` block and the CHANGELOG entry: it cannot open a PR in this org, and a
+PR it opened would run no CI, so it could never merge itself.
+
