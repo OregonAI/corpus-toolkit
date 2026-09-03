@@ -70,6 +70,11 @@ def test_release_gate_has_the_canary_and_advances_the_major_tag_only_after_it():
     assert set(jobs["advance-major-tag"]["needs"]) >= {"corpus-end-to-end", "version-matches-tag", "canary"}
     assert "needs.canary.result == 'success'" in jobs["advance-major-tag"]["if"]
     assert "canary" in jobs["unpublish-a-failed-tag"]["needs"], "a red canary unpublishes the tag"
+    unpub_if = jobs["unpublish-a-failed-tag"]["if"]
+    assert "cancelled" in unpub_if and "failure" in unpub_if, \
+        "a canary leg killed by its own timeout is `cancelled`, not `failure`, and must still unpublish"
+    assert jobs["canary"]["timeout-minutes"] >= 60, \
+        "ERF's full provenance alone is 27-29 min (measured 2026-09-01..03); 30 cancelled the leg"
     run = jobs["advance-major-tag"]["steps"][-1]["run"]
     assert "refs/tags/$MAJOR" in run and "--force" in run
 
