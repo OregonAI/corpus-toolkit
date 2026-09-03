@@ -17,6 +17,14 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — advancing `v1` uses the PAT, because a release that changes a reusable workflow cannot be pushed by the built-in token
+
+v1.34.1 passed every gate and `v1` did not move: `refusing to allow a GitHub App to create
+or update workflow .github/workflows/detect-upstream-changes.yml without workflows
+permission`. The advance job now pushes from a checkout authenticated with
+`CORPUS_PIN_TOKEN`, which already carries that scope for propagate-pin. v1.34.1 remains a
+valid tag; nothing pins it, and this release supersedes it.
+
 ### Fixed — the drift commit step no longer dies on a gitignored per-run artifact
 
 oregon-collective-bargaining's `.gitignore` covers `source-outcomes.json`; `git add` refused
