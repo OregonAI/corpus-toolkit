@@ -15,6 +15,17 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## Unreleased
+
+### Fixed — the drift commit step no longer dies on a gitignored per-run artifact
+
+oregon-collective-bargaining's `.gitignore` covers `source-outcomes.json`; `git add` refused
+it with a hint and the step, under `set -e`, exited before committing anything — the whole
+first drift run's state lost. `DRIFT.md`, `drift-state.json` and `access-failures.json` are
+now added with `-f` (a corpus that ignores the rolling state has switched the feature off,
+and v1.32.0's notes already said so); `source-outcomes.json` and `STATUS.md` respect an
+ignore rule and say so in the log.
+
 ## v1.34.1 — 2026-09-03
 
 ### Fixed — the drift PR needs a bot token, and a PR that could not be opened is now a red step (ADR 0015 follow-up)
