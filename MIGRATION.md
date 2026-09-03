@@ -1084,3 +1084,42 @@ use — and keep returning a plain dict.
    frontmatter schema cannot see it, your `build_graph --check` cannot see it, and the
    toolkit's own release gate cannot see it — so a collision is first observed in
    production, on a graph-tool call.
+
+### Unreleased — a persistent access failure now escalates, and it needs your workflow to commit a new file (corpus-toolkit#166)
+
+**Action required only if you call the reusable `detect-upstream-changes.yml` workflow, or
+run `corpus-detect-changes --open-issues` from your own CI: take the new workflow revision,
+or add the equivalent commit step yourself.** `corpus-detect-changes` now writes
+`access-failures.json` at the corpus root, unconditionally, on every run that reaches the
+fetch loop — the same trigger as `source-outcomes.json` (v1.31.0). It records, per source,
+how many runs in a row its fetch has failed and when that streak began, and once a source
+crosses **2 consecutive failed runs, or 14 elapsed days since the first of those failures**
+it gets one `Access failure:` issue under a new `access-failure` label — worded as a fact
+about our access, never a claim that the source changed or was removed upstream, because
+this tool cannot tell those apart and does not guess.
+
+**This state must survive between runs or the feature does nothing.** Written into an
+ephemeral runner's working tree and never committed, it is destroyed with the runner:
+every run reloads empty state, `consecutive_failures` can never exceed 1, and
+`first_failed_at` resets to today on every run, so neither the run-count nor the
+elapsed-days arm can ever fire. The reusable workflow's existing STATUS.md
+commit-and-open-a-PR step now carries `access-failures.json` along with it — same branch,
+same PR. **Merge it at least as often as your schedule runs**, the same discipline
+`STATUS.md` already asks for: an unmerged PR means the next scheduled run still starts
+from whatever state the default branch last had, and a persistent access failure is
+undercounted for as long as that PR sits open. If you call `corpus-detect-changes` from
+your own CI rather than the reusable workflow, add the commit step yourself — this file
+being gitignored, or your job's checkout never persisting past the run, silently disables
+the feature with no error to notice it by.
+
+**New way to go red.** Access-failure escalations share `MAX_ISSUES_PER_RUN` (still 25)
+with drift and are spent last, so a corpus's drift reporting is never worse off for this
+existing — but a corpus that already has more access failures than budget room will now
+see the cap trip (corpus-toolkit#67, #69) on access failures alone, and stay capped run
+after run: an escalation does not clear itself the way drift eventually does, so an
+already-open ticket keeps spending a slot every run until it is fixed or the source is
+retired. If your corpus adopts this and immediately caps, that is real backlog the run is
+naming, not a bug in the cap.
+
+No manifest change, no schema change to anything you already read: `changed-sources.tsv`
+and `source-outcomes.json` are unaffected.

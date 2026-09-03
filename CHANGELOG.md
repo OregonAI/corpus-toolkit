@@ -15,6 +15,40 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## Unreleased
+
+### Added — `access-failures.json` and `Access failure:` escalation issues for a source whose FETCH has been failing across runs, not its content (corpus-toolkit#166)
+
+**Action recommended, not required, and only if you call the reusable
+`detect-upstream-changes.yml` workflow: take the new revision, or this feature does
+nothing for you.** `FETCH FAILED` already prints on every run; nothing accumulated it
+across runs, so a source failing its thirtieth run in a row read exactly like one failing
+its first (executive-regulatory-frameworks#140: 45 sources, 22 days, zero detection, all
+comfortably under the 20% systemic guard). A source now escalates — one `Access failure:`
+issue, labeled `access-failure` and never `source-change`, opened once — on **2
+consecutive failed runs, or 14 elapsed days since the first of those failures, whichever
+comes first**. The ticket states only the two counts it measured, never a claim about
+what happened upstream: this tool cannot tell a block from a 404 from a document that
+moved, and does not guess.
+
+State lives in `access-failures.json` at the corpus root, written unconditionally beside
+`source-outcomes.json` (corpus-toolkit#160) on every run that reaches the fetch loop.
+**It must be committed back between runs or the feature is inert** — written into the
+runner's own working tree and discarded with it, every run reloads empty state, and
+neither arm can ever fire. The reusable workflow's STATUS.md step now carries it along
+into the same PR; a corpus with its own CI must add the equivalent commit step itself, the
+same adoption work `STATUS.md` already required.
+
+**New way to exit 1**: a run whose issue budget (`MAX_ISSUES_PER_RUN`, still 25) is spent
+on access-failure escalations before drift is capped exactly the way a drift-only run
+already was (corpus-toolkit#67, #69) — escalations share the budget and are spent last,
+so a corpus's drift reporting is never worse off for this existing, but a corpus already
+carrying access failures past the cap will now see runs go red for that reason alone.
+Escalations do not clear themselves the way drift tickets eventually do; an already-open
+escalation still spends a budget slot every run until it is fixed or the source is
+retired, so a corpus over the cap on adoption should expect to stay capped until it works
+the backlog down, not just on the run that first crosses it.
+
 ## v1.31.1 — 2026-08-28
 
 ### Fixed — the link check works again for a corpus that declared no chain supplement (corpus-toolkit#173)

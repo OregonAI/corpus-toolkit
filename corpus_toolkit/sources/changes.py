@@ -3,7 +3,10 @@
 source manifest, diff content hashes, write changed-sources.tsv, optionally
 open a GitHub issue per drifted source — plus, for a group in which EVERY
 COMPARED source changed, one `Group drifted:` finding that says they changed
-together and nothing about why (ADR 0010). Ported from
+together and nothing about why (ADR 0010) — plus, for a source whose FETCH has
+been failing across runs rather than its content changing, one `Access failure:`
+escalation once it crosses the operator's threshold (corpus-toolkit#166; see
+`ACCESS_FAILURE_ESCALATE_RUNS`/`_DAYS` below). Ported from
 oregon-policy-repo/src/detect_changes.py; the Oregon-specific SharePoint-
 listing diff (`check_sp_listing`) is NOT ported — it re-queries a specific
 vendor's list-view API and doesn't generalize. A corpus that needs it keeps
@@ -47,11 +50,23 @@ and `--record-baseline`, a CI annotation, and a non-zero exit — because removi
 tickets and saying nothing more would report could-not-check as nothing-to-report, which
 is the same rule broken the other way round.
 
-TWO ARTIFACTS, EACH WITH ITS OWN MEANING, BOTH PUBLIC SURFACE the moment this runs inside
+A FETCH FAILURE THAT NEVER STOPS IS DIFFERENT FROM ONE THAT NEVER STARTED
+(corpus-toolkit#166). `--strict` treats any fetch failure as fatal, and default mode treats
+an isolated one as noise on purpose — over a few thousand sources a weekly run has a
+near-certain transient. Between those two settings, before corpus-toolkit#166, a source
+could fail EVERY run, forever, and nothing said so: `FETCH FAILED` prints every run and
+nothing accumulated it across runs, so a failure thirty runs deep read exactly like one
+run deep. `access-failures.json` (below) is what closes that gap: a source whose fetch has
+failed for `ACCESS_FAILURE_ESCALATE_RUNS` consecutive runs, or for
+`ACCESS_FAILURE_ESCALATE_DAYS` elapsed days, gets ONE `Access failure:` issue — worded as a
+fact about our access, never as a claim about what happened upstream, because this tool
+cannot tell a block from a page that moved and does not guess (`_open_access_failure_issue`).
+
+THREE ARTIFACTS, EACH WITH ITS OWN MEANING, ALL PUBLIC SURFACE the moment this runs inside
 a corpus repo (AGENTS.md: "anything reachable from a corpus repo is public, whether or not
-this repo calls it"). Both are written on every run that reaches the fetch loop —
+this repo calls it"). All three are written on every run that reaches the fetch loop —
 including a run that fails every fetch, which is the run each of them exists for — and
-neither is written when `--check-robots` returns before fetching anything.
+none is written when `--check-robots` returns before fetching anything.
 
 * `changed-sources.tsv`, at the corpus root. Four tab-separated columns —
   `id, url, old_sha256, new_sha256` — one row per source whose hash MOVED, in manifest
@@ -79,6 +94,21 @@ neither is written when `--check-robots` returns before fetching anything.
   printed pair is `(changed + no_baseline, checked)` and is recoverable exactly. Additive fields on a `groups` entry or a `sources`
   entry are NOT breaking, the same convention `docs/mcp-interface-contract.md` uses for
   the MCP tool responses this toolkit also serves.
+* `access-failures.json`, at the corpus root, new in corpus-toolkit#166 -- one
+  `AccessFailureRecord` per source CURRENTLY on a fetch-failure streak: how many runs in a
+  row its fetch has failed, and the date the current streak began. `FETCH FAILED` prints on
+  every run and nothing accumulated it across runs, so a source failing its thirtieth run
+  in a row was indistinguishable, in that run's own output, from one failing its first --
+  this is what lets a run tell the difference. A source is present only while its most
+  recent observation was `fetch_failed`; one successful fetch (`changed`, `unchanged`,
+  `no_baseline`, `unreadable_json`, or `watch_path_missing` -- the bytes ARRIVED, per the
+  outcome vocabulary above) clears it, and a source retired from a group this run actually
+  enumerated is pruned rather than kept asserting it is currently failing forever. A source
+  outside this run's `--group` scope is HELD, unchanged, same as everywhere else in this
+  file. NOT gated behind `--open-issues`: written on every run that reaches the fetch loop,
+  same trigger as `source-outcomes.json`, so the streak survives a run that never asked to
+  file anything. STABILITY: `schema_version`, and each `sources` entry's `group`, `id`,
+  `consecutive_failures`, `first_failed_at` are the contract.
 
 Exit codes: 0 on a run that could actually detect drift. 1 when a fetch fails under
 `--strict`, when failures are systemic (>20%), when the issue cap truncated the report
@@ -103,6 +133,7 @@ import subprocess
 import sys
 import urllib.parse
 
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
@@ -242,6 +273,46 @@ ISSUE_LABEL = "source-change"
 # not move, while the allocation is a policy about whose drift is worth a ticket first.
 MAX_ISSUES_PER_RUN = 25
 
+# THE ESCALATION THRESHOLD (corpus-toolkit#166), decided by the operator on 2026-09-02
+# against measured data, not derived here:
+#
+#     ESCALATE ON 2 CONSECUTIVE FAILED RUNS OR 14 ELAPSED DAYS, WHICHEVER COMES FIRST.
+#
+# `FETCH FAILED` prints on every run and nothing accumulated it across runs, so a source
+# failing its thirtieth run in a row read exactly like one failing its first. The live
+# instance: executive-regulatory-frameworks#140, 45 sources failing since 2026-08-05 at
+# 3.3% of 1,347 — under the 20% systemic guard, so 22 days and 22 `success` results with
+# no drift detection at all on those 45.
+#
+# ELAPSED TIME IS THE HARM, which is why there are two arms and not one. "This source has
+# been unwatched for two weeks" is true regardless of how often the cron that watches it
+# runs. Run-counting alone gives a slow-cadence corpus a longer blind window than a fast
+# one — backwards, since the slower the cadence, the more each missed run costs. Measured
+# cadences: oregon-counties, oregon-collective-bargaining and oregon-kpm run WEEKLY
+# (cron '0 14 * * 1'); executive-regulatory-frameworks runs MONTHLY. Under a run-count-only
+# rule, reaching even 2 consecutive runs is ~14 days for the weekly corpora and ~30-60 days
+# for the monthly one — and the second run is the FIRST opportunity a pure run-count rule
+# has to notice anything, so a monthly corpus would sit unwatched for a month no matter
+# what the threshold is set to. The elapsed-days arm does not wait for that second fetch:
+# it is evaluated from the clock alone, every time this tool runs for ANY reason, over
+# EVERY currently-tracked access failure regardless of this run's `--group` scope (see
+# `_access_failure_escalations`) — so a source in a monthly group can escalate off a
+# WEEKLY group's own run, without waiting for its own next scheduled fetch.
+#
+# REJECTED: escalating on the FIRST failure. A 429 is transient by definition —
+# oregon-counties currently carries 9 of them from ecode360.com rate-limiting alone — and a
+# ticket per throttle trains everyone to ignore the channel. That is how 90 open
+# `Source changed:` issues across three corpora came to sit unread: noise habituates.
+#
+# REJECTED: pure run-counting with no elapsed-days arm (the withdrawn corpus-toolkit#166
+# attempt, `wip/166-access-failure-escalation`, used 3 consecutive runs). Under that rule
+# alone a monthly corpus takes 3 months to say a fetch has been failing, for a defect that
+# went unnoticed for 22 days and was worth knowing about in about two weeks.
+ACCESS_FAILURE_ESCALATE_RUNS = 2
+ACCESS_FAILURE_ESCALATE_DAYS = 14
+
+ACCESS_FAILURE_LABEL = "access-failure"
+
 # Fraction of the bytes fetched on the HTML/XML path that one `volatile_patterns:` entry
 # may strip before the run says so loudly. A genuine volatile token is small: a session
 # id, a CDN hash, an application footer version — tens of bytes in a page of tens of
@@ -258,6 +329,13 @@ MAX_ISSUES_PER_RUN = 25
 # and corpus-detect-unsourced: measure, say the number, leave the decision with the
 # operator and the reviewer of the PR that adds the pattern.
 VOLATILE_BREADTH_WARN = 0.10
+
+
+def _utcnow_date() -> date:
+    """Today, UTC. A SEAM: tests fix the clock via `mock.patch.object(changes,
+    "_utcnow_date", ...)` rather than sleeping real days to drive the elapsed-days arm of
+    the access-failure escalation threshold (corpus-toolkit#166)."""
+    return datetime.now(timezone.utc).date()
 
 
 def _ensure_label() -> bool:
@@ -280,7 +358,7 @@ def _ensure_label() -> bool:
     return True
 
 
-def _file_once(title: str, body: str, subject: str) -> bool:
+def _file_once(title: str, body: str, subject: str, *, label: str = ISSUE_LABEL) -> bool:
     """Open one issue unless one carrying this exact title is already open.
 
     RETURN VALUES ARE CHECKED HERE, unlike the version this replaces, which called
@@ -289,23 +367,32 @@ def _file_once(title: str, body: str, subject: str) -> bool:
     other sign -- the summary counts what DRIFTED, and an operator reasonably reads it
     as what was REPORTED (corpus-toolkit#53).
 
-    ONE implementation for the per-source ticket and the group drift finding, because
-    dedup and the title are the same mechanism: the search is `in:title "<title>"`, so
-    the caller's title is the identity of the condition. A title that moves while the
-    condition persists -- a count in it -- files a fresh issue every run (ADR 0010).
+    ONE implementation for the per-source ticket, the group drift finding, and the
+    access-failure escalation, because dedup and the title are the same mechanism: the
+    search is `in:title "<title>"`, so the caller's title is the identity of the
+    condition. A title that moves while the condition persists -- a count in it -- files
+    a fresh issue every run (ADR 0010).
+
+    `label` DEFAULTS TO `ISSUE_LABEL` and both the dedup search and the creation use
+    WHATEVER THE CALLER PASSES -- an access-failure escalation passes
+    `ACCESS_FAILURE_LABEL` so it lands in its own queue rather than `source-change`'s
+    (corpus-toolkit#166; `_ensure_access_failure_label`'s docstring is the reasoning for
+    why the two must not share one). A caller that forgot the parameter would file every
+    escalation under `source-change` silently -- the label is part of the call, not an
+    afterthought, so there is nowhere for that mistake to hide.
     """
     if not shutil.which("gh"):
         print(f"NOTE: 'gh' not on PATH — skipping issue creation for {subject}",
               file=sys.stderr)
         return False
     existing = subprocess.run(
-        ["gh", "issue", "list", "--label", ISSUE_LABEL, "--state", "open",
+        ["gh", "issue", "list", "--label", label, "--state", "open",
          "--search", f'in:title "{title}"', "--json", "number", "--jq", "length"],
         capture_output=True, text=True)
     if existing.returncode == 0 and existing.stdout.strip() not in ("", "0"):
         print(f"Issue already open for {subject}, skipping")
         return True
-    r = subprocess.run(["gh", "issue", "create", "--label", ISSUE_LABEL,
+    r = subprocess.run(["gh", "issue", "create", "--label", label,
                         "--title", title, "--body", body],
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -321,6 +408,222 @@ def _open_issue(source_id, url, old, new) -> bool:
             f"- **Source URL**: {url}\n- **Previous sha256**: {old}\n"
             f"- **New sha256**: {new}\n")
     return _file_once(f"Source changed: {source_id}", body, source_id)
+
+
+def _ensure_access_failure_label() -> bool:
+    """Create the `access-failure` label if absent. Returns False if we cannot.
+
+    A SEPARATE label from `source-change`, because this is a separate claim: a drift
+    ticket says content changed upstream, an access-failure ticket says only that OUR
+    fetches have been failing (corpus-toolkit#166). Sharing the label would make the two
+    indistinguishable in the tracker, which is the same confusion this label exists to
+    prevent inside the ticket body."""
+    r = subprocess.run(["gh", "label", "create", ACCESS_FAILURE_LABEL, "--force",
+                        "--color", "B60205",
+                        "--description",
+                        "This tool could not fetch the source; a fact about our access, "
+                        "not a claim that it changed or was removed upstream"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"WARNING: could not ensure the {ACCESS_FAILURE_LABEL!r} label exists "
+              f"({r.stderr.strip()[:200]}). Issue creation will likely fail.",
+              file=sys.stderr)
+        return False
+    return True
+
+
+def _open_access_failure_issue(source_id: str, url: str, consecutive_failures: int,
+                               elapsed_days: int) -> bool:
+    """Open one access-failure escalation. Returns True only if an issue now exists.
+
+    WHY, in the body as well as in the label: this tool cannot tell a 403 from a page that
+    moved from one that was retired, so it says only what it knows — that OUR fetches have
+    failed, repeatedly, and for how long. "45 sources unfetchable" is a claim this run can
+    back with a measurement; "45 sources removed upstream" is not, and nothing here can
+    tell the difference (corpus-toolkit#166).
+    """
+    # STATES ONLY WHAT THIS RUN MEASURED (corpus-toolkit#166's whole point). Earlier
+    # wording asserted "unreachable across multiple runs" and "`FETCH FAILED` ... has
+    # printed on every run since the first of these failures" unconditionally -- both
+    # false on the elapsed-days arm, where a HELD source (outside this run's `--group`
+    # scope, per `_access_failure_escalations`) can escalate on a single observed
+    # failure fifteen days old: `consecutive_failures` reads 1 right next to a claim of
+    # "multiple runs" and "every run since", contradicting the number three lines above
+    # it. The two counts below are the measurement; nothing here generalizes past them.
+    body = (
+        f"Automated detection.\n\n"
+        f"- **Document id**: {source_id}\n"
+        f"- **Source URL**: {url}\n"
+        f"- **Consecutive failed runs**: {consecutive_failures}\n"
+        f"- **Days since the first of those failures**: {elapsed_days}\n\n"
+        f"This is a fact about OUR ACCESS to this source, not a claim that it changed or "
+        f"was removed upstream — this tool cannot tell a block, a DNS change, or a 404 "
+        f"apart from a document that moved, and does not guess. The two counts above are "
+        f"what this run measured; what changed is that they crossed the operator's "
+        f"escalation threshold ({ACCESS_FAILURE_ESCALATE_RUNS} consecutive failed runs, "
+        f"or {ACCESS_FAILURE_ESCALATE_DAYS} elapsed days, whichever comes first) instead "
+        f"of the source reporting `success` again.\n"
+    )
+    return _file_once(f"Access failure: {source_id}", body, source_id,
+                      label=ACCESS_FAILURE_LABEL)
+
+
+class AccessFailureRecord(NamedTuple):
+    """One source's persisted fetch-failure streak, as recorded in `access-failures.json`
+    (corpus-toolkit#166) — see that artifact's docstring in this module's header for why
+    this state lives beside `source-outcomes.json` rather than in the manifest."""
+    group: str
+    id: str
+    consecutive_failures: int
+    first_failed_at: str  # ISO date the CURRENT streak began, e.g. "2026-08-05"
+
+
+def _load_access_failures(config) -> dict[tuple[str, str], AccessFailureRecord]:
+    """Read `access-failures.json` from the last run, keyed `(group, id)`.
+
+    DEGRADES TO EMPTY on anything unreadable — a missing file (first run ever), a file that
+    is not json, an entry missing a field — rather than raising. The alternative is a run
+    that cannot start because ITS OWN bookkeeping file from a prior run is damaged, which
+    is a worse failure than forgetting a streak: a source mid-escalation loses its count and
+    resumes counting from zero, which is recoverable over the next couple of runs, while a
+    run that refuses to execute reports nothing at all.
+
+    SAID OUT LOUD, either way — degrading is the right recovery, but a degrade that prints
+    nothing is indistinguishable from every streak having genuinely cleared, which is the
+    corpus-toolkit#53 shape one artifact over: state was lost and nothing said so. A missing
+    file (path does not exist) is not a warning -- it is the ordinary first-run and
+    every-run-since-the-last-clear case and would fire on every green run.
+    """
+    path = config.root / "access-failures.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"WARNING: access-failures.json exists but could not be read ({e}) — "
+              f"every access-failure streak it carried is starting over from zero this "
+              f"run, and the damaged file is about to be overwritten.", file=sys.stderr)
+        return {}
+    out: dict[tuple[str, str], AccessFailureRecord] = {}
+    dropped = 0
+    for entry in data.get("sources") or []:
+        try:
+            key = (str(entry["group"]), str(entry["id"]))
+            out[key] = AccessFailureRecord(
+                group=key[0], id=key[1],
+                consecutive_failures=int(entry["consecutive_failures"]),
+                first_failed_at=str(entry["first_failed_at"]))
+        except (KeyError, TypeError, ValueError):
+            dropped += 1
+            continue  # one damaged entry does not cost every other source its streak
+    if dropped:
+        print(f"WARNING: {dropped} entr{'y' if dropped == 1 else 'ies'} in "
+              f"access-failures.json could not be read and lost their streak this run.",
+              file=sys.stderr)
+    return out
+
+
+def _update_access_failures(prior: dict[tuple[str, str], AccessFailureRecord],
+                            outcomes: list["SourceOutcome"], in_scope: set,
+                            checked_groups: set, today: date, declared_groups: set
+                            ) -> dict[tuple[str, str], AccessFailureRecord]:
+    """This run's `access-failures.json`, built from last run's state plus this run's
+    fetch outcomes.
+
+    FOUR RULES, one per source shape this run can observe:
+
+    * `outcome == "fetch_failed"` — the streak continues (or begins): consecutive_failures
+      increments, `first_failed_at` is carried over from the existing record (or set to
+      TODAY if this is the first failure of a new streak).
+    * Any other outcome for an IN-SCOPE source — the fetch succeeded, in the sense that
+      bytes arrived (`changed`, `unchanged`, `no_baseline`, `unreadable_json`,
+      `watch_path_missing` are all successful fetches per this module's own docstring: "the
+      bytes ARRIVED; this is not upstream being briefly unreachable"). The streak clears.
+    * A source belonging to a group this run CHECKED but that is no longer in the
+      manifest — retired. Its record is pruned rather than kept forever asserting a dead
+      source is currently failing (the withdrawn attempt's own item #6).
+    * A source whose whole GROUP no longer appears in the manifest at all — the group file
+      was deleted, not just emptied. `checked_groups` is derived FROM the manifest's own
+      declared groups (`declared_groups & args.group`, or all of `declared_groups`), so a
+      group that is not declared anywhere is never a member of `checked_groups` either and
+      the rule above never reaches it: a deleted group file held its sources forever,
+      re-escalating them every run behind the placeholder "url unknown — source since
+      removed from the manifest" text, because closing the resulting ticket as "source
+      retired" only refiled it on the next run. Pruned unconditionally, regardless of this
+      run's `--group` filter — a group that does not exist cannot be excluded from scope,
+      only be gone.
+
+    A source in a group this run did NOT check (`--group` excluded it, but the group is
+    still declared somewhere in the manifest) is HELD: untouched, neither incremented nor
+    cleared, because this run observed nothing about it. That matters because ERF runs
+    different `--group` sets from different crons — a source outside today's scope did not
+    just start succeeding.
+    """
+    state = dict(prior)
+    for o in outcomes:
+        key = (o.group, o.id)
+        if o.outcome == "fetch_failed":
+            existing = prior.get(key)
+            streak = (existing.consecutive_failures if existing else 0) + 1
+            first_failed = existing.first_failed_at if existing else today.isoformat()
+            state[key] = AccessFailureRecord(o.group, o.id, streak, first_failed)
+        else:
+            state.pop(key, None)
+    for key in list(state):
+        g, sid = key
+        if g not in declared_groups:
+            del state[key]  # the group itself no longer exists in the manifest
+        elif g in checked_groups and key not in in_scope:
+            del state[key]  # retired from a group this run actually enumerated
+    return state
+
+
+def _write_access_failures(config, state: dict[tuple[str, str], AccessFailureRecord]
+                           ) -> None:
+    path = config.root / "access-failures.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "sources": [rec._asdict() for rec in
+                   sorted(state.values(), key=lambda r: (r.group, r.id))],
+    }, indent=2, sort_keys=True) + "\n")
+
+
+class AccessFailureEscalation(NamedTuple):
+    group: str
+    id: str
+    consecutive_failures: int
+    elapsed_days: int
+
+
+def _access_failure_escalations(state: dict[tuple[str, str], AccessFailureRecord],
+                                today: date) -> list[AccessFailureEscalation]:
+    """Every currently-tracked source that has crossed the operator's threshold.
+
+    OVER THE WHOLE STATE, not just this run's in-scope sources — including HELD entries
+    from groups this run never touched. That is deliberate and is the entire point of the
+    elapsed-days arm: a monthly-cadence group's own next fetch is ~30 days away, so a rule
+    that only looked at sources this run fetched could never notice an elapsed-days
+    escalation before that fetch happens — by which point 2 consecutive runs has usually
+    already fired too, and the two arms would never be observed to disagree (see this
+    module's `ACCESS_FAILURE_ESCALATE_RUNS`/`_DAYS` comment). Evaluating the clock against
+    EVERY tracked record, on every invocation for any reason, is what lets a WEEKLY group's
+    own run notice a MONTHLY group's overdue failure without waiting for that group's own
+    cron.
+
+    WORST FIRST: sorted by elapsed days descending, then streak descending, then
+    (group, id) — deterministic, and spends the shared issue budget (see `main`) on the
+    longest-unwatched sources first when a run has more escalations than room.
+    """
+    out = []
+    for rec in state.values():
+        first_failed = date.fromisoformat(rec.first_failed_at)
+        elapsed = (today - first_failed).days
+        if (rec.consecutive_failures >= ACCESS_FAILURE_ESCALATE_RUNS
+                or elapsed >= ACCESS_FAILURE_ESCALATE_DAYS):
+            out.append(AccessFailureEscalation(rec.group, rec.id,
+                                               rec.consecutive_failures, elapsed))
+    return sorted(out, key=lambda e: (-e.elapsed_days, -e.consecutive_failures,
+                                      e.group, e.id))
 
 
 def _report_robots(config, groups) -> int:
@@ -1191,6 +1494,16 @@ def main():
     # let one group's typo abort every other group's cron, and `--check-robots` with it.
     manifest_sources = [s for s in iter_manifest_sources(config)
                         if not args.group or s.get("_group") in args.group]
+    # GROUPS THIS RUN WAS TOLD TO CHECK (corpus-toolkit#166's pruning rule), derived from
+    # the manifest's OWN declared groups rather than from `per_group` below. `per_group`
+    # only gains a key when a group has at least one SOURCE, so a group whose last source
+    # was just retired — sources: [] — never appears in it, and access-failure pruning
+    # read that absence as "this run never touched this group" and held the retired
+    # source's entry forever instead of dropping it (caught by
+    # `AccessFailureStatePersistenceTest`).
+    declared_groups = {g.get("group") or "manifest"
+                       for g in config_mod.load_source_manifest_groups(config)}
+    checked_groups = declared_groups & set(args.group) if args.group else declared_groups
     validate_watch_declarations(manifest_sources)
     for s in manifest_sources:
         # A `watch:` block on a source whose body a watch list cannot read. `content_hash`
@@ -1352,6 +1665,17 @@ def main():
             mode=f"record-baseline:{args.record_baseline}" if args.record_baseline else None),
                    indent=2, sort_keys=True) + "\n")
 
+    # ACCESS-FAILURE STATE (corpus-toolkit#166), written unconditionally right beside
+    # `source-outcomes.json` for the same reason that one is: a run that failed every
+    # fetch is exactly the run whose streaks must not be lost. `checked_groups` is every
+    # group this run was told to check (all of them, or `--group`'s own set) — a group
+    # outside that was never touched this run and its existing entries must be HELD, not
+    # cleared (see `_update_access_failures`).
+    prior_access_state = _load_access_failures(config)
+    access_state = _update_access_failures(prior_access_state, outcomes, in_scope,
+                                           checked_groups, _utcnow_date(), declared_groups)
+    _write_access_failures(config, access_state)
+
     recorded = None
     if args.record_baseline:
         recorded = _record_baselines(config, fetched, in_scope, args.record_baseline,
@@ -1434,6 +1758,43 @@ def main():
             ok = bool(_open_issue(c.id, c.url, c.old, c.new))
             opened += ok
             opened_by_group[c.group] = opened_by_group.get(c.group, 0) + ok
+
+    # ACCESS-FAILURE ESCALATIONS (corpus-toolkit#166), spent from the SAME budget, and
+    # deliberately LAST — after the group findings and after the per-source drift tickets
+    # above. Findings and drift tickets keep the priority they already had; access failures
+    # only spend what those leave behind. That is a considered choice, not an oversight: a
+    # withdrawn earlier attempt at this ticket (`wip/166-access-failure-escalation`) filed
+    # access failures FIRST and, because a fetch failure recurs every run exactly the way
+    # unaddressed drift does, found that at ERF's own scale (45 failing, 30 drifted) drift
+    # reporting stopped ENTIRELY from the third run on. Putting access failures last cannot
+    # fully prevent the reverse (a large drift run could still leave no room for them this
+    # is the same MAX_ISSUES_PER_RUN capacity question raised and left alone for drift
+    # tickets, and moving the cap is explicitly out of scope for this ticket) but it does
+    # mean a corpus's drift reporting is never worse off for this feature existing.
+    #
+    # UNGATED BY `ticketable` and `inert` — an access failure is not drift, and a wholly
+    # unseeded corpus can still have a completely broken fetch worth escalating.
+    escalations = _access_failure_escalations(access_state, _utcnow_date()) \
+        if args.open_issues else []
+    opened_af = attempted_af = 0
+    if args.open_issues and escalations:
+        _ensure_access_failure_label()
+        # URLs for EVERY source, not just this run's `--group` scope: an escalation can
+        # name a HELD source from a group this run never fetched (that is the elapsed-days
+        # arm's whole point — see `_access_failure_escalations`), so its url is not in
+        # `manifest_sources`, which was already filtered before the fetch loop began.
+        url_by_key = {(s.get("_group", "manifest"), s["id"]): s["url"]
+                     for s in iter_manifest_sources(config)}
+        for e in escalations:
+            if attempted + findings_attempted + attempted_af >= MAX_ISSUES_PER_RUN:
+                capped = True
+                break
+            attempted_af += 1
+            url = url_by_key.get((e.group, e.id), "<url unknown — source since removed "
+                                                   "from the manifest>")
+            ok = bool(_open_access_failure_issue(e.id, url, e.consecutive_failures,
+                                                 e.elapsed_days))
+            opened_af += ok
 
     # THE SUMMARY REPORTS WHAT WAS REPORTED, not only what drifted. The previous version
     # printed the changed count alone, which read as "these were filed" even when every
@@ -1605,6 +1966,15 @@ def main():
                         "run: it reports that they changed together and asserts nothing "
                         "about why, and the individual tickets stand alongside it "
                         "(ADR 0010).")
+        # PRINTED REGARDLESS OF `inert` — an access failure is a fact about our fetches,
+        # not about whether the manifest is seeded, so a wholly-unseeded corpus that also
+        # cannot reach a source still needs to hear about the second problem.
+        if escalations:
+            print(f"{opened_af} access-failure escalation(s) opened or already open, "
+                  f"{attempted_af - opened_af} failed, of {len(escalations)} source(s) "
+                  f"crossing {ACCESS_FAILURE_ESCALATE_RUNS} consecutive failed runs or "
+                  f"{ACCESS_FAILURE_ESCALATE_DAYS} elapsed days of failing (corpus-toolkit"
+                  f"#166). This is a fact about our access, never about upstream.")
         if capped:
             # `ticketable`, not `changed`: a source with no recorded baseline was never a
             # candidate for a ticket, so counting it here inflates the one number an
@@ -1703,6 +2073,15 @@ def main():
                       + ("…" if len(dropped_findings) > 20 else "")
                       + ". Those groups are in the breakdown above, at 100% of what was "
                         "compared.", file=sys.stderr)
+            # ACCESS-FAILURE ESCALATIONS ARE CAPPED TOO (corpus-toolkit#166), spent last
+            # (see the escalation loop above) — so on a run this crowded, some may not have
+            # been reached at all. Named, not inferred, same as every other drop above.
+            dropped_af = [e.id for e in escalations[attempted_af:]]
+            if dropped_af:
+                print(f"{len(dropped_af)} access-failure escalation(s) were not reported "
+                      f"either — the budget was spent before them: "
+                      + ", ".join(dropped_af[:20]) + ("…" if len(dropped_af) > 20 else "")
+                      + ".", file=sys.stderr)
             _annotate("Drift report truncated",
                       f"{dropped} of {len(changed)} changed sources were not reported "
                       f"(cap {MAX_ISSUES_PER_RUN}). See the per-group breakdown in the log.")
@@ -1710,6 +2089,10 @@ def main():
             print("EVERY issue creation failed — drift is being detected and NOT "
                   "reported. This is the silent-reporting failure of corpus-toolkit#53.",
                   file=sys.stderr)
+        if attempted_af and opened_af == 0:
+            print("EVERY access-failure issue creation failed — persistent access "
+                  "failures are being detected and NOT reported (corpus-toolkit#53's "
+                  "shape, for this channel).", file=sys.stderr)
     if unreadable:
         print(f"{len(unreadable)} source(s) declaring `watch` returned a body that is not "
               f"parseable json, so they were NOT compared: "
