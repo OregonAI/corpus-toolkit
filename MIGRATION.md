@@ -1085,7 +1085,7 @@ use — and keep returning a plain dict.
    toolkit's own release gate cannot see it — so a collision is first observed in
    production, on a graph-tool call.
 
-### Unreleased — a persistent access failure now escalates, and it needs your workflow to commit a new file (corpus-toolkit#166)
+### v1.32.0 — a persistent access failure now escalates, and it needs your workflow to commit a new file (corpus-toolkit#166)
 
 **Action required only if you call the reusable `detect-upstream-changes.yml` workflow, or
 run `corpus-detect-changes --open-issues` from your own CI: take the new workflow revision,
