@@ -15,7 +15,7 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
-## Unreleased
+## v1.34.1 — 2026-09-03
 
 ### Fixed — the drift PR needs a bot token, and a PR that could not be opened is now a red step (ADR 0015 follow-up)
 
