@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
-"""Move every corpus-toolkit pin in a corpus repo, and report when they disagree.
+"""Move the corpus-toolkit SERVING pin in a corpus repo, and report when pins disagree.
 
-  python3 bump_pins.py --repo ../oregon-budget --to v1.23.0          # rewrite
-  python3 bump_pins.py --repo ../oregon-budget --to v1.23.0 --dry-run
+  python3 bump_pins.py --repo ../oregon-budget --to v1.33.0          # rewrite
+  python3 bump_pins.py --repo ../oregon-budget --to v1.33.0 --dry-run
   python3 bump_pins.py --repo ../oregon-budget --check               # report drift only
 
-WHY THIS EXISTS. Every toolkit tag obliges a manual edit in every corpus, and each corpus
-pins the toolkit in at least TWO places per workflow call — the workflow ref and the code
-ref:
+WHAT A PIN IS NOW (ADR-0014). A corpus names the toolkit in two tracks:
 
-    uses: OregonAI/corpus-toolkit/.github/workflows/validate-frontmatter.yml@v1.6.0
-    with:
-      toolkit-ref: v1.6.0
+  CI track      uses: OregonAI/corpus-toolkit/.github/workflows/<name>.yml@v1
+                Floats on the major tag the release gate advances after its canary has
+                validated every live corpus on the candidate. NEVER edited by this script.
+                A corpus that pins an exact tag here has deliberately HELD itself back; the
+                gate reports that and this script leaves it alone.
+  serving track corpus-toolkit[...] @ git+https://github.com/OregonAI/corpus-toolkit@v1.33.0
+                in requirements*.txt — what the Dockerfile installs into the served image.
+                Exact, so `deployed.txt`'s commit builds the same image twice. THIS is what
+                the script moves, one line per file.
 
-They are separate knobs on purpose (`uses:` selects the workflow FILE, `toolkit-ref:`
-selects the CODE it installs) and they drift silently, because nothing compares them.
-Repos with a job that installs the toolkit itself carry a third. Measured across the org
-on 2026-07-28: 14 of 70 merged PRs (20%) existed only to carry a platform change into a
-corpus (corpus-toolkit#9).
+WHY IT USED TO MOVE MORE. Before ADR-0014 every corpus carried the tag in three places per
+workflow call — `uses:@tag`, `toolkit-ref:`, and a `.toolkit` checkout `ref:` — plus
+requirements, 9–15 sites per repo; 154 of the 616 PRs merged across the org in seven weeks
+(2026-09-02) existed to move them. `toolkit-ref` now defaults to the workflow's own commit
+(`github.job_workflow_sha`) and the corpus's own jobs install from requirements.txt, so the
+workflow-file shapes have no version in them to move.
 
-DRIFT IS THE REAL COST, not the typing. Measured 2026-08-04, oregon-legislature's ci.yml
-runs `verify-provenance` at v1.21.0 while `validate-frontmatter` and `check-links` in the
-SAME FILE run at v1.19.0 — a partial bump someone made to get one fix. Nothing failed;
-nothing could. `--check` is that detector, and it is the half worth running in CI.
-
-WHAT IS DELIBERATELY NOT TOUCHED. Only `OregonAI/corpus-toolkit` refs. `actions/checkout@v4`
-and friends are pinned to major tags on a different cadence by a different owner, and a
-regex sloppy enough to catch them would rewrite `@v4` to `@v1.23.0` on a good day.
+WHAT IS DELIBERATELY NOT TOUCHED. Only `github.com/OregonAI/corpus-toolkit@vX.Y.Z` in
+requirements files. `actions/checkout@v4` and friends were never in scope, and workflow
+files are out of scope by design now.
 """
 from __future__ import annotations
 
@@ -36,54 +36,21 @@ import pathlib
 import re
 import sys
 
-# Every shape a toolkit pin takes. Each captures the version in group 'v' so one
-# substitution routine handles all of them.
+# The one shape a serving pin takes. Group 'v' is the version.
 PATTERNS = (
-    # uses: OregonAI/corpus-toolkit/.github/workflows/<name>.yml@v1.2.3
-    re.compile(r"(?P<pre>OregonAI/corpus-toolkit/[^@\s]+@)(?P<v>v\d+\.\d+\.\d+)"),
-    # toolkit-ref: v1.2.3
-    re.compile(r"(?P<pre>toolkit-ref:\s*)(?P<v>v\d+\.\d+\.\d+)"),
-    # a checkout of the toolkit repo: `repository: OregonAI/corpus-toolkit` then `ref: v…`
-    # Matched on the ref line only when the preceding lines name the toolkit — handled in
-    # `_toolkit_checkout_refs` rather than here, because `ref:` alone is far too generic.
     # requirements.txt: corpus-toolkit[...] @ git+https://github.com/OregonAI/corpus-toolkit@v1.2.3
-    re.compile(r"(?P<pre>github\.com/OregonAI/corpus-toolkit@)(?P<v>v\d+\.\d+\.\d+)"),
+    re.compile(r"(?P<pre>github\.com/OregonAI/corpus-toolkit(?:\.git)?@)(?P<v>v\d+\.\d+\.\d+)"),
 )
 
-SCAN_GLOBS = (".github/workflows/*.yml", ".github/workflows/*.yaml",
-              "requirements.txt", "requirements-*.txt")
-
-
-def _toolkit_checkout_refs(text: str):
-    """Spans of `ref: vX.Y.Z` lines that belong to a corpus-toolkit checkout.
-
-    `ref:` on its own says nothing — actions/checkout uses it for the corpus's own code
-    too. Only a ref within a few lines after `repository: OregonAI/corpus-toolkit` is ours.
-    """
-    lines = text.splitlines(keepends=True)
-    out, offset, armed = [], 0, 0
-    for line in lines:
-        if "repository:" in line and "OregonAI/corpus-toolkit" in line:
-            armed = 4
-        elif armed:
-            m = re.search(r"(?P<pre>ref:\s*)(?P<v>v\d+\.\d+\.\d+)", line)
-            if m:
-                out.append((offset + m.start("v"), offset + m.end("v")))
-                armed = 0
-            else:
-                armed -= 1
-        offset += len(line)
-    return out
+SCAN_GLOBS = ("requirements.txt", "requirements-*.txt")
 
 
 def find_pins(text: str) -> list[tuple[int, int, str]]:
-    """(start, end, version) for every toolkit pin, sorted, non-overlapping."""
+    """(start, end, version) for every serving pin, sorted, non-overlapping."""
     spans: list[tuple[int, int, str]] = []
     for pat in PATTERNS:
         for m in pat.finditer(text):
             spans.append((m.start("v"), m.end("v"), m.group("v")))
-    for start, end in _toolkit_checkout_refs(text):
-        spans.append((start, end, text[start:end]))
     spans.sort()
     deduped: list[tuple[int, int, str]] = []
     for s in spans:
@@ -107,7 +74,7 @@ def rewrite(text: str, to: str) -> tuple[str, int]:
 
 
 def scan(repo: pathlib.Path):
-    """{path: [versions]} for every file carrying a toolkit pin."""
+    """{path: [versions]} for every requirements file carrying a serving pin."""
     found: dict[pathlib.Path, list[str]] = {}
     for pattern in SCAN_GLOBS:
         for path in sorted(repo.glob(pattern)):
@@ -123,7 +90,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", required=True, type=pathlib.Path)
-    ap.add_argument("--to", help="target tag, e.g. v1.23.0")
+    ap.add_argument("--to", help="target tag, e.g. v1.33.0")
     ap.add_argument("--check", action="store_true",
                     help="report pins and exit 1 if they disagree; writes nothing")
     ap.add_argument("--dry-run", action="store_true")
@@ -132,12 +99,13 @@ def main() -> int:
     if not args.check and not args.to:
         ap.error("--to is required unless --check")
     if args.to and not re.fullmatch(r"v\d+\.\d+\.\d+", args.to):
-        ap.error(f"--to must look like v1.2.3, got {args.to!r}")
+        ap.error(f"--to must look like v1.2.3, got {args.to!r} (the floating major tag is "
+                 f"never a serving pin)")
 
     repo = args.repo.resolve()
     found = scan(repo)
     if not found:
-        print(f"{repo.name}: no corpus-toolkit pins found")
+        print(f"{repo.name}: no corpus-toolkit serving pin found in requirements*.txt")
         return 0
 
     versions = collections.Counter(v for vs in found.values() for v in vs)
@@ -145,15 +113,14 @@ def main() -> int:
     for path, vs in found.items():
         print(f"  {path.relative_to(repo)}: {', '.join(sorted(set(vs)))}"
               f" ({len(vs)} pin{'s' if len(vs) != 1 else ''})")
-    print(f"{repo.name}: {total} pin(s) across {len(found)} file(s); "
+    print(f"{repo.name}: {total} serving pin(s) across {len(found)} file(s); "
           f"versions {', '.join(f'{v}×{n}' for v, n in versions.most_common())}")
 
     if args.check:
         if len(versions) > 1:
-            print(f"\nDRIFT: {len(versions)} different toolkit versions pinned in one "
-                  f"repo. `uses:` selects the workflow file and `toolkit-ref:` selects "
-                  f"the code it installs — a partial bump leaves jobs running against "
-                  f"different toolkit versions, and nothing fails.", file=sys.stderr)
+            print(f"\nDRIFT: {len(versions)} different toolkit versions pinned across this "
+                  f"repo's requirements files — the image would install whichever file its "
+                  f"Dockerfile happens to read.", file=sys.stderr)
             return 1
         return 0
 
@@ -165,7 +132,7 @@ def main() -> int:
             path.write_text(new, encoding="utf-8")
         changed += n
     verb = "would move" if args.dry_run else "moved"
-    print(f"\n{verb} {changed} pin(s) to {args.to}"
+    print(f"\n{verb} {changed} serving pin(s) to {args.to}"
           f"{' (dry run, nothing written)' if args.dry_run else ''}")
     return 0
 

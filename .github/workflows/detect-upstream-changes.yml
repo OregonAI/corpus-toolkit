@@ -7,11 +7,16 @@ on:
     inputs:
       toolkit-ref:
         description: >-
-          corpus-toolkit tag to install. Set this explicitly to the same tag you pin in
-          `uses:` — they are separate knobs and drift silently otherwise, because `uses:`
-          selects the WORKFLOW FILE while this selects the CODE it runs.
+          corpus-toolkit ref to install. LEAVE UNSET. The workflow then installs the very
+          commit its own `uses:` resolved to (`github.job_workflow_sha`), so the workflow
+          file and the code it runs cannot drift apart. It used to be required, and every
+          corpus carried it as a second copy of the `uses:` tag — 154 of 616 PRs merged
+          across the org in seven weeks existed to move those copies (ADR-0014). Set it
+          only to run a DIFFERENT toolkit commit from the workflow file, which is a
+          diagnostic, not a pin.
         type: string
-        required: true
+        required: false
+        default: ""
 
 jobs:
   detect:
@@ -27,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: OregonAI/corpus-toolkit
-          ref: ${{ inputs.toolkit-ref }}
+          ref: ${{ inputs.toolkit-ref || github.job_workflow_sha }}
           path: .toolkit
       - uses: actions/setup-python@v5
         with:

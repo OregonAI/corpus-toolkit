@@ -22,9 +22,12 @@ lives here.
 
 ## Versioning
 
-Semver tags. Corpus repos pin tags (never `main`). Breaking changes to the
-schema or MCP contract bump the major version with a migration note in the
-relevant doc.
+Semver tags, in two tracks ([ADR-0014](docs/adr/0014-two-tracks-ci-floats-serving-pins.md)).
+A corpus's CI calls the reusable workflows at the floating major tag `@v1`, which only the
+release gate moves, and only after its canary has validated every live corpus on the
+candidate. A corpus's served image pins an exact tag in `requirements.txt`, which
+`propagate-pin` bumps by PR after each release. Breaking changes to the schema or MCP
+contract bump the major version with a migration note in the relevant doc.
 
 ## Status
 

@@ -1,0 +1,134 @@
+# The corpora manifest (ADR-0008): the one machine-readable list of the OregonAI repos,
+# from which the platform's TOOLING lists are generated and against which its RUNTIME
+# lists are checked (ADR-0004). It ships inside the package so `pip install corpus-toolkit`
+# is enough to read it: `corpus-manifest --json`.
+#
+# Two consumers read it, which is what makes it a seam rather than a file:
+#   - release-gate.yml's `canary` job (ADR-0014): every live, public repo with
+#     `ci_track: true` is cloned and validated on the candidate before `v1` moves.
+#   - propagate-pin.yml: every live repo with `toolkit_pin: true` gets a requirements.txt
+#     bump PR.
+#
+# THIS IS A CLAIM ABOUT THE ORG, and propagate-pin's preflight checks it against the org
+# on every run: a non-archived OregonAI repository missing from this file, or a `live`
+# entry that GitHub reports archived, fails the run. Add a repo here when it joins; mark it
+# `retired` when it folds into another — never delete it, the tombstone route still
+# answers and a retired name must stay reserved.
+#
+# Fields
+#   tier         corpus | consumer | platform          (CONTEXT.md, "Tiers")
+#   visibility   public | private — the public release gate cannot clone a private repo,
+#                so a private repo can never be a canary target
+#   status       live | retired
+#   ci_track     calls the toolkit's reusable workflows; a canary target when live + public
+#   toolkit_pin  pins the toolkit in requirements*.txt; a propagate-pin target when live
+repos:
+  # ---- corpus tier: eight live, one retired -------------------------------------------
+  - name: executive-regulatory-frameworks
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  - name: oregon-legislature
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  - name: oregon-budget
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  - name: oregon-audits
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  - name: oregon-kpm
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  - name: oregon-counties
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  - name: oregon-collective-bargaining
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  - name: federal-reference
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  # Folded into executive-regulatory-frameworks on 2026-08-01; the route serves a tombstone.
+  - name: oregon-records-retention
+    tier: corpus
+    visibility: public
+    status: retired
+    ci_track: false
+    toolkit_pin: false
+  # ---- consumer tier (ADR-0002) --------------------------------------------------------
+  - name: corpus-gateway
+    tier: consumer
+    visibility: private
+    status: live
+    ci_track: false
+    toolkit_pin: true
+  - name: corpus-chat
+    tier: consumer
+    visibility: private
+    status: live
+    ci_track: false
+    toolkit_pin: true
+  - name: oregon-stories
+    tier: consumer
+    visibility: public
+    status: live
+    ci_track: false
+    toolkit_pin: true
+  # ---- platform tier -------------------------------------------------------------------
+  # The template calls the reusable workflows and pins the toolkit, so it is BOTH a canary
+  # target and a bump target: it is the corpus every new corpus starts as, and it is how
+  # it came to sit thirteen releases behind (v1.19.0 against v1.32.0) with nothing noticing.
+  - name: corpus-template
+    tier: platform
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
+  - name: corpus-toolkit
+    tier: platform
+    visibility: public
+    status: live
+    ci_track: false
+    toolkit_pin: false
+  - name: platform-deploy
+    tier: platform
+    visibility: private
+    status: live
+    ci_track: false
+    toolkit_pin: false
+  - name: OregonAI.github.io
+    tier: platform
+    visibility: public
+    status: live
+    ci_track: false
+    toolkit_pin: false
+  - name: .github
+    tier: platform
+    visibility: public
+    status: live
+    ci_track: false
+    toolkit_pin: false
