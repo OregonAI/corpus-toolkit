@@ -246,7 +246,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      # THE PAT, NOT THE BUILT-IN TOKEN. Moving `v1` onto a commit that changed a file under
+      # .github/workflows/ is refused for GITHUB_TOKEN -- "refusing to allow a GitHub App to
+      # create or update workflow ... without `workflows` permission" -- and `workflows` is
+      # not a permission a job can grant itself. Measured on v1.34.1 (2026-09-03): every
+      # canary leg green, the tag proven, and `v1` did not move. The reusable workflows ARE
+      # the CI track, so a release that touches them is exactly the kind that must advance.
+      # CORPUS_PIN_TOKEN already carries `workflows: write` for propagate-pin's sake.
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.CORPUS_PIN_TOKEN || github.token }}
       - name: Point the floating major tag at this release
         env:
           TAG: ${{ github.ref_name }}

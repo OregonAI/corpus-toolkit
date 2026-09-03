@@ -142,3 +142,10 @@ def test_the_rolling_drift_state_is_committed_regardless_of_gitignore():
     assert 'for f in DRIFT.md drift-state.json access-failures.json; do' in run and 'git add -f "$f"' in run
     assert "gitignored here; not committed" in run
 
+
+def test_advancing_v1_pushes_with_a_token_that_may_touch_workflow_files():
+    """v1.34.1: every gate green, `v1` refused — GITHUB_TOKEN cannot update a ref onto a commit
+    that changed .github/workflows/*. The checkout the push runs from must use the PAT."""
+    job = _load("release-gate")["jobs"]["advance-major-tag"]
+    assert "CORPUS_PIN_TOKEN" in str(job["steps"][0].get("with", {}).get("token", ""))
+
