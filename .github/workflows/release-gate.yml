@@ -173,7 +173,14 @@ jobs:
     needs: plan
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # MEASURED, first tag under this gate (v1.33.0, 2026-09-03): executive-regulatory-
+    # frameworks needs ~1 min to clone, 8 min for full frontmatter and 27-29 min for full
+    # provenance (its own nightly `verify / verify` job takes 27m, 27m, 29m on three
+    # consecutive days). A 30-minute cap cancelled that leg at the provenance step, and a
+    # CANCELLED leg is not a FAILED one: the unpublish job below did not fire, `v1` did not
+    # move, and the tag sat there looking released. Sixty minutes is the measured cost plus
+    # headroom, not a guess; the other seven legs finish in 1-5 minutes.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -258,9 +265,16 @@ jobs:
   # OregonAI/corpus-toolkit/...@v1.7.0` resolves it silently and four corpora inherit the
   # defect, which is exactly the history this file is trying to end. A red CANARY counts:
   # a release that breaks a live corpus is not a release, and `v1` has not moved.
+  #
+  # CANCELLED COUNTS AS FAILED HERE. `failure()` alone is false when a needed job was
+  # cancelled — by its own timeout, say — and that is precisely the outcome that reads as
+  # somebody's decision and gets no investigation (the same trap ERF's generated-views
+  # fan-in documents). A tag whose canary did not finish is a tag nothing proved.
   unpublish-a-failed-tag:
     needs: [corpus-end-to-end, version-matches-tag, canary]
-    if: always() && failure() && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      always() && startsWith(github.ref, 'refs/tags/v')
+      && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
