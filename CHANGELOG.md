@@ -15,7 +15,7 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
-## Unreleased
+## v1.33.0 — 2026-09-03
 
 ### Changed — the CI track floats on `@v1`, `toolkit-ref` is optional, and propagate-pin moves only requirements.txt (ADR-0014)
 
@@ -53,6 +53,8 @@ repo is on the CI track, whether it pins the toolkit. `corpus-manifest --canary-
 mixed / none, read from a corpus's own workflow files). Ships in the package. Validated on
 load — a private repo cannot be on the CI track, a retired repo is neither canaried nor
 bumped — and checked against the org by propagate-pin's preflight.
+
+## v1.32.0 — 2026-09-02
 
 ### Added — `access-failures.json` and `Access failure:` escalation issues for a source whose FETCH has been failing across runs, not its content (corpus-toolkit#166)
 
