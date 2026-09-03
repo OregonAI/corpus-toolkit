@@ -1071,15 +1071,14 @@ use — and keep returning a plain dict.
 
 ### Adopting any of these in a corpus repo
 
-1. Bump **both** pins (`uses:` and `toolkit-ref:`) — and the third, if the repo installs the
-   toolkit in a job of its own. They are separate knobs and drift silently
-   (corpus-toolkit#9).
-2. If the bump crosses v1.19.0, confirm `corpus.archetype` is set and every reusable
-   workflow call passes `toolkit-ref:`.
-3. Re-run the full CI, not just the changed job. The gates that catch a bad bump —
+1. **Since v1.33.0 (ADR-0014) there is one pin to move: the git URL in `requirements.txt`.**
+   Your workflows call the reusable workflows at `@v1` and carry no version. If a repo
+   still has `@vX.Y.Z` in `uses:` lines or a `toolkit-ref:` input, it has not taken the
+   one-time sweep described under v1.33.0 below — do that first.
+2. Re-run the full CI, not just the changed job. The gates that catch a bad bump —
    provenance, frontmatter, generated artifacts — are not the ones a pin change looks like
-   it touches.
-4. If the bump crosses corpus-toolkit#105, run the reserved-relation check in that entry
+   it touches. On the serving track this is what the bump PR's own CI run is for.
+3. If the bump crosses corpus-toolkit#105, run the reserved-relation check in that entry
    against `_meta/graph.json`. It is the one thing here that **no** gate covers: the
    frontmatter schema cannot see it, your `build_graph --check` cannot see it, and the
    toolkit's own release gate cannot see it — so a collision is first observed in
@@ -1123,3 +1122,39 @@ naming, not a bug in the cap.
 
 No manifest change, no schema change to anything you already read: `changed-sources.tsv`
 and `source-outcomes.json` are unaffected.
+
+### v1.33.0 — two tracks: your CI floats on `@v1`, your image pins exactly, and you stop opening pin PRs (ADR-0014)
+
+**Action recommended, once per corpus, and then never again for a workflow file.** Nothing
+breaks if you do not: `toolkit-ref` still works when given, and a corpus still on exact
+`uses:` tags is reported as *held* by the release gate's canary rather than failed. But
+every release you stay held is a release whose thirteen-PR fan-out you are still paying for
+in your repo.
+
+The sweep, in one PR:
+
+1. Every `uses: OregonAI/corpus-toolkit/.github/workflows/<name>.yml@vX.Y.Z` → `@v1`.
+2. Delete every `toolkit-ref: vX.Y.Z` line (and the comment above it saying to pin both).
+   The reusable workflow now installs its own commit.
+3. In your own `generated:` job (and any other job that checked the toolkit out into
+   `.toolkit/`): replace the `actions/checkout` of `OregonAI/corpus-toolkit` and the
+   `pip install ./.toolkit` with `pip install -r requirements.txt`. Your own `--check` gates
+   then run against exactly the toolkit your image serves, which is the version they should
+   be proving. The extras are light (`mcp`, and `semantic` is numpy).
+4. Move `requirements.txt` to v1.33.0 while you are there.
+
+What you get: `corpus-manifest --ci-track-state .` says `floating`; the release gate's
+canary validates your corpus on every candidate before `v1` moves, so a toolkit change that
+would break you stalls the toolkit's release instead of your main; and the only PR a release
+opens in your repo is the one-line requirements bump, which merges itself when your CI is
+green (if `main` is protected by required checks and the repo allows auto-merge).
+
+**Holding back.** Pin an exact tag in `uses:` again. The canary keeps running your corpus
+and reports it as held; `v1` moves without you. Return to `@v1` when ready.
+
+**A bump PR you leave open is a finding.** The next release's propagate-pin leg for your
+repo goes red and opens nothing until the stale one is merged or closed.
+
+**If you call `corpus-detect-changes` from your own CI** rather than the reusable workflow,
+nothing above changes your obligations from v1.32.0.
+

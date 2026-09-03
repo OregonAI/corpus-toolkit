@@ -1,42 +1,51 @@
-# Open a pin-bump PR in every corpus when a toolkit tag is cut.
+# Open a requirements.txt pin-bump PR in every repo that ships the toolkit, once a release
+# has passed the gate and `v1` has moved (ADR-0014).
 #
-# Measured across the org on 2026-07-28: 14 of 70 merged PRs (20%) existed only to carry a
-# platform change into a corpus, concentrated in the newest repos — 4 of 7 in
-# oregon-records-retention, 5 of 8 in oregon-legislature (corpus-toolkit#9). Measured again
-# 2026-08-04: 126 pin sites across 10 repos, and six different toolkit versions live at
-# once.
+# WHAT THIS MOVES, AND WHAT IT NO LONGER TOUCHES. Only the SERVING track: the
+# `corpus-toolkit[...] @ git+https://github.com/OregonAI/corpus-toolkit@vX.Y.Z` line in
+# `requirements*.txt`, which is what a corpus's Dockerfile installs into the image it
+# serves. The CI track — `uses: OregonAI/corpus-toolkit/.github/workflows/<name>.yml@v1`
+# — floats on the major tag the release gate advances, and a workflow file is never edited
+# here again. That is why this token no longer needs `workflows: write`.
 #
-# OPENS PRs, NEVER PUSHES. A pin bump is exactly the change that should be reviewed by the
-# corpus that owns it: it can turn a green corpus red for reasons the toolkit cannot see
-# (v1.19.0 made toolkit-ref required and enforced archetype). The value here is removing
-# the TYPING and the drift, not the judgement.
+# Measured before that split: 2026-07-28, 14 of 70 merged PRs existed only to carry a
+# toolkit tag into a corpus (corpus-toolkit#9); 2026-08-04, 126 pin sites across 10 repos
+# and six versions live at once; 2026-09-02, 154 of the 616 PRs merged across the org in
+# seven weeks. Each corpus carried the tag in 9–15 places, three per workflow call, two of
+# them the same five lines.
+#
+# OPENS PRs AND REQUESTS AUTO-MERGE. The PR still exists — a requirements bump can turn a
+# corpus's own `--check` gates red for reasons the toolkit cannot see, and that CI run is
+# the proof the serving track gets. Where a repo allows auto-merge and protects `main` with
+# required checks, the PR merges itself on green and no human touches it; where it does
+# not (the private consumer tier on this plan), the request is declined and the PR waits.
+#
+# RUNS AFTER THE RELEASE GATE, NOT ON THE TAG. `workflow_run` on release-gate's completion,
+# and only when that run was green for a version tag. A tag the gate rejects (and deletes)
+# propagates nothing; a tag whose canary found a broken corpus propagates nothing. Gated
+# additionally on the repository variable PROPAGATE_PINS == 'true', so the fan-out can be
+# held off during a transition without editing this file; a manual dispatch ignores the
+# variable, because a human asking is the point.
 #
 # SETUP REQUIRED, and it will do nothing without it. `secrets.GITHUB_TOKEN` cannot write to
 # another repository, so this needs a PAT (or GitHub App token) stored as CORPUS_PIN_TOKEN,
-# with `contents: write`, `pull_requests: write` AND `workflows: write` on the target repos.
-# Run `scripts/provision-pin-token.sh`, which walks the whole thing.
+# with `contents: write` and `pull_requests: write` on the target repos. Run
+# `scripts/provision-pin-token.sh`, which walks the whole thing.
 #
-# `workflows: write` is not optional and is the one that gets missed: bump_pins.py's
-# SCAN_GLOBS covers `.github/workflows/*.yml`, so every bump edits a workflow file, and
-# GitHub REJECTS a token that pushes one without it. The error names the file, never the
-# permission.
-#
-# A MISSING TOKEN IS NOW A FAILURE, not a warning. It used to "report what it would have
-# done and exit 0 rather than failing a release" — defensible in the abstract, and what
-# actually happened is that the secret was never provisioned at all, so v1.24.0, v1.24.1
-# and v1.25.0 each reported ten green legs and propagated NOTHING (corpus-toolkit#83). The
-# tracker meanwhile recorded corpus-toolkit#9 as closed, i.e. that hand-propagation was
-# solved. Nothing about the release is protected by this exiting 0: the release gate is a
-# separate workflow, and this going red does not unpublish a tag.
+# A MISSING TOKEN IS A FAILURE, not a warning. It used to "report what it would have done
+# and exit 0 rather than failing a release" — defensible in the abstract, and what actually
+# happened is that the secret was never provisioned at all, so v1.24.0, v1.24.1 and v1.25.0
+# each reported ten green legs and propagated NOTHING (corpus-toolkit#83).
 name: propagate-pin
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_run:
+    workflows: [release-gate]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
-        description: toolkit tag to propagate (defaults to the newest)
+        description: toolkit tag to propagate (defaults to the newest release tag)
         type: string
         required: false
       dry-run:
@@ -48,34 +57,55 @@ permissions:
   contents: read
 
 jobs:
-  # THE LIST BELOW IS A CLAIM ABOUT THE ORG, so check it against the org.
-  #
-  # Explicit listing stays — a repo joins because its maintainer wants automated bumps,
-  # which is a decision, not a property of existing (docs/adr/0004). What explicit listing
-  # cannot do on its own is tell a DELIBERATE omission from a STALE entry, and it had both
-  # kinds of error at once: `oregon-policy-repo` has not existed for some time, and
-  # `oregon-records-retention` was archived on 2026-08-01 when it folded into ERF. Both
-  # reported success on every release, because a leg that cannot check out still exits 0
-  # when the token gate short-circuits it.
-  #
-  # An unreachable target is therefore a hard failure here. "Could not check" must not be
-  # served as "nothing to do" — the same rule the servers enforce on every response.
-  preflight:
+  # THE MATRIX COMES FROM THE MANIFEST (ADR-0008) AND THE MANIFEST IS CHECKED AGAINST THE
+  # ORG. Explicit listing stays — a repo is bumped because its maintainer wants automated
+  # bumps, which is a decision, not a property of existing (ADR-0004). What a hand-typed
+  # list could not do was tell a DELIBERATE omission from a STALE entry, and it had both
+  # kinds of error at once (`oregon-policy-repo`, which did not exist; `oregon-records-
+  # retention`, archived). So: every non-archived repository in the org must appear in
+  # corpora.yml, and every `live` entry must be non-archived. Either mismatch is a hard
+  # failure — "could not check" is never served as "nothing to do".
+  plan:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (vars.PROPAGATE_PINS == 'true'
+          && github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push'
+          && startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      pins: ${{ steps.matrix.outputs.pins }}
     steps:
-      - name: Every listed repo must exist and be writable
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - name: Resolve the release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          RUN_REF: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-}"
+          if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "workflow_run" ]; then TAG="$RUN_REF"; fi
+          if [ -z "$TAG" ]; then
+            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/tags?per_page=100" --jq '.[].name' \
+                  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          fi
+          if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::not a release tag: '$TAG' (the floating major tag is never propagated)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "propagating $TAG"
+      - name: The manifest must describe the org, and the token must reach every target
         env:
           GH_TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
-          # Kept in the same order as the matrix below. When the corpora manifest of
-          # docs/adr/0008 exists, BOTH this and the matrix generate from it and this
-          # duplication goes away; until then it is a tooling list (docs/adr/0004) and
-          # the preflight is what stops the two copies drifting silently.
-          REPOS: >-
-            oregon-audits oregon-budget oregon-collective-bargaining oregon-counties
-            oregon-kpm oregon-legislature federal-reference
-            executive-regulatory-frameworks corpus-template
-            corpus-gateway corpus-chat oregon-stories
         run: |
           set -uo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
@@ -85,72 +115,60 @@ jobs:
             echo "::error::Provision it with scripts/provision-pin-token.sh."
             exit 1
           fi
+          gh repo list OregonAI --limit 100 --json name,isArchived > /tmp/org.json
+          corpus-manifest --json > /tmp/manifest.json
+          python3 - <<'PY'
+          import json, sys
+          org = {r["name"]: r["isArchived"] for r in json.load(open("/tmp/org.json"))}
+          manifest = {r["name"]: r for r in json.load(open("/tmp/manifest.json"))}
+          bad = 0
+          for name in sorted(set(org) - set(manifest)):
+              print(f"::error::{name} exists in the org and is missing from corpora.yml — add it (ADR-0008)"); bad = 1
+          for name, r in sorted(manifest.items()):
+              if name not in org:
+                  print(f"::error::{name} is in corpora.yml but not reachable in the org with CORPUS_PIN_TOKEN"); bad = 1
+              elif r["status"] == "live" and org[name]:
+                  print(f"::error::{name} is `live` in corpora.yml but ARCHIVED on GitHub — mark it retired"); bad = 1
+          print(f"manifest {len(manifest)} entries, org {len(org)} repos, {'MISMATCH' if bad else 'agree'}")
+          sys.exit(bad)
+          PY
           bad=0
-          for r in $REPOS; do
-            json=$(gh api "repos/OregonAI/$r" --jq '{archived,push:.permissions.push}' 2>/dev/null) || {
-              echo "::error::$r — not reachable with CORPUS_PIN_TOKEN (missing repo, or not in the token's scope)"
-              bad=1; continue; }
+          for r in $(corpus-manifest --pin-matrix | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))'); do
+            json=$(gh api "repos/OregonAI/$r" --jq '{push:.permissions.push}' 2>/dev/null) || {
+              echo "::error::$r — not reachable with CORPUS_PIN_TOKEN"; bad=1; continue; }
             case "$json" in
-              *'"archived":true'*) echo "::error::$r — ARCHIVED; it can never accept a PR. Remove it from the matrix."; bad=1 ;;
-              *'"push":false'*)    echo "::error::$r — reachable but the token has no write access."; bad=1 ;;
+              *'"push":false'*) echo "::error::$r — reachable but the token has no write access."; bad=1 ;;
               *) echo "  ok  $r" ;;
             esac
           done
           exit $bad
+      - name: Read the pin matrix from corpora.yml
+        id: matrix
+        run: |
+          set -euo pipefail
+          m=$(corpus-manifest --pin-matrix)
+          echo "pin targets: $m"
+          echo "pins=$m" >> "$GITHUB_OUTPUT"
 
   propagate:
-    needs: preflight
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      # One job per repo so a single failure does not hide the other eleven.
-      #
-      # ERF was missing while being the largest corpus on the platform; the consumer tier
-      # (docs/adr/0002) and oregon-stories were missing entirely and had drifted furthest —
-      # measured 2026-08-12: stories v1.20.0, gateway and chat v1.23.0, template v1.19.0,
-      # the corpora v1.24.1, current v1.25.0. Twelve repos, five versions, none current.
-      #
-      # bump_pins.py reaches all three of the new non-corpus entries: SCAN_GLOBS covers
-      # `requirements.txt`, and they pin the `git+https://github.com/OregonAI/corpus-toolkit@vX`
-      # form the third pattern matches.
+      # One job per repo so a single failure does not hide the others.
       matrix:
-        repo:
-          - oregon-audits
-          - oregon-budget
-          - oregon-collective-bargaining
-          - oregon-counties
-          - oregon-kpm
-          - oregon-legislature
-          - federal-reference
-          - executive-regulatory-frameworks
-          - corpus-template
-          - corpus-gateway
-          - corpus-chat
-          - oregon-stories
+        repo: ${{ fromJSON(needs.plan.outputs.pins) }}
     steps:
       - uses: actions/checkout@v4
         with:
           path: toolkit
 
-      - name: Resolve the tag
-        id: tag
-        run: |
-          set -euo pipefail
-          TAG="${{ inputs.tag }}"
-          [ -z "$TAG" ] && TAG="${GITHUB_REF_NAME}"
-          case "$TAG" in v*) ;; *) echo "::error::not a version tag: $TAG"; exit 1;; esac
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      # `preflight` already fails the whole workflow when the token is absent, so reaching
-      # here without one should be impossible. Kept anyway, and it now EXITS rather than
-      # setting an output the later steps test.
-      #
-      # That output was the mechanism of the bug. Every step below used to carry
-      # `if: steps.auth.outputs.ok == 'true'`, so an absent token skipped the entire job
-      # body and the leg still reported success — ten green checks across three releases
-      # while nothing propagated (corpus-toolkit#83). A guard whose failure mode is
-      # "silently do nothing, report success" is not a guard.
+      # `plan` already fails the whole workflow when the token is absent, so reaching here
+      # without one should be impossible. Kept anyway, and it EXITS rather than setting an
+      # output later steps test: that output was the mechanism of corpus-toolkit#83 — every
+      # step carried `if: steps.auth.outputs.ok == 'true'`, an absent token skipped the job
+      # body, and the leg reported success while nothing propagated.
       - name: Check the token before doing anything else
         env:
           TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
@@ -159,6 +177,28 @@ jobs:
             echo "::error::CORPUS_PIN_TOKEN is not set. Run scripts/provision-pin-token.sh."
             exit 1
           fi
+
+      # A BUMP PR STILL OPEN FROM AN EARLIER RELEASE IS A FINDING, AND THIS LEG GOES RED
+      # FOR IT rather than opening a second one beside it. The bump PRs are authored by the
+      # operator's own token, so GitHub already notifies them when one fails; this is the
+      # second channel, for the case where the notification was read and nothing happened.
+      # A PR for THIS tag (a re-run) is not stale.
+      - name: No bump PR from an earlier release may still be open
+        env:
+          GH_TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          stale=$(gh pr list -R "OregonAI/${{ matrix.repo }}" --state open --limit 50 \
+                    --json url,headRefName --jq \
+                    ".[] | select(.headRefName | startswith(\"toolkit-pin-\")) | select(.headRefName != \"toolkit-pin-${TAG}\") | \"\(.url) (\(.headRefName))\"")
+          if [ -n "$stale" ]; then
+            echo "::error::${{ matrix.repo }} still has a bump PR open from an earlier release:"
+            echo "$stale" | sed 's/^/::error::  /'
+            echo "::error::Merge or close it; this leg opens nothing until it is gone."
+            exit 1
+          fi
+          echo "no stale bump PR in ${{ matrix.repo }}"
 
       - uses: actions/checkout@v4
         with:
@@ -170,12 +210,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Move the pins
+      - name: Move the serving pin
         id: bump
         run: |
           set -euo pipefail
           python3 toolkit/.github/scripts/bump_pins.py \
-            --repo corpus --to "${{ steps.tag.outputs.tag }}" | tee /tmp/bump.txt
+            --repo corpus --to "${{ needs.plan.outputs.tag }}" | tee /tmp/bump.txt
           cd corpus
           if git diff --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -183,21 +223,23 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open the PR
+      - name: Open the PR and ask it to merge itself on green
         if: steps.bump.outputs.changed == 'true' && inputs.dry-run != true
         working-directory: corpus
         env:
           GH_TOKEN: ${{ secrets.CORPUS_PIN_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
           BRANCH="toolkit-pin-${TAG}"
           git config user.name "corpus-bot"
           git config user.email "actions@github.com"
           git checkout -b "$BRANCH"
-          git commit -am "chore: move corpus-toolkit pins to ${TAG}"
+          git commit -am "chore: move the corpus-toolkit serving pin to ${TAG}"
           git push -u origin "$BRANCH" --force
           # A PR may already exist from a re-run; that is not a failure.
-          gh pr create --title "chore: move corpus-toolkit pins to ${TAG}" \
-            --body "$(printf 'Automated by corpus-toolkit propagate-pin.\n\n%s\n\n**Review before merging.** A pin bump can turn this repo red for reasons the toolkit cannot see — v1.19.0 made `toolkit-ref` required and enforced `archetype`. See corpus-toolkit CHANGELOG.md and MIGRATION.md for what changed.\n' "$(cat /tmp/bump.txt)")" \
+          gh pr create --title "chore: move the corpus-toolkit serving pin to ${TAG}" \
+            --body "$(printf 'Automated by corpus-toolkit propagate-pin, after the release gate and its canary passed for %s (ADR-0014).\n\n%s\n\nThis moves only what the served image installs. CI already runs the toolkit at the floating `@v1`, which this release advanced. If this PR is red, the corpus'"'"'s own `--check` gates disagree with the new toolkit — see corpus-toolkit CHANGELOG.md and MIGRATION.md for what changed.\n' "$TAG" "$(cat /tmp/bump.txt)")" \
             || echo "PR already exists for $BRANCH"
+          gh pr merge --auto --squash "$BRANCH" \
+            || echo "::notice::${{ matrix.repo }}: auto-merge unavailable (private repo, or main not protected with required checks) — merge by hand"

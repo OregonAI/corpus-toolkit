@@ -58,8 +58,9 @@ services can ship without each other. Checked against the manifest in CI; never 
 from the manifest, because duplication here buys nothing and has already produced a
 propagation matrix targeting a repository that does not exist (corpus-toolkit#83).
 
-**Corpora manifest** — the one machine-readable source the tooling lists generate from and the
-runtime lists are checked against.
+**Corpora manifest** — `corpus_toolkit/schemas/corpora.yml`, the one machine-readable source the
+tooling lists generate from and the runtime lists are checked against. Read with
+`corpus-manifest`; checked against the org by propagate-pin's preflight on every run.
 
 **Group drift finding** — one drift issue naming a source group in which EVERY compared source
 changed in a single run. It states that they changed together and asserts nothing about why:
@@ -136,6 +137,31 @@ no matter what it is named.
 whether `mcp` 1.x or 2.x is installed. Used on both sides: by corpus servers, and by the
 consumer tier — see [ADR-0006](docs/adr/0006-one-package-public-client-seam.md).
 
+
+## Tracks
+
+A corpus names the toolkit in two places that move differently — see [ADR-0014](docs/adr/0014-two-tracks-ci-floats-serving-pins.md).
+
+**CI track** — the reusable workflows a corpus calls (`uses: OregonAI/corpus-toolkit/.github/workflows/<name>.yml@v1`)
+and the CLIs they run. Floats on the major tag `v1`, which only the release gate moves.
+`toolkit-ref` is optional and defaults to the workflow's own commit. Nothing here carries a
+version to bump.
+
+**Serving track** — the exact tag in `requirements*.txt` that a corpus's Dockerfile installs
+into the image it serves. Moved by `propagate-pin`, one requirements-only PR per release,
+auto-merged on green where the repo allows it. Exact so that `deployed.txt`'s commit builds
+the same image twice.
+
+**Canary** — the release-gate job that clones every live public corpus and runs the CI-track
+CLIs on the candidate before `v1` advances. A red canary unpublishes the tag.
+
+**Held** — a corpus whose workflows pin an exact tag instead of `@v1`. It has opted out of a
+release it cannot yet take; the canary reports it and does not block on it. Read from the
+corpus's own workflow files, never from a manifest field.
+
+_Avoid_: "the pin", "bump the toolkit" without naming the track — the two have moved on
+different mechanisms since v1.33.0, and "bump" on the CI track means editing a `uses:` line
+that is no longer supposed to carry a version.
 
 ## Seams and adapters
 

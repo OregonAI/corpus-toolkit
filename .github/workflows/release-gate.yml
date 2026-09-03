@@ -20,11 +20,24 @@ name: release-gate
 # continuously verified so that tagging a green main is safe. The tag job below is the
 # backstop for the case where that is not true, and it DELETES the offending tag rather
 # than leaving a red one for four corpora to pin.
+#
+# TWO TRACKS (ADR-0014). Since v1.33.0 the corpora's CI calls the reusable workflows at
+# the FLOATING major tag `v1`, and only their serving images pin an exact tag (in
+# requirements.txt). This workflow is what makes floating safe: `v1` moves ONLY when the
+# `canary` job below has cloned every live public corpus and run the CI-track CLIs on the
+# candidate, green. A release that would break a corpus therefore stalls here, with the
+# corpus named — the fix lands in that corpus first, then the tag moves. Before this, the
+# same release opened thirteen pin-bump PRs and found out one at a time; measured 2026-09-02,
+# 154 of the 616 PRs merged across the org in seven weeks were those bumps.
 on:
   pull_request:
   push:
     branches: [main]
-    tags: ["v*"]
+    # EXACT release tags only. `v1` is moved by the advance job below and must not
+    # re-trigger this workflow: version-matches-tag would read `1` against pyproject and
+    # the unpublish job would delete the very tag it had just advanced. (A push made with
+    # GITHUB_TOKEN does not trigger workflows anyway; this is the belt to that brace.)
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
 
 permissions:
@@ -102,7 +115,7 @@ jobs:
             fi
             echo "tag $GITHUB_REF_NAME agrees with pyproject $V"
           else
-            LATEST=$(git tag --sort=-v:refname | head -1 | sed 's/^v//')
+            LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 | sed 's/^v//')
             echo "latest tag: ${LATEST:-none}"
             if [ -n "$LATEST" ] && [ "$V" = "$LATEST" ]; then
               echo "::notice::version is unchanged from the latest tag — fine for a PR that"
@@ -110,12 +123,141 @@ jobs:
             fi
           fi
 
+  # THE CANARY MATRIX COMES FROM THE MANIFEST (ADR-0008), not from a list typed here.
+  # propagate-pin.yml reads the same file for its own matrix and checks it against the
+  # org on every run, so a corpus that joins the platform joins both jobs by one edit.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canary: ${{ steps.matrix.outputs.canary }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - name: Read the canary matrix from corpora.yml
+        id: matrix
+        run: |
+          set -euo pipefail
+          m=$(corpus-manifest --canary-matrix)
+          echo "canary targets: $m"
+          echo "canary=$m" >> "$GITHUB_OUTPUT"
+
+  # THE CANARY (ADR-0014). Every live public corpus, cloned at its default branch, run
+  # through the CI-track CLIs — the same three the reusable workflows call — on the
+  # CANDIDATE toolkit. This is the check that used to happen thirteen times, one pin-bump
+  # PR per corpus, after the tag already existed; it now happens once, before `v1` moves.
+  #
+  # Only the CI track is exercised here. A corpus's own `--check` gates run against the
+  # exact tag its requirements.txt pins (the serving track), and are proven on the
+  # requirements bump PR propagate-pin opens after this gate — that is the right place,
+  # because that PR is where the corpus's served code actually changes.
+  #
+  # HELD IS REPORTED, NOT BLOCKING. A corpus that pins the reusable workflows at an exact
+  # tag instead of `@v1` has opted out of this release; its leg still runs (so the gap is
+  # visible in the log) but `continue-on-error` keeps it from stalling everyone else. The
+  # state is read from the corpus's own workflow files by `corpus-manifest
+  # --ci-track-state`, so there is no second list to maintain. Before the sweep that put
+  # the corpora on `@v1` every corpus read as held, which made the first release under this
+  # gate trivially green — that is the intended opt-in shape, not a gap.
+  #
+  # Not on pull requests: executive-regulatory-frameworks alone is 75k documents and ~8
+  # minutes of full validation, and a PR to this repo is proven by the template leg above.
+  # Main pushes, tags and dispatches run it, so a tag is cut from a main the canary has
+  # already seen.
+  canary:
+    needs: plan
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJSON(needs.plan.outputs.canary) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: toolkit
+      - uses: actions/checkout@v4
+        with:
+          repository: OregonAI/${{ matrix.repo }}
+          path: corpus
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the candidate
+        run: pip install ./toolkit
+      - name: Is this corpus on the CI track, or held?
+        id: track
+        working-directory: corpus
+        run: |
+          set -euo pipefail
+          state_json=$(corpus-manifest --ci-track-state .)
+          echo "$state_json"
+          state=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state"])' "$state_json")
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          case "$state" in
+            floating) echo "${{ matrix.repo }} is on the CI track: a failure below blocks this release" ;;
+            held)     echo "::notice::${{ matrix.repo }} is HELD at an exact tag — reported below, not blocking" ;;
+            mixed)    echo "::warning::${{ matrix.repo }} mixes @v1 with exact tags (a partial bump) — treated as held" ;;
+            *)        echo "::warning::${{ matrix.repo }} calls no reusable workflow at all — treated as held" ;;
+          esac
+      - name: Full frontmatter validation on the candidate
+        working-directory: corpus
+        continue-on-error: ${{ steps.track.outputs.state != 'floating' }}
+        run: corpus-validate-frontmatter --config _meta/corpus.yml
+      - name: Full provenance verification on the candidate
+        working-directory: corpus
+        continue-on-error: ${{ steps.track.outputs.state != 'floating' }}
+        run: corpus-verify-provenance --config _meta/corpus.yml
+      - name: Relationship graph and corpus configuration on the candidate
+        working-directory: corpus
+        continue-on-error: ${{ steps.track.outputs.state != 'floating' }}
+        run: corpus-validate-frontmatter --config _meta/corpus.yml --check-relationships
+
+  # MOVE `v1` TO THIS RELEASE, and only now. Every gate above is green on a tag, so the
+  # floating tag every corpus's CI resolves may advance. The tag is the release's OUTPUT,
+  # never something a human moves: a hand-moved `v1` is a release nothing proved.
+  #
+  # ROLLBACK is one line, from any checkout with push rights:
+  #     git push --force origin <previous-release-sha>:refs/tags/v1
+  # and every corpus's next CI run is back on the previous release with no PR anywhere.
+  advance-major-tag:
+    needs: [corpus-end-to-end, version-matches-tag, canary]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      && needs.corpus-end-to-end.result == 'success'
+      && needs.version-matches-tag.result == 'success'
+      && needs.canary.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Point the floating major tag at this release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::not a release tag: $TAG"; exit 1;; esac
+          MAJOR="${TAG%%.*}"
+          git config user.name "corpus-bot"
+          git config user.email "actions@github.com"
+          git tag -f "$MAJOR" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$MAJOR"
+          echo "::notice::$MAJOR now points at $TAG ($GITHUB_SHA). Every corpus on the CI track runs it from its next job."
+
   # Only on a tag, and only if a gate above failed. GitHub cannot refuse a tag; it can
   # unpublish one. A red tag left in place is worse than no tag at all — `uses:
   # OregonAI/corpus-toolkit/...@v1.7.0` resolves it silently and four corpora inherit the
-  # defect, which is exactly the history this file is trying to end.
+  # defect, which is exactly the history this file is trying to end. A red CANARY counts:
+  # a release that breaks a live corpus is not a release, and `v1` has not moved.
   unpublish-a-failed-tag:
-    needs: [corpus-end-to-end, version-matches-tag]
+    needs: [corpus-end-to-end, version-matches-tag, canary]
     if: always() && failure() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -130,6 +272,7 @@ jobs:
           set -euo pipefail
           echo "::error::release gate FAILED for $TAG — deleting the tag so no corpus can"
           echo "::error::pin a ref that does not serve the contract. Fix main, re-tag."
+          echo "::error::The floating major tag has NOT moved; corpora on the CI track are unaffected."
           gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}"
           echo "deleted tag $TAG"
           exit 1

@@ -17,6 +17,43 @@ it can break you.
 
 ## Unreleased
 
+### Changed — the CI track floats on `@v1`, `toolkit-ref` is optional, and propagate-pin moves only requirements.txt (ADR-0014)
+
+**Action recommended, once, per corpus: point every `uses: OregonAI/corpus-toolkit/...@vX.Y.Z`
+at `@v1`, delete the `toolkit-ref:` lines, and make your own `generated:` job `pip install
+-r requirements.txt` instead of checking the toolkit out a second time.** Until you do,
+nothing breaks: `toolkit-ref` still works when given, and a corpus still on exact tags is
+simply reported as *held* by the release gate's new canary. Once you do, you never open a
+pin-bump PR for a workflow file again — 154 of the 616 PRs merged across the org in the
+seven weeks to 2026-09-02 were exactly that.
+
+- The four reusable workflows: `toolkit-ref` is `required: false`; the toolkit checkout
+  falls back to `github.job_workflow_sha`, the workflow's own commit, so the workflow file
+  and the code it runs cannot drift.
+- `release-gate.yml`: new `plan` and `canary` jobs clone every live public corpus (from the
+  manifest) and run full frontmatter, full provenance and the relationship check on the
+  candidate; new `advance-major-tag` job moves `v1` to a release only after every gate
+  including the canary is green. Held corpora are reported, not blocking. The trigger is
+  now exact release tags only, so the moving `v1` cannot re-trigger the gate and be deleted
+  by `version-matches-tag`.
+- `propagate-pin.yml`: runs on `workflow_run` after a green release-gate, not on the tag;
+  matrix generated from the manifest and the manifest checked against the org; bumps
+  `requirements*.txt` only; requests `gh pr merge --auto`; goes red for a bump PR still
+  open from an earlier release rather than opening a second. Gated on the repository
+  variable `PROPAGATE_PINS == 'true'` (a manual dispatch ignores the variable). Its token
+  no longer needs `workflows: write`.
+- `bump_pins.py`: scans requirements files only. Workflow-file pins are the CI track and
+  are deliberately never rewritten — an exact `uses:` tag is a corpus holding itself back.
+
+### Added — the corpora manifest, `corpus_toolkit/schemas/corpora.yml`, and `corpus-manifest` (ADR-0008)
+
+The one machine-readable list of the org's repos: tier, visibility, status, whether the
+repo is on the CI track, whether it pins the toolkit. `corpus-manifest --canary-matrix`,
+`--pin-matrix`, `--names`, `--json`, and `--ci-track-state <checkout>` (floating / held /
+mixed / none, read from a corpus's own workflow files). Ships in the package. Validated on
+load — a private repo cannot be on the CI track, a retired repo is neither canaried nor
+bumped — and checked against the org by propagate-pin's preflight.
+
 ### Added — `access-failures.json` and `Access failure:` escalation issues for a source whose FETCH has been failing across runs, not its content (corpus-toolkit#166)
 
 **Action recommended, not required, and only if you call the reusable
