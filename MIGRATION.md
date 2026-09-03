@@ -1194,7 +1194,7 @@ Adopting it in a corpus repo: nothing, if you call the reusable workflow at `@v1
 add a second cron so drift runs monthly while full validation stays weekly (the shape
 oregon-audits already had), and delete `.github/ISSUE_TEMPLATE/source-change.md`.
 
-### Unreleased (v1.34.1) — pass `secrets: inherit` to the drift workflow; define `DRIFT_BOT_TOKEN` once (ADR 0015 follow-up)
+### v1.34.1 — pass `secrets: inherit` to the drift workflow; define `DRIFT_BOT_TOKEN` once (ADR 0015 follow-up)
 
 **Action required in every corpus's `scheduled.yml`**: every job that `uses:`
 `detect-upstream-changes.yml` gets `secrets: inherit`. **Action required once, at the org**:
