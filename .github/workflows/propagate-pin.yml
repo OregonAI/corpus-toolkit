@@ -124,9 +124,17 @@ jobs:
           bad = 0
           for name in sorted(set(org) - set(manifest)):
               print(f"::error::{name} exists in the org and is missing from corpora.yml — add it (ADR-0008)"); bad = 1
+          targets = {r["name"] for r in manifest.values() if r["status"] == "live" and r["toolkit_pin"]}
           for name, r in sorted(manifest.items()):
               if name not in org:
-                  print(f"::error::{name} is in corpora.yml but not reachable in the org with CORPUS_PIN_TOKEN"); bad = 1
+                  # COULD NOT CHECK IS NOT "IS NOT THERE". A fine-grained token lists only the
+                  # repos it was granted, so an entry it cannot see is unverifiable, not absent.
+                  # That is a failure only for a repo this workflow must WRITE to; for anything
+                  # else (platform-deploy: private, neither pinned nor canaried) it is a notice.
+                  if name in targets:
+                      print(f"::error::{name} is a pin target but CORPUS_PIN_TOKEN cannot reach it — grant the token access"); bad = 1
+                  else:
+                      print(f"::notice::{name}: not visible to CORPUS_PIN_TOKEN, so its archived status could not be checked (not a target; fine)")
               elif r["status"] == "live" and org[name]:
                   print(f"::error::{name} is `live` in corpora.yml but ARCHIVED on GitHub — mark it retired"); bad = 1
           print(f"manifest {len(manifest)} entries, org {len(org)} repos, {'MISMATCH' if bad else 'agree'}")
