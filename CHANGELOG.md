@@ -15,6 +15,17 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## Unreleased
+
+### Changed — advancing `v1` prefers the org-wide `DRIFT_BOT_TOKEN`
+
+v1.34.2's gate was green on every leg and `advance-major-tag` still failed: `CORPUS_PIN_TOKEN`
+is scoped to the twelve repos propagate-pin writes to, not to corpus-toolkit, so it cannot
+move a tag here. One org secret, `DRIFT_BOT_TOKEN` (contents, pull-requests and workflows
+write on every OregonAI repo), now serves both the drift workflow's PR and the gate's tag
+push. Until it exists, a release that touches a reusable workflow is proven by the gate and
+its `v1` is moved by hand — which is how v1.34.2 reached `v1`.
+
 ## v1.34.2 — 2026-09-03
 
 ### Fixed — advancing `v1` uses the PAT, because a release that changes a reusable workflow cannot be pushed by the built-in token

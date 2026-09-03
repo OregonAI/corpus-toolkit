@@ -147,5 +147,6 @@ def test_advancing_v1_pushes_with_a_token_that_may_touch_workflow_files():
     """v1.34.1: every gate green, `v1` refused — GITHUB_TOKEN cannot update a ref onto a commit
     that changed .github/workflows/*. The checkout the push runs from must use the PAT."""
     job = _load("release-gate")["jobs"]["advance-major-tag"]
-    assert "CORPUS_PIN_TOKEN" in str(job["steps"][0].get("with", {}).get("token", ""))
+    tok = str(job["steps"][0].get("with", {}).get("token", ""))
+    assert "DRIFT_BOT_TOKEN" in tok and "CORPUS_PIN_TOKEN" in tok, "prefer the org-wide bot token, then the PAT"
 

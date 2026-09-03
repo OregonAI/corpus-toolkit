@@ -252,10 +252,18 @@ jobs:
       # not a permission a job can grant itself. Measured on v1.34.1 (2026-09-03): every
       # canary leg green, the tag proven, and `v1` did not move. The reusable workflows ARE
       # the CI track, so a release that touches them is exactly the kind that must advance.
-      # CORPUS_PIN_TOKEN already carries `workflows: write` for propagate-pin's sake.
+      # WHICH TOKEN. Measured on v1.34.2 (2026-09-03): CORPUS_PIN_TOKEN is scoped to the
+      # twelve repos propagate-pin writes to and NOT to this one -- "Permission to
+      # OregonAI/corpus-toolkit.git denied" -- so it cannot move a tag here either. The org
+      # secret DRIFT_BOT_TOKEN (contents + pull-requests + workflows write on every OregonAI
+      # repo, this one included) is the one token meant to do both jobs; it is preferred,
+      # then the PAT, then the built-in token, which works only for a release that touched
+      # no workflow file. Until DRIFT_BOT_TOKEN exists, a release touching a reusable
+      # workflow is proven by this gate and its `v1` is moved by hand:
+      #     git push --force origin <release-sha>:refs/tags/v1
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.CORPUS_PIN_TOKEN || github.token }}
+          token: ${{ secrets.DRIFT_BOT_TOKEN || secrets.CORPUS_PIN_TOKEN || github.token }}
       - name: Point the floating major tag at this release
         env:
           TAG: ${{ github.ref_name }}
