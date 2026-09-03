@@ -15,7 +15,7 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
-## Unreleased
+## v1.34.2 — 2026-09-03
 
 ### Fixed — advancing `v1` uses the PAT, because a release that changes a reusable workflow cannot be pushed by the built-in token
 
