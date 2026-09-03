@@ -132,3 +132,13 @@ def test_the_drift_workflow_takes_a_bot_token_and_fails_when_it_cannot_open_the_
     assert "exit 1" in pr_step["run"] and "could not open the drift PR" not in pr_step["run"], \
         "a PR that could not be opened must fail the step, not warn"
 
+
+def test_the_rolling_drift_state_is_committed_regardless_of_gitignore():
+    """oregon-collective-bargaining ignores source-outcomes.json; `git add` refused it and the
+    whole commit step died under `set -e` on the first v1.34.0 run. The rolling files must
+    land with -f; the per-run artifact may be skipped, out loud."""
+    job = _load("detect-upstream-changes")["jobs"]["detect"]
+    run = next(s for s in job["steps"] if "drift PR" in s.get("name", ""))["run"]
+    assert 'for f in DRIFT.md drift-state.json access-failures.json; do' in run and 'git add -f "$f"' in run
+    assert "gitignored here; not committed" in run
+

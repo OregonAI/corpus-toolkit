@@ -127,8 +127,18 @@ jobs:
           git config user.name "corpus-bot"
           git config user.email "actions@github.com"
           git add -u
-          for f in DRIFT.md drift-state.json source-outcomes.json access-failures.json STATUS.md; do
-            [ -f "$f" ] && git add "$f"
+          # THE ROLLING STATE LANDS REGARDLESS OF .gitignore. drift-state.json feeds the next
+          # run and access-failures.json carries the ADR 0013 streaks; a corpus that ignores
+          # either has switched the feature off without saying so, which v1.32.0's notes
+          # already called out. So those two, and the report, are added with -f. The per-run
+          # artifact source-outcomes.json respects an ignore rule: oregon-collective-bargaining
+          # ignores it, `git add` refused it, and under `set -e` this step died before
+          # committing ANYTHING on the first v1.34.0 run — a whole run's state lost to a hint.
+          for f in DRIFT.md drift-state.json access-failures.json; do
+            [ -f "$f" ] && git add -f "$f"
+          done
+          for f in source-outcomes.json STATUS.md; do
+            [ -f "$f" ] && { git add "$f" 2>/dev/null || echo "$f is gitignored here; not committed"; }
           done
           if git diff --cached --quiet; then
             echo "Nothing the run wrote differs from main."
