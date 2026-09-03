@@ -83,6 +83,22 @@ four of the six describe a source nothing compared, for four different reasons w
 different remedies, and the whole point of naming them is that a consumer no longer has to
 guess which one applied.
 
+**Access failure** — a source whose fetch has failed for `access-failures.json`'s two
+persisted counts, `consecutive_failures` and `first_failed_at`, to reach the operator's
+threshold: 2 consecutive failed runs, or 14 elapsed days since the first of those
+failures, whichever comes first (corpus-toolkit#166). It escalates once, to one `Access
+failure:` issue under its own `access-failure` label, never `source-change` — the two
+labels keep a fact about OUR access to a source out of the queue that tracks a fact about
+what changed. `fetch_failed` (a `Source outcome`, above) is the per-run observation; an
+access failure is what a streak of that observation becomes once it crosses the threshold
+and stops being noise. The state artifact holds a source only while its MOST RECENT
+observation was `fetch_failed`; any other outcome clears it, and a source or a whole group
+retired from the manifest is pruned from it rather than kept asserting a dead source is
+still failing.
+_Avoid_: "drift", "changed" for this — an access failure asserts nothing about upstream,
+only that the tool's own fetches have not been arriving; conflating the two is the exact
+confusion the separate label exists to prevent.
+
 ## Contracts
 
 **Corpus contract** — `docs/mcp-interface-contract.md`. Seven tools, the response conventions,
@@ -169,5 +185,8 @@ never `current`, as `attribution.can_answer` refusing to let "attributes nothing
 shape of "holds none", as the reason a healthcheck that cannot fail is treated as worse
 than no healthcheck, and as a source outcome refusing to let `fetch_failed` wear the shape of
 `unchanged` — the two states `changed-sources.tsv` could not tell apart, because a source
-absent from it means either one (corpus-toolkit#160). If a new mechanism collapses those two
-answers, it is wrong regardless of what it is called.
+absent from it means either one (corpus-toolkit#160). It is also why an access-failure
+escalation says only that OUR fetches failed and never that the document changed or was
+removed — this tool cannot tell a block from a page that moved and does not guess
+(corpus-toolkit#166). If a new mechanism collapses those two answers, it is wrong
+regardless of what it is called.
