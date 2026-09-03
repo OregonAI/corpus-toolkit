@@ -15,6 +15,34 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## Unreleased
+
+### Changed — a drift run files no issues: DRIFT.md, drift-state.json, auto-seeding, a self-merging PR (ADR 0015)
+
+**Can break you only if you pass `--open-issues` yourself** — the flag is gone and argparse
+exits 2. The reusable workflow never passes it now. Measured 2026-09-02: 90 of the org's
+172 open issues were the tickets this used to file; none was read. The claims of ADR 0010
+(a group changed together) and ADR 0013 (our fetches have been failing) stand, as sections
+of one rolling report per corpus.
+
+- New `corpus_toolkit/sources/drift_report.py` and `corpus-drift-report`: `DRIFT.md`
+  rendered from `drift-state.json` — every source whose upstream differs from its baseline
+  and since when, whole-group changes, access-failure streaks with the ADR 0013 threshold
+  marked **escalated**, what the run seeded or accepted, a per-group tally, and the run's
+  verdict. Held/pruned by the rules `access-failures.json` already follows. Not
+  `--check`-gated: it records observations.
+- `corpus-detect-changes`: seeds unseeded sources on the run that fetches them
+  (`--record-baseline` bare is a synonym for the default; `refresh` still accepts drift);
+  `RunVerdict` is the one source of a red exit (systemic, nothing checked, refused rewrite,
+  watch failures, `--strict`); `capped`/`inert`/`unchecked_baseline` are gone; deleted
+  `_file_once`, `_open_issue`, `_open_group_finding`, `_open_access_failure_issue`, the two
+  label helpers, `MAX_ISSUES_PER_RUN`, `_tickets_in_spend_order`. 550 fewer lines.
+  `--github-output` gains `seeded=`.
+- `detect-upstream-changes.yml`: `groups:` input; commits everything the run wrote on
+  `chore/drift` and requests auto-merge; `issues: write` dropped.
+- Release gate: `contract_smoke.py` gains a drift leg — two locally served sources, seed,
+  change one, detect exactly that one, re-render the report from state, `--check`.
+
 ## v1.33.0 — 2026-09-03
 
 ### Changed — the CI track floats on `@v1`, `toolkit-ref` is optional, and propagate-pin moves only requirements.txt (ADR-0014)

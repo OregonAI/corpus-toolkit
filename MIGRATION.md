@@ -1158,3 +1158,39 @@ repo goes red and opens nothing until the stale one is merged or closed.
 **If you call `corpus-detect-changes` from your own CI** rather than the reusable workflow,
 nothing above changes your obligations from v1.32.0.
 
+### Unreleased (v1.34.0) — a drift run files no issues; it writes DRIFT.md, seeds its own baselines, and its PR merges itself (ADR 0015)
+
+**Action required if you call `corpus-detect-changes` with `--open-issues` from your own
+CI: drop the flag, or the run exits 2 at argparse.** The reusable
+`detect-upstream-changes.yml` no longer passes it. If you call the reusable workflow, take
+the new revision (you already do if your `uses:` is `@v1`) and delete
+`.github/ISSUE_TEMPLATE/source-change.md` — nothing files against it any more.
+
+What a run does now:
+
+- **Files nothing.** `Source changed:`, `Group drifted:` and `Access failure:` issues are
+  gone, and with them the 25-a-run cap, the smallest-group-first spend order and the two
+  labels. Each claim is a section of **`DRIFT.md`** at the corpus root, rendered every run
+  from **`drift-state.json`** (one record per source: last observation, `first_changed_at`,
+  `seeded_at`, `accepted_at`; held/pruned by the rules `access-failures.json` follows).
+  `changed-sources.tsv` and `source-outcomes.json` are unchanged. Re-render without a fetch:
+  `corpus-drift-report --config _meta/corpus.yml` (`--check` to assert it is current).
+- **Seeds its own baselines.** A source with `sha256: ''` is seeded on the run that fetches
+  it and compared from the next run on; `--record-baseline` (bare) is now a synonym for the
+  default. `--record-baseline=refresh` still accepts an observed change as the new baseline.
+  An ordinary run therefore MAY edit your manifest files; the reusable workflow commits them.
+- **Exits red only when it could not do its job**: systemic fetch failure (>20%), nothing
+  in scope, a refused manifest rewrite, a `watch`-declared source that arrived and could not
+  be compared, or any fetch failure under `--strict`. `capped`, `inert` and
+  `unchecked_baseline` no longer exist. `RunVerdict` is the one object behind the exit code,
+  the stderr line and DRIFT.md's "Last run" section.
+- **`--github-output`** writes `changed=`, `unseeded=` and a new `seeded=`.
+- **The reusable workflow** takes a `groups:` input (newline-separated, each a `--group`),
+  commits DRIFT.md, drift-state.json, source-outcomes.json, access-failures.json, seeded
+  manifests and STATUS.md on branch `chore/drift`, opens or updates one PR, and requests
+  auto-merge. Its `issues: write` permission is gone; a caller granting it does no harm.
+
+Adopting it in a corpus repo: nothing, if you call the reusable workflow at `@v1`. Optionally
+add a second cron so drift runs monthly while full validation stays weekly (the shape
+oregon-audits already had), and delete `.github/ISSUE_TEMPLATE/source-change.md`.
+

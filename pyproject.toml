@@ -87,6 +87,8 @@ corpus-build-semantic-index = "corpus_toolkit.semantic.build:main"
 # The corpora manifest (ADR-0008) and the matrices the release gate and propagate-pin
 # generate from it (ADR-0014).
 corpus-manifest = "corpus_toolkit.corpora:main"
+# Re-render DRIFT.md from drift-state.json + access-failures.json without a fetch (ADR 0015).
+corpus-drift-report = "corpus_toolkit.sources.drift_report:main"
 
 [tool.setuptools.packages.find]
 include = ["corpus_toolkit*"]

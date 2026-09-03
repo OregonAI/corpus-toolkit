@@ -1,5 +1,8 @@
 # A persistent access failure escalates on runs or elapsed days, whichever comes first
 
+> **Medium amended by [ADR-0015](0015-drift-is-reported-not-filed.md), 2026-09-03.** The claim
+> below stands in the same words; since v1.34.0 it is a section of `DRIFT.md`, not a GitHub issue.
+
 `corpus-detect-changes` runs in default (non-`--strict`) mode so an isolated fetch failure
 does not kill a run of thousands of sources, and the systemic guard exits 1 above 20% of
 fetches failing. Between those two settings there was a band in which a source could fail

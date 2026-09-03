@@ -1,5 +1,8 @@
 # A group drift finding reports correlation, not cause
 
+> **Medium amended by [ADR-0015](0015-drift-is-reported-not-filed.md), 2026-09-03.** The claim
+> below stands in the same words; since v1.34.0 it is a section of `DRIFT.md`, not a GitHub issue.
+
 A drift run files one issue per changed source. When a whole group changes at once the run
 files twenty-five near-identical tickets or, once the budget is spent, none at all — and the
 group with the most evidence behind it is the one reached last, so it gets nothing.
