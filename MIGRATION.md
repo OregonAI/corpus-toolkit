@@ -1158,7 +1158,7 @@ repo goes red and opens nothing until the stale one is merged or closed.
 **If you call `corpus-detect-changes` from your own CI** rather than the reusable workflow,
 nothing above changes your obligations from v1.32.0.
 
-### Unreleased (v1.34.0) — a drift run files no issues; it writes DRIFT.md, seeds its own baselines, and its PR merges itself (ADR 0015)
+### v1.34.0 — a drift run files no issues; it writes DRIFT.md, seeds its own baselines, and its PR merges itself (ADR 0015)
 
 **Action required if you call `corpus-detect-changes` with `--open-issues` from your own
 CI: drop the flag, or the run exits 2 at argparse.** The reusable

@@ -15,7 +15,7 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
-## Unreleased
+## v1.34.0 — 2026-09-03
 
 ### Changed — a drift run files no issues: DRIFT.md, drift-state.json, auto-seeding, a self-merging PR (ADR 0015)
 
