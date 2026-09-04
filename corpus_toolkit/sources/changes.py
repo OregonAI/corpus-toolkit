@@ -90,8 +90,6 @@ section prints the same list. The common thread: a run that could not do the thi
 reports on must not report success.
 """
 import argparse
-import copy
-import difflib
 import json
 import os
 import re
@@ -552,126 +550,15 @@ def _annotate(title: str, message: str) -> None:
 # oregon-counties' manifest template), re-quotes every scalar, and turns a two-value seed
 # into a whole-file diff no reviewer can read. Regexes over YAML are fragile, so nothing
 # they produce is written until it has been re-parsed and compared — see _record_baselines.
-_ID_RE = re.compile(r"^(?P<lead>[ \t]*(?:-[ \t]+)?)id:[ \t]*"
-                    r"(?P<value>'[^']*'|\"[^\"]*\"|[^#\n]*?)[ \t]*(?:#.*)?$")
-_SHA_RE = re.compile(r"^(?P<lead>[ \t]*(?:-[ \t]+)?)sha256:(?P<sp>[ \t]*)"
-                     r"(?P<value>'[^']*'|\"[^\"]*\"|[^#\n]*?)"
-                     r"(?P<gap>[ \t]*)(?P<comment>#[^\n]*)?(?P<eol>\r?\n?)$")
-
-
-def _scalar(raw: str) -> str:
-    v = raw.strip()
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
-        return v[1:-1]
-    return v
-
-
-def _plan_sha_edits(lines: list[str], wanted: set[str]) -> dict[str, list]:
-    """{source id: [id line index, sha256 line index or None, key column]}.
-
-    Only ids in `wanted`, and only their FIRST occurrence — an id that appears twice is
-    dropped by the caller before we get here, because guessing which entry a hash belongs
-    to is how a manifest acquires a baseline that is wrong for a source nobody re-examines.
-    """
-    plan: dict[str, list] = {}
-    cur = None
-    # `sha256:` lines seen since the current entry began, as (index, lead length). An entry
-    # may write `sha256:` ABOVE `id:`, and scanning forward from the id line alone never
-    # claimed those -- `_rewrite_sha256` then concluded the entry had none and INSERTED a
-    # second one, which both verification guards accept: PyYAML resolves duplicate keys
-    # last-wins so the re-parse reads back the inserted value, and the line diff sees one
-    # added line carrying a wanted value. The run reported success and left a stale key in a
-    # curated file (corpus-toolkit#119).
-    pending: list[tuple[int, int]] = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if not line[:1].isspace():
-            cur = None                      # a top-level key ends the entry
-            pending = []
-        elif stripped.startswith("- "):
-            # A `- ` INSIDE the entry is not a new entry. This reset was unconditional,
-            # which was safe only while no source key held a block sequence -- `watch:`
-            # (corpus-toolkit#72) is the first, and with it written above `sha256:` the sha
-            # line was never associated with its id: a second `sha256:` was inserted after
-            # `id:`, the re-parse check saw the old trailing value win, and the whole group
-            # file was refused, taking every other source in it down too. That is the
-            # adoption path MIGRATION.md prescribes, broken by the feature it adopts.
-            #
-            # Compared against the entry's own key column, so a sibling `- id:` (marker to
-            # the LEFT of that column) still ends it -- writing a's hash into b's line is
-            # the wrong-entry write this function refuses by name.
-            marker = len(line) - len(line.lstrip())
-            if cur is None or marker < plan[cur][2]:
-                cur = None
-                # A NEW ENTRY STARTS HERE, so anything seen above belongs to the previous
-                # one. Keeping it would let a `sha256:` from the entry before be claimed by
-                # this one -- the wrong-entry write, from the other direction.
-                pending = []
-        m = _ID_RE.match(line)
-        if m:
-            sid = _scalar(m.group("value"))
-            cur = sid if sid in wanted and sid not in plan else None
-            if cur is not None:
-                col = len(m.group("lead"))
-                plan[cur] = [i, None, col]
-                # AT THE ENTRY'S OWN KEY COLUMN, exactly as the forward scan requires.
-                # Without the column test this claims the first `sha256:` above `id:` at any
-                # depth, so an entry whose `attachments:` list carries per-file digests above
-                # its own id gets the source's hash written into the attachment.
-                for idx, lead in pending:
-                    if lead == col:
-                        plan[cur][1] = idx
-                        break
-            continue
-        m = _SHA_RE.match(line)
-        # AT THE ENTRY'S OWN KEY COLUMN, exactly. Relaxing the `- ` reset above so a nested
-        # block sequence no longer ends the entry also let the first `sha256:` INSIDE that
-        # sequence be claimed as the entry's own -- an `attachments:` list with per-file
-        # digests had the source's hash written into the attachment, the re-parse check
-        # failed, and the group file was refused with nothing written. The entry's own keys
-        # are at `plan[cur][2]`; anything deeper belongs to something else.
-        if m:
-            if (cur is not None and plan[cur][1] is None
-                    and len(m.group("lead")) == plan[cur][2]):
-                plan[cur][1] = i
-            elif cur is None:
-                # Above an `id:` we have not reached yet. Recorded with its column so the
-                # id line can claim it only if it is that entry's own key.
-                pending.append((i, len(m.group("lead"))))
-    return plan
-
-
-def _rewrite_sha256(text: str, updates: dict[str, str]) -> tuple[str, list[str]]:
-    """Set each id's `sha256` in place. Returns (new text, ids that could not be located)."""
-    lines = text.splitlines(keepends=True)
-    plan = _plan_sha_edits(lines, set(updates))
-    # An inserted key takes the file's OWN line ending, not this platform's: a CRLF
-    # manifest that grows one LF line is a mixed-ending file, which every later diff shows.
-    nl = "\r\n" if "\r\n" in text else "\n"
-    inserts: dict[int, list[str]] = {}
-    for sid, (id_i, sha_i, col) in plan.items():
-        value = updates[sid]
-        if sha_i is not None:
-            m = _SHA_RE.match(lines[sha_i])
-            lines[sha_i] = (f"{m.group('lead')}sha256:{m.group('sp') or ' '}\"{value}\""
-                            f"{m.group('gap')}{m.group('comment') or ''}"
-                            f"{m.group('eol') or nl}")
-        else:
-            # No `sha256:` key at all: insert one immediately after `id:`, at the same
-            # indentation. Appending at the end of the entry instead would land inside
-            # whatever nested block happened to come last.
-            if not lines[id_i].endswith("\n"):
-                lines[id_i] += nl
-            inserts.setdefault(id_i, []).append(f"{' ' * col}sha256: \"{value}\"{nl}")
-    if inserts:
-        rebuilt: list[str] = []
-        for i, line in enumerate(lines):
-            rebuilt.append(line)
-            rebuilt.extend(inserts.get(i, ()))
-        lines = rebuilt
-    return "".join(lines), sorted(set(updates) - set(plan))
+# The line-level `sha256` editor and its two verifiers live in sources/manifest.py since
+# v1.36.0, because ingest moves the baseline too (ADR-0016) and one field wants one writer.
+# Imported under the names this module and its tests have always used.
+from corpus_toolkit.sources.manifest import (  # noqa: E402
+    _ID_RE, _SHA_RE, _scalar,
+    plan_sha_edits as _plan_sha_edits,
+    rewrite_sha256 as _rewrite_sha256,
+    rewrite_problem as _rewrite_problem,
+)
 
 
 def _record_baselines(config, fetched: dict, in_scope: set, mode: str,
@@ -807,49 +694,6 @@ def _record_baselines(config, fetched: dict, in_scope: set, mode: str,
         tally["written_ids"].extend(updates)
         tally["files"].append(path)
     return tally
-
-
-def _rewrite_problem(before: str, after: str, updates: dict[str, str],
-                     unlocated: list[str]) -> str | None:
-    """Why this rewrite must not be written, or None if it is sound.
-
-    TWO CHECKS, because they catch different mistakes. The YAML comparison catches a value
-    written into the wrong place — a nested block, a neighbouring entry — by insisting the
-    reparsed document equals the original with exactly these `sha256` values changed. The
-    LINE comparison catches everything a parse cannot see: a reflowed scalar, a lost
-    comment, a translated line ending. Only `sha256:` lines carrying one of the new values
-    may differ, byte for byte, and every other line must survive untouched.
-    """
-    if unlocated:
-        return (f"could not locate {', '.join(unlocated)} in the file, so the value has "
-                f"nowhere to go.")
-    expected = copy.deepcopy(yaml.safe_load(before) or {})
-    for s in expected.get("sources") or []:
-        if isinstance(s, dict) and str(s.get("id", "")) in updates:
-            s["sha256"] = updates[str(s["id"])]
-    try:
-        actual = yaml.safe_load(after)
-    except yaml.YAMLError as e:
-        return f"the rewritten file did not parse as YAML ({e})."
-    if actual != expected:
-        return ("the rewritten file did not re-parse to the original with only these "
-                "sha256 values changed.")
-    old_lines, new_lines = before.splitlines(keepends=True), after.splitlines(keepends=True)
-    wanted = set(updates.values())
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-            None, old_lines, new_lines, autojunk=False).get_opcodes():
-        if tag == "equal":
-            continue
-        for line in old_lines[i1:i2]:
-            if not _SHA_RE.match(line):
-                return (f"a line that is not a `sha256:` line would have changed: "
-                        f"{line.strip()[:60]!r}.")
-        for line in new_lines[j1:j2]:
-            m = _SHA_RE.match(line)
-            if not m or _scalar(m.group("value")) not in wanted:
-                return (f"a line that is not one of the new `sha256:` values would have "
-                        f"been written: {line.strip()[:60]!r}.")
-    return None
 
 
 def _print_group_breakdown(per_group: dict) -> None:

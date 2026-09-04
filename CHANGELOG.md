@@ -15,6 +15,34 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## v1.36.0 — 2026-09-04
+
+### Added — the ingest primitives every corpus was writing itself (ADR-0016)
+
+Nothing breaks: four new modules, no existing name changes. Nine corpora had written nine
+fetchers (one that handled 429s and bot challenges, eight that did not), nine frontmatter
+assemblers that learned from CI what they had forgotten, and two of nine that moved the drift
+baseline at ingest while seven left the next run to report every fresh document as changed.
+
+- `corpus_toolkit.sources.fetch.Fetcher` — oregon-counties' proven fetcher, lifted: HTTP/2,
+  one honest User-Agent (`OregonAI-CivicCorpus/<version> (+repo; public-records archival)`),
+  per-host `min_interval`, 429 backoff honouring `Retry-After`, `Refused` / `Challenge`
+  raised instead of error bodies, TLS chain supplements (ADR-0012), robots.txt reported and
+  enforced only with `enforce_robots=True`. `sniff()` reads the format from magic bytes.
+- `corpus_toolkit.sources.snapshots.record_snapshot` — raw + `.txt` under `snapshot_dir`,
+  `hash_snapshot` for `source_sha256`, `content_hash` for the drift baseline, a `fresh` flag;
+  `retrieved_date()` advances only on a real fetch.
+- `corpus_toolkit.sources.manifest.record_baseline` — the one writer of a source's manifest
+  `sha256`, extracted from the drift detector (same line-level editor, same two verifiers);
+  ingest now moves the baseline through it. The detector imports it back unchanged.
+- `corpus_toolkit.documents.write_document` — frontmatter in the schema's key order, corpus
+  defaults, `last_verified`/`verified_by` written empty, validated against the schema and the
+  corpus's doc_types before anything touches disk; every finding at once as `DocumentError`.
+
+The drift detector keeps its own transport (its hour-long sweep has no per-host interval).
+Adoption is on touch: the template's example ingester, oregon-counties and
+oregon-collective-bargaining first; other scripts when next edited (MIGRATION.md).
+
 ## v1.35.0 — 2026-09-04
 
 ### Added — the client seam has its public name, `corpus_toolkit.mcp.sdk` (ADR-0006, implemented)
