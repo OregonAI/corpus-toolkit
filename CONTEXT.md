@@ -187,6 +187,15 @@ satisfies one. The retrieval seam (`RetrievalBackend`) and the semantic seam
 
 _Avoid_: "boundary" — overloaded with DDD's bounded context.
 
+**Ingest primitives** — the shared mechanics of bringing a source into a corpus (ADR-0016):
+the **fetcher** (`corpus_toolkit.sources.fetch.Fetcher`: one honest agent, HTTP/2, politeness,
+refusals as exceptions), the **snapshot recorder** (`sources.snapshots.record_snapshot`: raw +
+text + both hashes + the baseline), the **baseline recorder** (`sources.manifest.record_baseline`:
+the one writer of a source's `sha256`, shared with the drift detector) and the **document
+writer** (`corpus_toolkit.documents.write_document`: schema order, validated before disk).
+**Ingest orchestration** — which sources, how bytes become text, what the body says — stays in
+the corpus. A baseline is what the mirror holds; ingest moves it, drift does not.
+
 ## Attribution and answerability
 
 **Attribution** — a corpus tying one of its documents to an entry in an issuing-body registry.

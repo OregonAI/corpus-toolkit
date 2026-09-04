@@ -1231,3 +1231,37 @@ and remove the graph `--check`, STATUS.md `--check` and llms.txt steps from your
 `generated` job (keep anything corpus-specific there). If your graph build needs more than
 the toolkit installed, pass `with: { graph-check: false }` and keep that one check where it
 is. Then add `template-gates / gates` to the branch's required checks.
+
+### v1.36.0 — write new ingest code on the shared primitives; switch old code when you touch it (ADR-0016)
+
+Nothing to do to stay green. When you next edit an ingest script, replace its private fetch,
+snapshot and frontmatter code with:
+
+    from corpus_toolkit.sources.fetch import Fetcher, sniff, Refused
+    from corpus_toolkit.sources.snapshots import record_snapshot, retrieved_date
+    from corpus_toolkit.documents import write_document, DocumentError
+
+    f = Fetcher(config)                                   # honest UA, this corpus's TLS supplements
+    body, fresh = f.snapshot(src["url"], SNAPSHOTS / f"{sid}.{fmt}")   # or f.get(url).body
+    fmt = sniff(body, declared=src.get("format"))
+    text = your_extractor(body, fmt)                      # conversion stays yours
+    snap = record_snapshot(config, sid, body, fmt, text)  # writes files, hashes, moves the baseline
+    write_document(config, DOCS / f"{sid}.md", {..., "source_sha256": snap.sha256,
+                   "retrieved": retrieved_date(snap.fresh, DOCS / f"{sid}.md", snap.raw_path)}, body_md)
+
+Three things change for a script that switches:
+
+- **The User-Agent becomes honest.** A `Mozilla/5.0 (...)` string goes away. If a host then
+  refuses, `Fetcher.get` raises `Refused`; record the source as unavailable, do not spoof.
+  Overriding the agent (`Fetcher(config, user_agent=...)`) is allowed only with the reason
+  recorded in the source manifest.
+- **Ingest moves the drift baseline.** Delete any private code that writes `sha256:` into
+  `_meta/sources/*.yml` or `_meta/source-manifest.yml` (kpm's `_write_manifest` path,
+  federal-reference's `write_manifest_hash`, collective-bargaining's `_manifest_baseline`);
+  `record_snapshot` does it through the one writer, quoting exactly as the detector does.
+- **Frontmatter order and format become the platform's.** Existing documents are untouched
+  until re-ingested; a re-ingested document's frontmatter may reorder. That is expected and
+  is not drift — provenance is checked on content, not on key order.
+
+`write_document` raises `DocumentError` naming every finding `corpus-validate-frontmatter`
+would have raised. Fix the frontmatter; do not pass `validate=False` to get past it.

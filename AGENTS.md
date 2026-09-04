@@ -52,7 +52,9 @@ corpus-detect-changes --config _meta/corpus.yml --check-robots   # reports, exit
 Enforcement is a per-corpus policy decision. It is deliberately not a toolkit default,
 because arriving as a surprise behaviour change in a version bump is how a corpus silently
 stops ingesting — the same reasoning as `corpus-detect-unsourced` reporting rather than
-gating.
+gating. The same rule holds for the ingest fetcher (`corpus_toolkit.sources.fetch.Fetcher`,
+v1.36.0): it reports (`Fetcher.robots`, `Fetcher.allowed`) and enforces only when the
+corpus passes `enforce_robots=True`, which is that corpus's own recorded decision.
 
 Two questions the checker keeps apart, and you need both:
 
