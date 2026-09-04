@@ -1212,3 +1212,22 @@ Nothing to do to stay green. If your code imports `corpus_toolkit.mcp._sdk` (cor
 `corpus_toolkit.mcp.sdk` when you next touch the file — the old name is the same module
 object and is not scheduled for removal, so this is hygiene, not a deadline. The names are
 identical; only the module path changes.
+
+### v1.35.0 — `corpus_toolkit.crosswalk` replaces the verbatim `norm_variants`/`names_agree` block
+
+oregon-kpm, oregon-audits, oregon-budget: in `src/link_agency_registry.py`, delete the block
+between `BEGIN VERBATIM SHARED BLOCK` and `END VERBATIM SHARED BLOCK` and add
+`from corpus_toolkit.crosswalk import names_agree, norm_variants`. The bodies are identical,
+so `--check` output does not change. Requires the toolkit pin at v1.35.0 or later.
+
+### v1.35.0 — call `template-gates.yml` instead of carrying the template's gates yourself
+
+In `.github/workflows/ci.yml` add
+
+    template-gates:
+      uses: OregonAI/corpus-toolkit/.github/workflows/template-gates.yml@v1
+
+and remove the graph `--check`, STATUS.md `--check` and llms.txt steps from your own
+`generated` job (keep anything corpus-specific there). If your graph build needs more than
+the toolkit installed, pass `with: { graph-check: false }` and keep that one check where it
+is. Then add `template-gates / gates` to the branch's required checks.
