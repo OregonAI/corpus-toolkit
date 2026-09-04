@@ -150,3 +150,12 @@ def test_advancing_v1_pushes_with_a_token_that_may_touch_workflow_files():
     tok = str(job["steps"][0].get("with", {}).get("token", ""))
     assert "DRIFT_BOT_TOKEN" in tok and "CORPUS_PIN_TOKEN" in tok, "prefer the org-wide bot token, then the PAT"
 
+
+def test_the_drift_pr_lookup_asks_for_an_open_pr_not_a_branch_name():
+    """`gh pr view <branch>` returns the last PR for that branch, merged or not; after one
+    merged chore/drift PR the next run created none (oregon-audits, 2026-09-03)."""
+    job = _load("detect-upstream-changes")["jobs"]["detect"]
+    run = next(s for s in job["steps"] if "drift PR" in s.get("name", ""))["run"]
+    assert 'gh pr view "$BRANCH"' not in run
+    assert 'gh pr list --head "$BRANCH" --state open' in run
+
