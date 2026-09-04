@@ -54,6 +54,9 @@ def record_snapshot(config, source_id: str, raw: bytes, fmt: str, text: str | No
     id or a manifest the line editor cannot account for raises `manifest.BaselineRefused`,
     with nothing written to the manifest; the snapshot files are already on disk by then.
     `baseline=False` skips the manifest entirely ("skipped").
+
+    The baseline hash of a PDF is taken over `pdftotext -layout` output, exactly as the drift
+    detector takes it, so `pdftotext` must be installed wherever PDFs are ingested.
     """
     snapshot_dir = Path(config.snapshot_dir)
     snapshot_dir.mkdir(parents=True, exist_ok=True)

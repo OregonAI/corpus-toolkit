@@ -123,10 +123,12 @@ def test_record_snapshot_over_unchanged_bytes_is_not_fresh_and_leaves_the_text_a
 
 
 def test_record_snapshot_for_a_source_the_manifest_does_not_declare(corpus):
-    snap = snapshots.record_snapshot(corpus, "orphan", b"%PDF-1.4 stuff", "pdf")
+    # html, not pdf: the baseline hash of a PDF runs pdftotext, which CI runners lack.
+    page = b"<html><body><p>" + b"Orphan text. " * 30 + b"</p></body></html>"
+    snap = snapshots.record_snapshot(corpus, "orphan", page, "html")
     assert snap.baseline == "undeclared" and snap.text_path is None
-    assert (corpus.snapshot_dir / "orphan.pdf").is_file()
-    assert snapshots.record_snapshot(corpus, "orphan", b"%PDF-1.4 stuff", "pdf",
+    assert (corpus.snapshot_dir / "orphan.html").is_file()
+    assert snapshots.record_snapshot(corpus, "orphan", page, "html",
                                      baseline=False).baseline == "skipped"
 
 
