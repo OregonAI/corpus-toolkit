@@ -147,8 +147,17 @@ jobs:
           BRANCH="chore/drift"
           git commit -m "chore: drift run — DRIFT.md, state, seeded baselines, STATUS.md"
           git push --force origin "HEAD:refs/heads/${BRANCH}"
-          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
-            echo "Updated the open drift PR."
+          # AN OPEN PR, BY LIST — never `gh pr view <branch>`. That command resolves the
+          # most recent PR for the branch name whether or not it is still open, so the run
+          # after a merged chore/drift PR "updated" a PR that was closed and created none;
+          # the state sat on the branch with a green step above it (oregon-audits,
+          # 2026-09-03, the first run under a real bot token).
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "Updated the open drift PR #$EXISTING."
+            gh pr merge --auto --squash "$EXISTING" \
+              || echo "::notice::auto-merge unavailable here (private repo, or main not protected with required checks) — merge chore/drift by hand"
+            exit 0
           else
             if ! gh pr create --head "$BRANCH" \
               --title "chore: drift run — DRIFT.md, state, seeded baselines" \
@@ -163,5 +172,6 @@ jobs:
           if [ "$HAVE_BOT_TOKEN" != "true" ]; then
             echo "::warning::PR opened with the built-in token: it will run no CI and cannot merge itself. Pass a DRIFT_BOT_TOKEN (see the workflow's secrets block)."
           fi
-          gh pr merge --auto --squash "$BRANCH" \
+          NEW=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          gh pr merge --auto --squash "${NEW:-$BRANCH}" \
             || echo "::notice::auto-merge unavailable here (private repo, or main not protected with required checks) — merge chore/drift by hand"

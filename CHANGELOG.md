@@ -17,6 +17,14 @@ it can break you.
 
 ## Unreleased
 
+### Fixed — after one merged drift PR, the next run created none
+
+The step asked `gh pr view chore/drift` whether a PR existed; that resolves the most recent
+PR for the branch name whether or not it is open, so the run after a merged `chore/drift`
+"updated" a closed PR and opened nothing — state on the branch, green step above it
+(oregon-audits, the first run under a real `DRIFT_BOT_TOKEN`). The lookup is now
+`gh pr list --head chore/drift --state open`.
+
 ### Changed — advancing `v1` prefers the org-wide `DRIFT_BOT_TOKEN`
 
 v1.34.2's gate was green on every leg and `advance-major-tag` still failed: `CORPUS_PIN_TOKEN`
