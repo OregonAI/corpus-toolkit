@@ -13,7 +13,7 @@ makes the SDK build a pydantic model and push every response through it:
 
 THE TESTS THAT SHIPPED WITH IT PASSED, and that is the part worth not repeating. They
 asserted on the emitted schema's `additionalProperties` (absent, so extras validate) and
-called tools through `_sdk.call_tool`, which passes `convert_result=False` — so the one
+called tools through `sdk.call_tool`, which passes `convert_result=False` — so the one
 step that discards the payload was the one step never exercised. A schema assertion cannot
 see this. Every test here round-trips a real payload through `convert_result`.
 """
@@ -98,26 +98,26 @@ def _tools(built_server):
 
 def _serialize(tool, payload):
     """Push a payload through the tool's OWN declared output schema, the way the SDK does
-    when answering a client — the step `_sdk.call_tool(..., convert_result=False)` skips,
+    when answering a client — the step `sdk.call_tool(..., convert_result=False)` skips,
     and skipping it is why the regression shipped green.
 
-    Through `_sdk.structured_result` rather than the SDK directly, because the result of
+    Through `sdk.structured_result` rather than the SDK directly, because the result of
     that conversion is one of the things the 1.x/2.x break moved: 1.x returns a tuple, 2.x
     a `CallToolResult`. An earlier version of this file unpacked the tuple inline, passed
     on 1.x, and asserted against the wrapper OBJECT on 2.x — where `field in out` is a
     membership test on a pydantic model and quietly answers False. Version-dependent
     shapes belong behind the seam; that is what it is for.
     """
-    from corpus_toolkit.mcp import _sdk
+    from corpus_toolkit.mcp import sdk
 
-    return _sdk.structured_result(tool, payload)
+    return sdk.structured_result(tool, payload)
 
 
 def _call(server, name, arguments):
-    from corpus_toolkit.mcp import _sdk
+    from corpus_toolkit.mcp import sdk
 
     result = asyncio.new_event_loop().run_until_complete(
-        _sdk.call_tool(server, name, arguments))
+        sdk.call_tool(server, name, arguments))
     return result if isinstance(result, dict) else result[0]
 
 

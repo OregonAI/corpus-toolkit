@@ -172,6 +172,12 @@ _Avoid_: "the pin", "bump the toolkit" without naming the track — the two have
 different mechanisms since v1.33.0, and "bump" on the CI track means editing a `uses:` line
 that is no longer supposed to carry a version.
 
+**Template gates** — the checks every template-shaped corpus owes regardless of content:
+the authority graph is current, STATUS.md is current, the llms.txt Contents stub was filled
+in. They ride the CI track as one reusable job, `template-gates.yml@v1`, so a fork cannot
+lose them one at a time; a corpus that genuinely does not owe one says so with an input.
+Corpus-specific checks are not template gates and stay in the corpus's own job.
+
 ## Seams and adapters
 
 Used as in `docs/agents/` and throughout `corpus_toolkit/mcp/`: a **seam** is where a module's

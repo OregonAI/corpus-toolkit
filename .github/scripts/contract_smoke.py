@@ -45,7 +45,7 @@ Step 5 is the other half of it, and it exists because step 4 alone was not enoug
 that answers correctly and whose answer is then discarded at serialization passes step 4
 and still fails a user. v1.24.0 did precisely that — `get_document` returned three envelope
 fields and no document body, reported success, and shipped through this gate GREEN, because
-every call here goes through `_sdk.call_tool(..., convert_result=False)`
+every call here goes through `sdk.call_tool(..., convert_result=False)`
 (corpus-toolkit#61, #63).
 
   python3 .github/scripts/contract_smoke.py --template /path/to/corpus-template
@@ -397,12 +397,12 @@ def check_mcp_tools(dest: Path) -> None:
     entire lifetime of both graph bugs: graph_neighbors was registered, listed, and
     raised KeyError on every call in oregon-records-retention."""
     from corpus_toolkit import config as config_mod
-    from corpus_toolkit.mcp import _sdk
+    from corpus_toolkit.mcp import sdk
     from corpus_toolkit.mcp.server import build_server
 
     config = config_mod.load(dest / "_meta" / "corpus.yml")
     mcp = build_server(config)
-    listed = _sdk.tool_names(mcp)
+    listed = sdk.tool_names(mcp)
     say(f"  tools/list: {', '.join(sorted(listed))}")
 
     missing = [t for t in MANDATORY_CORE_TOOLS if t not in listed]
@@ -425,7 +425,7 @@ def check_mcp_tools(dest: Path) -> None:
         if name not in listed:
             continue
         try:
-            results[name] = asyncio.run(_sdk.call_tool(mcp, name, args))
+            results[name] = asyncio.run(sdk.call_tool(mcp, name, args))
         except Exception as e:                                   # noqa: BLE001
             # Record and continue. A raising tool must not abort the run before the
             # others report — that turns one broken tool into an unreadable crash and
@@ -489,7 +489,7 @@ def check_result_marshalling(dest: Path) -> None:
     CLIENT would RECEIVE.
 
     Everything above this line — every call in `check_mcp_tools`, and every test in
-    `tests/` — goes through `_sdk.call_tool`, which passes `convert_result=False`. That is
+    `tests/` — goes through `sdk.call_tool`, which passes `convert_result=False`. That is
     deliberate and its reasoning holds: this gate asserts that an external graph neighbour
     comes back `{citation, external: true}`, and asserting that through the SDK's
     marshalling would test the SDK rather than the toolkit. The gap it left is that nothing
@@ -509,12 +509,12 @@ def check_result_marshalling(dest: Path) -> None:
     other can see it.
     """
     from corpus_toolkit import config as config_mod
-    from corpus_toolkit.mcp import _sdk
+    from corpus_toolkit.mcp import sdk
     from corpus_toolkit.mcp.server import build_server
 
     config = config_mod.load(dest / "_meta" / "corpus.yml")
     mcp = build_server(config)
-    tools = _sdk.tools_by_name(mcp)
+    tools = sdk.tools_by_name(mcp)
 
     # The same calls the behaviour leg makes, plus the hybrid extension tool this corpus
     # has by now (this step runs after `hybridize`) — the tools_module surface no test
@@ -566,7 +566,7 @@ def check_result_marshalling(dest: Path) -> None:
     for name, args in calls:
         if name not in tools:
             continue
-        raw = asyncio.run(_sdk.call_tool(mcp, name, args))
+        raw = asyncio.run(sdk.call_tool(mcp, name, args))
         if name == "documents_by_agency" and not raw.get("documents"):
             # NOT ENOUGH TO ASK FOR A REAL SLUG. Giving the smoke corpus a slug removed one
             # way this leg could be empty; it did not make the leg assert anything, and a
@@ -584,7 +584,7 @@ def check_result_marshalling(dest: Path) -> None:
                             f"{DOC_ID} — the per-hit assertions below would pass over an "
                             f"empty list and prove nothing")
         try:
-            texts, structured = _sdk.serialized_result(tools[name], raw)
+            texts, structured = sdk.serialized_result(tools[name], raw)
         except Exception as e:                                   # noqa: BLE001
             # A ValidationError here is bug 1 of #61 verbatim — a declared shape refusing a
             # value the toolkit documents. Collect, so one rejecting tool does not hide the
@@ -642,7 +642,7 @@ def check_result_marshalling(dest: Path) -> None:
         # ValidationError that reads exactly like a rejected payload, so the first
         # `query_dataset` a corpus adds to SMOKE_TOOLS would produce a bogus "rejected
         # authoritative_source: null" here and the cheap fix would be to weaken this.
-        if _sdk.declares_list_result(tool) or getattr(tool, "output_schema", None) is None:
+        if sdk.declares_list_result(tool) or getattr(tool, "output_schema", None) is None:
             continue
 
         # WHAT THE SCHEMA SAYS, not only what it survives (corpus-toolkit#15). The three
@@ -673,7 +673,7 @@ def check_result_marshalling(dest: Path) -> None:
         payload = {"corpus": "smoke-corpus", "archetype": "hybrid",
                    "authoritative_source": None, "detail": "tool-specific payload"}
         try:
-            out = _sdk.structured_result(tool, payload)
+            out = sdk.structured_result(tool, payload)
         except Exception as e:                                   # noqa: BLE001
             problems.append(f"{name} rejected `authoritative_source: null`, the documented "
                             f"value for a corpus declaring no source: "
@@ -743,7 +743,7 @@ def dockerfile_cmd_argv(path: Path) -> list[str]:
     THE CMD IS HOW THE CONTAINER ACTUALLY STARTS, and nothing validated it. The gate asserts
     `corpus-mcp-serve --help`, which argparse answers with exit 0 regardless of which options
     exist -- so renaming a flag left the unit suite green (test_mount_path.py builds the app
-    through `_sdk.http_kwargs` and never touches the parser), the entrypoints job green (it
+    through `sdk.http_kwargs` and never touches the parser), the entrypoints job green (it
     asserts `hasattr(module, "main")`), and this gate green, while every corpus container
     crash-looped on `unrecognized arguments`. That CMD is identical across all seven live
     corpora.
@@ -1062,10 +1062,10 @@ def check_hybrid_enforcement(dest: Path) -> None:
     # Positive: with the fixture, the extension tool must be on the surface.
     r = subprocess.run(
         [sys.executable, "-c",
-         "from corpus_toolkit import config as c; from corpus_toolkit.mcp import _sdk; "
+         "from corpus_toolkit import config as c; from corpus_toolkit.mcp import sdk; "
          "from corpus_toolkit.mcp.server import build_server; "
          "m = build_server(c.load('_meta/corpus.yml')); "
-         "names = _sdk.tool_names(m); "
+         "names = sdk.tool_names(m); "
          "assert 'list_datasets' in names, names; print(sorted(names))"],
         cwd=dest, capture_output=True, text=True)
     if r.returncode != 0:

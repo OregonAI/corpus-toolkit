@@ -1,0 +1,85 @@
+name: template-gates
+
+# THE GATES EVERY TEMPLATE-SHAPED CORPUS OWES, RUN FROM ONE PLACE.
+#
+# corpus-template's ci.yml carries a `generated` job — "every committed generated artifact
+# must be current" — and a guard that the llms.txt Contents stub was filled in. Both exist
+# because their failures are silent: a document merged without rebuilding the graph simply
+# stops resolving, and an unfilled llms.txt is an advertised agent entry point serving an
+# empty index (corpus-template#16). Both were forked into each corpus's ci.yml by hand, and
+# by 2026-09 the census read: STATUS.md --check missing from two of seven corpora, the
+# llms.txt guard surviving in one. Nothing drops out of a fork loudly.
+#
+# So the gates live here and a corpus calls them as one job:
+#
+#   template-gates:
+#     uses: OregonAI/corpus-toolkit/.github/workflows/template-gates.yml@v1
+#
+# Corpus-specific checks (a dataset build, a discovery step, a join) stay in the corpus's
+# own job; this workflow is deliberately only what every template-shaped corpus owes
+# regardless of content. Where a gate genuinely does not apply — an API corpus that commits
+# no authority graph, a graph whose build needs more than the toolkit installed — the caller
+# says so with an input, visibly, rather than the step silently not being there.
+#
+# CI track (ADR-0014): the toolkit installed here is the commit this workflow was called at
+# (`github.job_workflow_sha`), so a caller on `@v1` floats with the release train.
+
+on:
+  workflow_call:
+    inputs:
+      graph-check:
+        description: >
+          Run `python3 src/build_graph.py --check` when that script exists. Set false only
+          when the graph build needs dependencies beyond the toolkit, and keep the check in
+          the corpus's own job.
+        type: boolean
+        default: true
+      status-check:
+        description: Run `corpus-generate-status --check` against the committed STATUS.md.
+        type: boolean
+        default: true
+      python-version:
+        type: string
+        default: "3.12"
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: OregonAI/corpus-toolkit
+          ref: ${{ github.job_workflow_sha }}
+          path: .toolkit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - run: pip install ./.toolkit
+
+      - name: Authority graph must be current
+        if: ${{ inputs.graph-check }}
+        run: |
+          if [ -f src/build_graph.py ]; then
+            python3 src/build_graph.py --check
+          elif [ -f _meta/graph.json ]; then
+            echo "::error::_meta/graph.json is committed but there is no src/build_graph.py to check it against" >&2
+            exit 1
+          else
+            echo "::notice::no src/build_graph.py and no _meta/graph.json — this corpus commits no authority graph"
+          fi
+
+      - name: STATUS.md must be current
+        if: ${{ inputs.status-check }}
+        run: corpus-generate-status --config _meta/corpus.yml --output STATUS.md --check
+
+      # Guarded here, not on the template itself: the template still carries {{CORPUS_NAME}}
+      # placeholders, and a repo that still has THOSE is the template (or an instantiation
+      # nobody finished, which contract_smoke catches).
+      - name: llms.txt Contents must be filled in
+        run: |
+          if ! grep -q "{{CORPUS_NAME}}" llms.txt && grep -q "One annotated link per" llms.txt; then
+            echo "llms.txt still carries the template's Contents stub — fill it in" >&2
+            exit 1
+          fi

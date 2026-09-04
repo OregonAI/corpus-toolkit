@@ -23,7 +23,7 @@ import urllib.request
 
 import pytest
 
-from corpus_toolkit.mcp import _sdk
+from corpus_toolkit.mcp import sdk
 
 
 def _free_port() -> int:
@@ -57,14 +57,14 @@ def _request(url, method, headers):
 @pytest.fixture
 def cors_server():
     origin = "https://claude.ai"
-    security = _sdk.TransportSecuritySettings(
+    security = sdk.TransportSecuritySettings(
         allowed_hosts=["127.0.0.1:*", "localhost:*"],
         allowed_origins=["http://127.0.0.1:*", origin],
     )
-    server = _sdk.Server("test")
-    kw = _sdk.http_kwargs(host="127.0.0.1", port=_free_port(), path="/mcp",
+    server = sdk.Server("test")
+    kw = sdk.http_kwargs(host="127.0.0.1", port=_free_port(), path="/mcp",
                           transport_security=security)
-    app = _sdk.with_cors(_sdk.build_http_app(server, kw), [origin])
+    app = sdk.with_cors(sdk.build_http_app(server, kw), [origin])
     uv = _serve(app, kw["port"])
     yield f"http://127.0.0.1:{kw['port']}/mcp", origin
     uv.should_exit = True
@@ -130,9 +130,9 @@ def test_disallowed_origin_gets_no_allow_origin_header(cors_server):
 def test_without_cors_the_endpoint_still_serves_non_browser_clients():
     """CORS is additive. Every current consumer connects server-side, where no Origin is
     sent at all, and must be unaffected by this change."""
-    server = _sdk.Server("test")
-    kw = _sdk.http_kwargs(host="127.0.0.1", port=_free_port(), path="/mcp")
-    app = _sdk.build_http_app(server, kw)
+    server = sdk.Server("test")
+    kw = sdk.http_kwargs(host="127.0.0.1", port=_free_port(), path="/mcp")
+    app = sdk.build_http_app(server, kw)
     uv = _serve(app, kw["port"])
     try:
         # No Origin header — the server-side case. A POST without a session reaches the
@@ -147,9 +147,9 @@ def test_without_cors_the_endpoint_still_serves_non_browser_clients():
 
 def test_with_cors_does_not_change_the_mounted_path():
     """Wrapping must not move the endpoint — a path-routing tunnel would 404 everything."""
-    server = _sdk.Server("test")
-    kw = _sdk.http_kwargs(host="127.0.0.1", port=8000, path="/oregon-budget/mcp")
-    app = _sdk.build_http_app(server, kw)
+    server = sdk.Server("test")
+    kw = sdk.http_kwargs(host="127.0.0.1", port=8000, path="/oregon-budget/mcp")
+    app = sdk.build_http_app(server, kw)
     assert "/oregon-budget/mcp" in [getattr(r, "path", None) for r in app.routes]
-    wrapped = _sdk.with_cors(app, ["https://claude.ai"])
+    wrapped = sdk.with_cors(app, ["https://claude.ai"])
     assert getattr(wrapped, "app", None) is app

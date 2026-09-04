@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corpus-toolkit"
-version = "1.34.3"
+version = "1.35.0"
 description = "Shared validation, provenance, and MCP framework for the civic corpus platform"
 requires-python = ">=3.10"
 dependencies = [
@@ -31,7 +31,7 @@ dependencies = [
 # not start, because the Dockerfile's own smoke step imports `framework` (stdlib-only,
 # fine on both majors) while the container runs `server`.
 #
-# The toolkit now spans both majors via corpus_toolkit/mcp/_sdk.py, and the CI matrix in
+# The toolkit now spans both majors via corpus_toolkit/mcp/sdk.py, and the CI matrix in
 # .github/workflows/tests.yml runs the whole suite under each. Verified against
 # **1.28.1 and 2.0.0** -- those two exactly, by running the suite, not by reading a
 # changelog. The floor is the oldest release verified; the ceiling excludes a major

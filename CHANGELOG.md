@@ -15,6 +15,38 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## v1.35.0 — 2026-09-04
+
+### Added — the client seam has its public name, `corpus_toolkit.mcp.sdk` (ADR-0006, implemented)
+
+ADR-0006 decided on 2026-08-12 that the module every client imports — `Server`,
+`call_tool`, `open_client_streams`, `result_is_error`, the both-majors compat layer — should
+stop being a private name, and nothing moved. `corpus_toolkit/mcp/_sdk.py` is now
+`corpus_toolkit/mcp/sdk.py`; `_sdk` remains importable and is the same module object (a
+`sys.modules` alias, not a re-export list), so every existing `from corpus_toolkit.mcp import
+_sdk` keeps working unchanged and patching one name patches the other. Nothing breaks. New
+code should import `corpus_toolkit.mcp.sdk`; corpus-gateway and corpus-chat switch in their
+next bump.
+
+### Added — `corpus_toolkit.crosswalk`: the `basis: exact` name rule, once
+
+`norm_variants` / `names_agree` — the normalisation that decides whether an agency crosswalk
+entry may claim `basis: exact` — existed as a verbatim 45-line block in oregon-kpm,
+oregon-audits and oregon-budget, kept identical by convention and a comment asking for a
+parity gate that was never wired (oregon-budget#44). It is now one module; the function
+bodies are the copies' bodies byte for byte, so importing it changes no answer and the
+three copies can be deleted.
+
+### Added — `template-gates.yml`: the gates every template-shaped corpus owes, as one reusable job
+
+corpus-template's `generated` job (graph `--check`, STATUS.md `--check`) and its llms.txt
+stub guard were forked by hand into each corpus's ci.yml, and by 2026-09 STATUS.md `--check`
+was missing from two of seven and the llms.txt guard survived in one. The three gates are
+now one reusable workflow a corpus calls as a single job on `@v1`. Inputs `graph-check` and
+`status-check` let a corpus that genuinely does not owe a gate say so visibly; corpus-
+specific checks stay in the corpus's own job. Adoption is opt-in per corpus and adds one
+required check, `template-gates / gates`.
+
 ## v1.34.3 — 2026-09-04
 
 ### Fixed — after one merged drift PR, the next run created none

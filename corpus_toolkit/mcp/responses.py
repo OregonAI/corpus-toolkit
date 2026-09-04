@@ -82,7 +82,7 @@ v1.24.0 failure mode exactly. The convention is a floor shared by six tools; des
 per-tool shapes buys a nicer schema title and takes on that risk six times over. If a tool's
 own shape is ever worth declaring, subclass this and keep `extra="allow"`.
 
-NOT IN `_sdk`. That module is for things that DIFFER between the majors, and this does not:
+NOT IN `sdk`. That module is for things that DIFFER between the majors, and this does not:
 1.28.1 and 2.0.0 emit the identical schema and identical serialized output for this model.
 Putting version-independent code there would blur the one boundary the file exists to hold.
 
@@ -105,7 +105,7 @@ from pydantic import BaseModel, ConfigDict
 #
 # USED AS AN ANNOTATION, NEVER AS A CONSTRUCTOR. The tools in server.py keep returning
 # `fw.<tool>()`'s plain dict; the annotation only tells the SDK what to advertise and
-# validate against. Handing the tools model INSTANCES would move `_sdk.call_tool`
+# validate against. Handing the tools model INSTANCES would move `sdk.call_tool`
 # (convert_result=False) and the release gate off the toolkit's own answer and onto the
 # SDK's marshalling, which is the separation those two exist for.
 #

@@ -395,9 +395,9 @@ def test_the_sdk_really_keeps_the_first_registration(tmp_path):
     last-wins, the guard still fires while its message ("these were DISCARDED and the
     built-ins answer in their place") becomes false, and the real hazard inverts to a corpus
     tool OVERWRITING a core tool. This is the test that would notice."""
-    from corpus_toolkit.mcp import _sdk
+    from corpus_toolkit.mcp import sdk
 
-    srv = _sdk.Server("premise-check")
+    srv = sdk.Server("premise-check")
 
     @srv.tool()
     def duplicated() -> dict:
@@ -409,7 +409,7 @@ def test_the_sdk_really_keeps_the_first_registration(tmp_path):
 
     import asyncio
     answer = asyncio.new_event_loop().run_until_complete(
-        _sdk.call_tool(srv, "duplicated", {}))
+        sdk.call_tool(srv, "duplicated", {}))
 
     assert answer == {"which": "first"}, (
         "this SDK replaces on duplicate registration rather than keeping the first — "

@@ -1,6 +1,6 @@
 # ADR-0006 — One package; the client seam becomes public
 
-**Status:** accepted · **Date:** 2026-08-12
+**Status:** accepted, implemented 2026-09-04 (v1.35.0) · **Date:** 2026-08-12
 
 ## Context
 

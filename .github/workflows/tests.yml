@@ -57,9 +57,9 @@ jobs:
         run: |
           set -euo pipefail
           want=$(case "${{ matrix.mcp-spec }}" in *'>=2'*) echo 2;; *) echo 1;; esac)
-          got=$(python -c "from corpus_toolkit.mcp import _sdk; print(_sdk.SDK_MAJOR)")
-          ver=$(python -c "from corpus_toolkit.mcp import _sdk; print(_sdk.sdk_version())")
-          cls=$(python -c "from corpus_toolkit.mcp import _sdk; print(_sdk.Server.__module__)")
+          got=$(python -c "from corpus_toolkit.mcp import sdk; print(sdk.SDK_MAJOR)")
+          ver=$(python -c "from corpus_toolkit.mcp import sdk; print(sdk.sdk_version())")
+          cls=$(python -c "from corpus_toolkit.mcp import sdk; print(sdk.Server.__module__)")
           echo "mcp $ver -> SDK_MAJOR $got via $cls (wanted major $want)"
           [ "$got" = "$want" ] || { echo "::error::matrix leg '${{ matrix.mcp-spec }}' resolved to SDK major $got, not $want"; exit 1; }
       - name: Run tests
@@ -92,7 +92,7 @@ jobs:
       - name: Import the MCP server module
         run: |
           python -c "import corpus_toolkit.mcp.server; print('server module imports')"
-          python -c "from corpus_toolkit.mcp import _sdk; print('mcp', _sdk.sdk_version(), 'major', _sdk.SDK_MAJOR)"
+          python -c "from corpus_toolkit.mcp import sdk; print('mcp', sdk.sdk_version(), 'major', sdk.SDK_MAJOR)"
       - name: Every console script resolves
         run: |
           set -euo pipefail

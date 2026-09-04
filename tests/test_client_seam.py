@@ -1,7 +1,7 @@
 """The CLIENT half of the SDK compat seam, proved by an actual round trip.
 
-Everything here starts a real streamable-HTTP server built by `_sdk`, connects to it with
-`_sdk.open_client_streams`, and asserts on what comes back. That is deliberate and it is the
+Everything here starts a real streamable-HTTP server built by `sdk`, connects to it with
+`sdk.open_client_streams`, and asserts on what comes back. That is deliberate and it is the
 whole point of the file: the six client-side breaks between mcp 1.28.1 and 2.0.0 were found
 one at a time across four failed deploys of corpus-gateway, and **only the first of them is
 visible without making a real call**.
@@ -27,7 +27,7 @@ import time
 
 import pytest
 
-from corpus_toolkit.mcp import _sdk
+from corpus_toolkit.mcp import sdk
 
 pytest.importorskip("uvicorn")
 import uvicorn  # noqa: E402
@@ -44,7 +44,7 @@ def _free_port() -> int:
 
 
 def _build_server():
-    server = _sdk.Server("client-seam-test")
+    server = sdk.Server("client-seam-test")
 
     @server.tool()
     def echo(text: str, times: int = 1) -> dict:
@@ -66,8 +66,8 @@ class _Serving:
         self.path = path
         self.port = _free_port()
         self.server = _build_server()
-        kwargs = _sdk.http_kwargs(host=HOST, port=self.port, path=path)
-        app = _sdk.build_http_app(self.server, kwargs)
+        kwargs = sdk.http_kwargs(host=HOST, port=self.port, path=path)
+        app = sdk.build_http_app(self.server, kwargs)
         config = uvicorn.Config(app, host=HOST, port=self.port, log_level="error")
         self._uvicorn = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._uvicorn.run, daemon=True)
@@ -98,10 +98,10 @@ def test_the_client_entry_point_is_one_we_have_actually_tested():
     """A third arrangement would otherwise land silently — `open_client_streams` would still
     import if a future SDK kept either name, and every behavioural test below could pass
     while something untested was in play."""
-    assert _sdk.CLIENT_SYMBOL in (
+    assert sdk.CLIENT_SYMBOL in (
         "streamablehttp_client",
         "streamable_http_client",
-    ), _sdk.CLIENT_SYMBOL
+    ), sdk.CLIENT_SYMBOL
 
 
 def test_modern_entry_point_is_preferred_where_available():
@@ -112,9 +112,9 @@ def test_modern_entry_point_is_preferred_where_available():
     import mcp.client.streamable_http as mod
 
     if hasattr(mod, "streamable_http_client"):
-        assert _sdk.CLIENT_SYMBOL == "streamable_http_client"
+        assert sdk.CLIENT_SYMBOL == "streamable_http_client"
     else:
-        assert _sdk.CLIENT_SYMBOL == "streamablehttp_client"
+        assert sdk.CLIENT_SYMBOL == "streamablehttp_client"
 
 
 def test_no_deprecation_warning_on_connect():
@@ -124,7 +124,7 @@ def test_no_deprecation_warning_on_connect():
 
     async def go():
         with _Serving() as serving:
-            async with _sdk.open_client_streams(serving.url, timeout=15) as (r, w, _):
+            async with sdk.open_client_streams(serving.url, timeout=15) as (r, w, _):
                 async with ClientSession(r, w) as session:
                     await session.initialize()
 
@@ -145,7 +145,7 @@ def test_round_trip_call_returns_the_tools_answer():
 
     async def go():
         with _Serving() as serving:
-            async with _sdk.open_client_streams(serving.url, timeout=15) as (r, w, get_id):
+            async with sdk.open_client_streams(serving.url, timeout=15) as (r, w, get_id):
                 async with ClientSession(r, w) as session:
                     await session.initialize()
                     result = await session.call_tool("echo", {"text": "ab", "times": 3})
@@ -167,20 +167,20 @@ def test_tool_input_schema_survives_the_field_rename():
 
     async def go():
         with _Serving() as serving:
-            async with _sdk.open_client_streams(serving.url, timeout=15) as (r, w, _):
+            async with sdk.open_client_streams(serving.url, timeout=15) as (r, w, _):
                 async with ClientSession(r, w) as session:
                     await session.initialize()
                     listing = await session.list_tools()
                     by_name = {t.name: t for t in listing.tools}
                     assert {"echo", "explode"} <= set(by_name)
 
-                    schema = _sdk.tool_input_schema(by_name["echo"])
+                    schema = sdk.tool_input_schema(by_name["echo"])
                     assert schema, "empty schema — the field rename was not bridged"
                     assert "text" in schema.get("properties", {}), schema
                     assert schema.get("required") == ["text"], schema
 
                     # A no-argument tool still yields a usable object rather than None.
-                    assert isinstance(_sdk.tool_input_schema(by_name["explode"]), dict)
+                    assert isinstance(sdk.tool_input_schema(by_name["explode"]), dict)
 
     _run(go())
 
@@ -190,15 +190,15 @@ def test_result_is_error_survives_the_field_rename():
 
     async def go():
         with _Serving() as serving:
-            async with _sdk.open_client_streams(serving.url, timeout=15) as (r, w, _):
+            async with sdk.open_client_streams(serving.url, timeout=15) as (r, w, _):
                 async with ClientSession(r, w) as session:
                     await session.initialize()
 
                     good = await session.call_tool("echo", {"text": "x"})
-                    assert _sdk.result_is_error(good) is False
+                    assert sdk.result_is_error(good) is False
 
                     bad = await session.call_tool("explode", {})
-                    assert _sdk.result_is_error(bad) is True, (
+                    assert sdk.result_is_error(bad) is True, (
                         "a raising tool did not report the protocol error flag — the "
                         "isError/is_error rename was not bridged"
                     )
@@ -215,16 +215,16 @@ def test_custom_headers_reach_the_server():
     """
 
     async def go():
-        security = _sdk.TransportSecuritySettings(
+        security = sdk.TransportSecuritySettings(
             allowed_hosts=["example.test"],
             allowed_origins=["https://example.test"],
         )
         serving = _Serving()
         serving.server = _build_server()
-        kwargs = _sdk.http_kwargs(
+        kwargs = sdk.http_kwargs(
             host=HOST, port=serving.port, path="/mcp", transport_security=security
         )
-        app = _sdk.build_http_app(serving.server, kwargs)
+        app = sdk.build_http_app(serving.server, kwargs)
         config = uvicorn.Config(app, host=HOST, port=serving.port, log_level="error")
         serving._uvicorn = uvicorn.Server(config)
         serving._thread = threading.Thread(target=serving._uvicorn.run, daemon=True)
@@ -232,17 +232,17 @@ def test_custom_headers_reach_the_server():
         with serving:
             # Without the Host header the guard rejects the connection.
             with pytest.raises(BaseException):
-                async with _sdk.open_client_streams(serving.url, timeout=10) as (r, w, _):
+                async with sdk.open_client_streams(serving.url, timeout=10) as (r, w, _):
                     async with ClientSession(r, w) as session:
                         await session.initialize()
 
             # With it, the same server answers.
-            async with _sdk.open_client_streams(
+            async with sdk.open_client_streams(
                 serving.url, timeout=15, headers={"Host": "example.test"}
             ) as (r, w, _):
                 async with ClientSession(r, w) as session:
                     await session.initialize()
                     result = await session.call_tool("echo", {"text": "ok"})
-                    assert not _sdk.result_is_error(result)
+                    assert not sdk.result_is_error(result)
 
     _run(go())
