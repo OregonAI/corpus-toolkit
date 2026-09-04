@@ -1205,3 +1205,10 @@ that PR by hand to land the state. Why the built-in token cannot do this job is 
 workflow's `secrets:` block and the CHANGELOG entry: it cannot open a PR in this org, and a
 PR it opened would run no CI, so it could never merge itself.
 
+### v1.35.0 — the client seam is `corpus_toolkit.mcp.sdk`; `_sdk` is an alias of it (ADR-0006)
+
+Nothing to do to stay green. If your code imports `corpus_toolkit.mcp._sdk` (corpus-gateway's
+`upstream.py` and `server.py`, corpus-chat's `mcp_client.py`), change the import to
+`corpus_toolkit.mcp.sdk` when you next touch the file — the old name is the same module
+object and is not scheduled for removal, so this is hygiene, not a deadline. The names are
+identical; only the module path changes.

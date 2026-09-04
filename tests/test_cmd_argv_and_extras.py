@@ -7,7 +7,7 @@ way: unit tests green, `entrypoints` green, the gate green, every corpus broken.
 THE CMD IS HOW THE CONTAINER ACTUALLY STARTS. The gate asserted `corpus-mcp-serve --help`,
 which argparse answers with exit 0 regardless of which options exist. Rename
 `--public-hostname` to `--public-host`, or make `--config` positional, and: the unit suite
-stays green (test_mount_path.py builds the app through `_sdk.http_kwargs` and never touches
+stays green (test_mount_path.py builds the app through `sdk.http_kwargs` and never touches
 the parser), the entrypoints job stays green (it asserts `hasattr(module, "main")`), `--help`
 still exits 0, the #100 build-command step still passes — and every corpus container
 crash-loops on `unrecognized arguments`. That CMD is identical across all seven live corpora.

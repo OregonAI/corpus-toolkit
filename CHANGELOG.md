@@ -15,6 +15,19 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## v1.35.0 — 2026-09-04
+
+### Added — the client seam has its public name, `corpus_toolkit.mcp.sdk` (ADR-0006, implemented)
+
+ADR-0006 decided on 2026-08-12 that the module every client imports — `Server`,
+`call_tool`, `open_client_streams`, `result_is_error`, the both-majors compat layer — should
+stop being a private name, and nothing moved. `corpus_toolkit/mcp/_sdk.py` is now
+`corpus_toolkit/mcp/sdk.py`; `_sdk` remains importable and is the same module object (a
+`sys.modules` alias, not a re-export list), so every existing `from corpus_toolkit.mcp import
+_sdk` keeps working unchanged and patching one name patches the other. Nothing breaks. New
+code should import `corpus_toolkit.mcp.sdk`; corpus-gateway and corpus-chat switch in their
+next bump.
+
 ## v1.34.3 — 2026-09-04
 
 ### Fixed — after one merged drift PR, the next run created none

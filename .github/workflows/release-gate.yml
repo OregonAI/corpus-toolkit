@@ -82,13 +82,13 @@ jobs:
         run: pip install -e "./toolkit[mcp,test]" "${{ matrix.mcp-spec }}"
       - name: A real corpus must validate and serve every mandatory contract tool
         run: |
-          python3 -c "from corpus_toolkit.mcp import _sdk; print('mcp', _sdk.sdk_version(), 'major', _sdk.SDK_MAJOR)"
+          python3 -c "from corpus_toolkit.mcp import sdk; print('mcp', sdk.sdk_version(), 'major', sdk.SDK_MAJOR)"
           python3 toolkit/.github/scripts/contract_smoke.py --template "$PWD/template"
 
   # A TAG MUST AGREE WITH THE VERSION IT SHIPS. pyproject sat at 1.18.0 while the newest
   # tag was v1.23.0 — five releases during which anyone installing the toolkit got a
   # package reporting a version it was not, and `importlib.metadata.version` (which
-  # `_sdk.sdk_version`-style diagnostics and any downstream compatibility check would
+  # `sdk.sdk_version`-style diagnostics and any downstream compatibility check would
   # read) answered 1.18.0. Nothing noticed, because nothing compared the two
   # (corpus-toolkit#41).
   #

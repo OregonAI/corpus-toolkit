@@ -14,7 +14,7 @@ itself (framework.py) is stdlib-only and can be exercised without it.
 
 Works against mcp 1.x AND 2.x. The SDK class moved (`FastMCP` -> `MCPServer`) and 2.0.0
 deleted the old module outright, so everything version-dependent is behind
-`corpus_toolkit.mcp._sdk` — read that file's header before changing anything here. The
+`corpus_toolkit.mcp.sdk` — read that file's header before changing anything here. The
 corpus pins a toolkit tag but never pins the SDK, so the SDK floats at image-build time
 no matter how carefully the pin is managed; spanning both majors is the only thing that
 survives that."""
@@ -22,7 +22,7 @@ import argparse
 
 import sys
 
-from corpus_toolkit.mcp import _sdk
+from corpus_toolkit.mcp import sdk
 
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.mcp.framework import CorpusFramework
@@ -65,7 +65,7 @@ from corpus_toolkit.mcp.responses import ResponseEnvelope
 #
 # THE TOOL BODIES STILL RETURN `fw.<tool>()`'s DICT. The annotation is a declaration to the
 # SDK, not a constructor: `model_validate` takes the mapping. Returning model INSTANCES
-# would move `_sdk.call_tool(convert_result=False)` and the release gate off the toolkit's
+# would move `sdk.call_tool(convert_result=False)` and the release gate off the toolkit's
 # own answer and onto the SDK's marshalling, which is the separation those two exist for.
 
 
@@ -144,8 +144,8 @@ def build_server(config):
               f"answer says so. Fix the file and restart.", file=sys.stderr)
     # Log the SDK. The failure that motivated the compat seam is invisible in the
     # toolkit's own version number: same toolkit, different SDK major, unstartable server.
-    _sdk.report()
-    mcp = _sdk.Server(
+    sdk.report()
+    mcp = sdk.Server(
         config.mcp_server_name,
         instructions=(
             f"Non-authoritative knowledge base for {config.name} ({config.jurisdiction}, "
@@ -273,7 +273,7 @@ def build_server(config):
     # Refusing to start is the only signal that reaches anyone.
     if config.tools_module:
         from corpus_toolkit.plugins import load_attr
-        before = _sdk.tool_names(mcp)
+        before = sdk.tool_names(mcp)
         register = load_attr(config.tools_module, config.root)
 
         # RECORD WHAT THE MODULE ATTEMPTS, because the difference below cannot see a
@@ -345,7 +345,7 @@ def build_server(config):
                 f"Each is silent at runtime, which is why this refuses to start. Rename "
                 f"them (corpus-toolkit#111).")
 
-        added = sorted(_sdk.tool_names(mcp) - before)
+        added = sorted(sdk.tool_names(mcp) - before)
         if not added:
             raise RuntimeError(
                 f"plugins.tools_module '{config.tools_module}' registered no tools. "
@@ -440,7 +440,7 @@ def main():
             hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
             if args.public_hostname:
                 hosts.append(args.public_hostname)
-            security = _sdk.TransportSecuritySettings(
+            security = sdk.TransportSecuritySettings(
                 allowed_hosts=hosts, allowed_origins=origins,
             )
         # ONE dict, used for the verification build AND for run(). This is not tidiness.
@@ -448,7 +448,7 @@ def main():
         # separately-argued build would be a check on a different object than the one
         # served — it would pass while the served app mounted somewhere else. Deriving
         # both from the same dict removes the possibility.
-        http = _sdk.http_kwargs(host=args.host, port=args.port, path=args.path,
+        http = sdk.http_kwargs(host=args.host, port=args.port, path=args.path,
                                 transport_security=security)
 
         # Assert rather than assume, and assert on BEHAVIOUR rather than on the SDK's
@@ -459,7 +459,7 @@ def main():
         # went undetected. What actually matters is whether the app answers at the path
         # the proxy routes — a Cloudflare Tunnel matches on path but does NOT strip it,
         # so a wrong mount 404s every request with nothing in any log to explain it.
-        app = _sdk.build_http_app(mcp, http)
+        app = sdk.build_http_app(mcp, http)
         mounted = [getattr(r, "path", None) for r in app.routes]
         if args.path not in mounted:
             sys.exit(f"ERROR: asked to mount at {args.path!r} but the app exposes {mounted!r}. "
@@ -473,7 +473,7 @@ def main():
         # the trap is gone there — the check stays anyway, because its purpose was never
         # to describe one SDK's caching but to refuse to serve a configuration that was
         # dropped somewhere between here and the socket.
-        _hosts = _sdk.session_allowed_hosts(mcp)
+        _hosts = sdk.session_allowed_hosts(mcp)
         if args.public_hostname and args.public_hostname not in _hosts:
             sys.exit(f"ERROR: --public-hostname {args.public_hostname!r} did not reach the "
                      f"session manager (allowed_hosts={_hosts!r}). Refusing to start: every "
@@ -486,12 +486,12 @@ def main():
         # the only way to wrap middleware at all: the SDK exposes no hook (#37).
         served = app
         if args.allowed_origin:
-            served = _sdk.with_cors(app, args.allowed_origin)
+            served = sdk.with_cors(app, args.allowed_origin)
         print(f"[corpus-mcp] {config.id}: serving streamable-http at {args.path} "
               f"(allowed hosts: {', '.join(_hosts) or 'defaults'}; "
               f"cors: {', '.join(args.allowed_origin) or 'off'})",
               file=sys.stderr, flush=True)
-        _sdk.run_http_app(mcp, served, http)
+        sdk.run_http_app(mcp, served, http)
     else:
         mcp.run()
 

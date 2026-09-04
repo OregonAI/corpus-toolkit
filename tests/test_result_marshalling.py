@@ -1,6 +1,6 @@
 """What a CLIENT receives, for EVERY registered tool — not just the object-shaped six.
 
-corpus-toolkit#63. `_sdk.call_tool` passes `convert_result=False`, and that is deliberate:
+corpus-toolkit#63. `sdk.call_tool` passes `convert_result=False`, and that is deliberate:
 the release gate asserts that an external graph neighbour comes back
 `{citation, external: true}` and that a document body contains its text, and asserting
 those through the SDK's marshalling would test the SDK instead of the toolkit. The
@@ -49,7 +49,7 @@ import pytest
 pytest.importorskip("mcp", reason="needs the mcp extra: pip install -e '.[mcp,test]'")
 
 from corpus_toolkit import config as config_mod              # noqa: E402
-from corpus_toolkit.mcp import _sdk                          # noqa: E402
+from corpus_toolkit.mcp import sdk                          # noqa: E402
 from corpus_toolkit.mcp.server import build_server           # noqa: E402
 
 CORPUS_YML = """\
@@ -272,15 +272,15 @@ def hybrid_server(tmp_path):
 
 def _tools(server):
     """Through the seam, not `server._tool_manager`: what that private attribute yields is
-    one of the things the 1.x/2.x break moved, and keeping the reach in `_sdk` is the whole
+    one of the things the 1.x/2.x break moved, and keeping the reach in `sdk` is the whole
     point of the file."""
-    return _sdk.tools_by_name(server)
+    return sdk.tools_by_name(server)
 
 
 def _call(server, name, arguments):
     """The tool's raw answer — `convert_result=False`, the behaviour leg."""
     return asyncio.new_event_loop().run_until_complete(
-        _sdk.call_tool(server, name, arguments))
+        sdk.call_tool(server, name, arguments))
 
 
 def _jsonable(value):
@@ -320,7 +320,7 @@ def _decoded_blocks(texts, name):
 def test_every_registered_tool_is_covered(document_server, hybrid_server):
     """The coverage guard, and the reason #63 exists rather than #61 having been enough:
     the hole was never in the tools someone remembered to list."""
-    registered = _sdk.tool_names(document_server) | _sdk.tool_names(hybrid_server)
+    registered = sdk.tool_names(document_server) | sdk.tool_names(hybrid_server)
     assert MANDATORY_CORE_TOOLS <= registered, (
         f"fixture corpus is not serving the mandatory core tools: "
         f"{sorted(MANDATORY_CORE_TOOLS - registered)} — the assertions below would pass "
@@ -372,7 +372,7 @@ def test_every_tool_answer_reaches_the_client_intact(fixture, request):
                             f"trip compares [] == [] and asserts nothing about the one "
                             f"field serialization could drop")
         try:
-            texts, structured = _sdk.serialized_result(tools[name], raw)
+            texts, structured = sdk.serialized_result(tools[name], raw)
         except Exception as e:             # noqa: BLE001
             # A ValidationError here is bug 1 of #61 verbatim: the declared shape refusing
             # a value the toolkit documents (`authoritative_source: null`). Collect rather
@@ -432,7 +432,7 @@ def test_every_error_branch_reaches_the_client_intact(document_server):
             f"{name}{arguments} returned only the envelope — the fixture is not reaching "
             f"an error branch, so the assertions below prove nothing")
         try:
-            texts, structured = _sdk.serialized_result(tools[name], raw)
+            texts, structured = sdk.serialized_result(tools[name], raw)
         except Exception as e:                 # noqa: BLE001
             problems.append(f"{name}{arguments} could not be serialized at all: "
                             f"{type(e).__name__}: {e}")
@@ -463,7 +463,7 @@ def test_the_document_body_survives_in_both_halves(document_server):
     assert marker in json.dumps(raw), (
         "the tool itself lost the body — a framework bug, not a marshalling one")
 
-    texts, structured = _sdk.serialized_result(tools["get_document"], raw)
+    texts, structured = sdk.serialized_result(tools["get_document"], raw)
     assert marker in json.dumps(structured), (
         "structured content reached the client without the document body")
     assert any(marker in t for t in texts), (
@@ -485,7 +485,7 @@ def test_search_hits_arrive_one_content_block_each(document_server):
         f"fixture search returned {ids} — expected every document, so the per-hit "
         f"assertions below are testing more than one block")
 
-    texts, structured = _sdk.serialized_result(tools["search_corpus"], hits)
+    texts, structured = sdk.serialized_result(tools["search_corpus"], hits)
     assert len(texts) == len(hits), (
         f"{len(hits)} hits converted to {len(texts)} content block(s); a client rendering "
         f"blocks would see the wrong number of results")
@@ -511,7 +511,7 @@ def test_a_null_value_inside_a_corpus_supplied_payload_survives(hybrid_server):
     test is actually for comes from the corpus-supplied payload: top-level and nested."""
     tools = _tools(hybrid_server)
     raw = _call(hybrid_server, "join_lookup", {"document_id": "alpha"})
-    structured = _sdk.structured_result(tools["join_lookup"], raw)
+    structured = sdk.structured_result(tools["join_lookup"], raw)
     assert structured["authoritative_source"] == "https://example.invalid/official"
     assert structured["unmatched"] is None, (
         "a null at the TOP LEVEL of a corpus-supplied payload did not survive")

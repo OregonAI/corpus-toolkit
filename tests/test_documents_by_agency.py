@@ -264,7 +264,7 @@ def test_the_tool_is_registered_only_when_the_backend_can_answer(tmp_path):
     reports registry identity; this reports "which of my documents carry this slug", which
     needs none — and the two corpora `agency_profile` must ask declare none."""
     from corpus_toolkit.mcp import server as server_mod
-    from corpus_toolkit.mcp._sdk import tools_by_name
+    from corpus_toolkit.mcp.sdk import tools_by_name
 
     root = _corpus(tmp_path, {"reports/a-1.md": _report(1, DOGAMI)})
     config = load_config(root / "_meta" / "corpus.yml")
@@ -675,7 +675,7 @@ def test_the_registered_tool_passes_limit_and_offset_through_in_that_order(tmp_p
     in `server.py` — `limit=offset, offset=limit` — passed the whole suite. The framework
     method was covered; the wiring to it was not."""
     from corpus_toolkit.mcp import server as server_mod
-    from corpus_toolkit.mcp._sdk import call_tool, tools_by_name
+    from corpus_toolkit.mcp.sdk import call_tool, tools_by_name
     import asyncio
 
     root = _corpus(tmp_path, {f"reports/f{i}.md": _report(8 - i, DOGAMI)

@@ -5,7 +5,7 @@ matches on path but does NOT strip it, so each server must mount at the same pre
 route matches or every request 404s — with nothing in any log to say why.
 
 `--path` therefore has to be verified, not assumed. These tests are written against
-`corpus_toolkit.mcp._sdk` rather than against a specific SDK class, because the SDK did
+`corpus_toolkit.mcp.sdk` rather than against a specific SDK class, because the SDK did
 exactly what the old version of this file warned it might: mcp 2.0.0 deleted
 `mcp.server.fastmcp` and moved the mount from a mutable `settings` field to a keyword
 argument. The old tests asserted the SETTING existed, so on 2.x they did not fail — they
@@ -17,13 +17,13 @@ mcp 1.28.1 and 2.0.0.
 """
 import pytest
 
-from corpus_toolkit.mcp import _sdk
+from corpus_toolkit.mcp import sdk
 
 
 def _app(path, security=None):
-    server = _sdk.Server("test")
-    return _sdk.build_http_app(
-        server, _sdk.http_kwargs(host="127.0.0.1", port=8000, path=path,
+    server = sdk.Server("test")
+    return sdk.build_http_app(
+        server, sdk.http_kwargs(host="127.0.0.1", port=8000, path=path,
                                  transport_security=security)), server
 
 
@@ -36,7 +36,7 @@ def test_the_sdk_major_is_one_we_have_actually_tested():
     """The compat seam supports 1.x and 2.x. A 3.0 would land here silently otherwise —
     `Server` would still import if a future SDK kept either name, and every behavioural
     test below could pass while some untested third arrangement was in play."""
-    assert _sdk.SDK_MAJOR in (1, 2), _sdk.sdk_version()
+    assert sdk.SDK_MAJOR in (1, 2), sdk.sdk_version()
 
 
 def test_default_mount_is_unchanged():
@@ -68,29 +68,29 @@ def test_transport_security_reaches_the_session_manager():
     allow-list stayed localhost-only and every tunnelled request 421'd while the correct
     hostname sat unused in config. server.py refuses to start when this is empty, so this
     test is what stands behind that refusal being meaningful."""
-    sec = _sdk.TransportSecuritySettings(
+    sec = sdk.TransportSecuritySettings(
         enable_dns_rebinding_protection=True, allowed_hosts=["example.com"])
     _, server = _app("/c/mcp", sec)
-    assert "example.com" in _sdk.session_allowed_hosts(server)
+    assert "example.com" in sdk.session_allowed_hosts(server)
 
 
 def test_no_security_settings_yields_an_empty_list_not_an_exception():
     """On 2.x `session_manager` RAISES before the first app build. server.py calls this
     while assembling a startup error message, so a raise there would replace a precise
     diagnostic with a traceback — the exact substitution this whole area keeps making."""
-    assert _sdk.session_allowed_hosts(_sdk.Server("test")) == []
+    assert sdk.session_allowed_hosts(sdk.Server("test")) == []
 
 
 def test_tool_names_sees_registrations():
-    server = _sdk.Server("test")
-    assert _sdk.tool_names(server) == set()
+    server = sdk.Server("test")
+    assert sdk.tool_names(server) == set()
 
     @server.tool()
     def probe_tool(x: str) -> dict:
         """probe"""
         return {"x": x}
 
-    assert _sdk.tool_names(server) == {"probe_tool"}
+    assert sdk.tool_names(server) == {"probe_tool"}
 
 
 def test_tool_names_works_from_inside_a_running_event_loop():
@@ -106,9 +106,9 @@ def test_tool_names_works_from_inside_a_running_event_loop():
     import asyncio
     import inspect
 
-    assert not inspect.iscoroutinefunction(_sdk.tool_names)
+    assert not inspect.iscoroutinefunction(sdk.tool_names)
 
-    server = _sdk.Server("test")
+    server = sdk.Server("test")
 
     @server.tool()
     def probe_tool(x: str) -> dict:
@@ -116,7 +116,7 @@ def test_tool_names_works_from_inside_a_running_event_loop():
         return {"x": x}
 
     async def from_async():
-        return _sdk.tool_names(server)
+        return sdk.tool_names(server)
 
     assert asyncio.run(from_async()) == {"probe_tool"}
 
@@ -127,7 +127,7 @@ def test_call_tool_returns_the_raw_python_value_on_either_major():
     CallToolResult; asserting through that would test the SDK's marshalling instead."""
     import asyncio
 
-    server = _sdk.Server("test")
+    server = sdk.Server("test")
 
     @server.tool()
     def graph_neighbors(doc_id: str) -> dict:
@@ -135,6 +135,6 @@ def test_call_tool_returns_the_raw_python_value_on_either_major():
         return {"id": doc_id, "related": [{"citation": "OAR 166-300-0015",
                                            "external": True}]}
 
-    got = asyncio.run(_sdk.call_tool(server, "graph_neighbors", {"doc_id": "d1"}))
+    got = asyncio.run(sdk.call_tool(server, "graph_neighbors", {"doc_id": "d1"}))
     assert got == {"id": "d1",
                    "related": [{"citation": "OAR 166-300-0015", "external": True}]}

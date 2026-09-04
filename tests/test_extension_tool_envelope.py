@@ -36,27 +36,27 @@ pytest.importorskip("mcp", reason="needs the mcp extra: pip install -e '.[mcp,te
 sys.path.insert(0, str(Path(__file__).parent))
 from test_tools_module import _corpus, _isolate_imports          # noqa: E402,F401
 
-from corpus_toolkit.mcp import _sdk                              # noqa: E402
+from corpus_toolkit.mcp import sdk                              # noqa: E402
 from corpus_toolkit.mcp.framework import CorpusFramework         # noqa: E402
 from corpus_toolkit.mcp.server import build_server               # noqa: E402
 
 
 def _tool(mcp, name):
-    return _sdk.tools_by_name(mcp)[name]
+    return sdk.tools_by_name(mcp)[name]
 
 
 def _structured(mcp, name, arguments=None):
     """The structured half a client receives, on either SDK major.
 
-    Through `_sdk.structured_result` — the PUBLIC seam the rest of the suite uses —
+    Through `sdk.structured_result` — the PUBLIC seam the rest of the suite uses —
     rather than `mcp.call_tool` directly: 1.x returns `(blocks, structured)` and 2.x a
     `CallToolResult`, and hand-rolling that difference in a test is how a suite ends up
     green on one leg of the matrix and red on the other, which is exactly what the first
     draft of this file did.
     """
     payload = asyncio.new_event_loop().run_until_complete(
-        _sdk.call_tool(mcp, name, arguments or {}))
-    return _sdk.structured_result(_tool(mcp, name), payload)
+        sdk.call_tool(mcp, name, arguments or {}))
+    return sdk.structured_result(_tool(mcp, name), payload)
 
 
 # ---------- the accessor ----------
