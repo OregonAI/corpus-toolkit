@@ -184,6 +184,18 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
+# A wizard reads from the keyboard. Run through a non-interactive front end (Claude Code's
+# `!` prefix, a pipe, cron) stdin is not a TTY, every `read` returns empty at once, and the
+# wizard races through every stage and exits at the first required value having stored
+# nothing — which is what happened on 2026-09-03. Refuse instead, and say where to run it.
+if [[ ! -t 0 ]]; then
+  printf '\n  This wizard needs an interactive terminal: stdin is not a TTY, so it cannot wait\n'
+  printf '  for you or read the token you paste. Run it in your own shell window:\n\n'
+  printf '      bash %s\n\n' "$0"
+  printf '  (The `!` prefix in Claude Code and pipes both detach the keyboard.)\n\n'
+  exit 2
+fi
+
 TOTAL_STAGES=5
 
 banner "Provision CORPUS_PIN_TOKEN"
