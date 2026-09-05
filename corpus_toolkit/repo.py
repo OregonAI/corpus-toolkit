@@ -399,7 +399,14 @@ def content_hash(raw: bytes, fmt: str,
         text = proc.stdout.decode("utf-8", errors="replace") if proc.returncode == 0 else ""
     elif fmt in ("html", "xml"):
         from corpus_toolkit.html_to_text import html_to_text
-        text = html_to_text(normalize_volatile(raw, volatile_patterns))
+        # The under-200-character fallback below hashes THESE bytes, not `raw`: a viewer
+        # shell whose visible text is a few words but whose per-request tokens (ASP.NET
+        # __VIEWSTATE, __EVENTVALIDATION) change on every fetch was un-hashable by any
+        # declared pattern, because the pattern was applied on the text path only and the
+        # page never took the text path (oregon-audits#47: 191 of 244 sources "changed"
+        # every run). A declared pattern now applies to whatever bytes get hashed.
+        raw = normalize_volatile(raw, volatile_patterns)
+        text = html_to_text(raw)
     else:
         # binary formats with no text extractor (xls/xlsx/docx): raw-byte hash
         return hashlib.sha256(raw).hexdigest()

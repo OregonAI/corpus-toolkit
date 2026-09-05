@@ -1265,3 +1265,12 @@ Three things change for a script that switches:
 
 `write_document` raises `DocumentError` naming every finding `corpus-validate-frontmatter`
 would have raised. Fix the frontmatter; do not pass `validate=False` to get past it.
+
+
+### v1.36.1 — patterns reach the byte fallback; refresh baselines only where you have proven the content unchanged
+
+Nothing to do unless a corpus hashes viewer shells (short visible text around an embedded or
+streamed document). If it does, declare the per-request tokens in `volatile_patterns` and, for
+each source, prove the mirrored text equals what upstream serves today before refreshing its
+baseline -- the rule from the 2026-09 stabilisation pass: a baseline moves by ingest, and a
+refresh is only for the case where the hash's input changed and the words did not.

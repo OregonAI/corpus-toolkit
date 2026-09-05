@@ -246,3 +246,20 @@ class VolatileBreadthIsMeasuredTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_short_page_s_raw_byte_fallback_still_honours_declared_patterns():
+    """A viewer shell: under 200 characters of visible text, so `content_hash` falls back to
+    hashing bytes -- and those bytes must be the pattern-stripped ones, or a per-request token
+    defeats every declared pattern on exactly the pages that need one (oregon-audits#47)."""
+    from corpus_toolkit.repo import content_hash
+    shell = (b'<html><body><form><input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" '
+             b'value="%s" /><script>var myPdfBase64 = \'JVBERi0xLjQ=\'</script>'
+             b'<p>Record Viewer</p></form></body></html>')
+    a, b = shell % b"tokenA1", shell % b"tokenB2"
+    pat = re.compile(rb'name="__VIEWSTATE" id="__VIEWSTATE" value="[^"]*"')
+    assert content_hash(a, "html") != content_hash(b, "html")          # the defect, un-patterned
+    assert content_hash(a, "html", [pat]) == content_hash(b, "html", [pat])
+    # and a change to what the shell actually carries is still seen
+    c = shell.replace(b"JVBERi0xLjQ=", b"JVBERi0xLjc=") % b"tokenC3"
+    assert content_hash(a, "html", [pat]) != content_hash(c, "html", [pat])

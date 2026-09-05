@@ -15,6 +15,18 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## v1.36.1 — 2026-09-05
+
+### Fixed — a declared volatile pattern now applies to the under-200-character byte fallback too
+
+`content_hash` strips `volatile_patterns` before extracting text, but when the extracted text
+was under 200 characters it fell back to hashing the ORIGINAL bytes, so a page that never took
+the text path -- a records viewer shell with a few words of chrome and a per-request ASP.NET
+`__VIEWSTATE` -- could not be made stable by any pattern. oregon-audits reported 191 of 244
+sources changed on every run for exactly this reason (oregon-audits#47). The fallback now
+hashes the pattern-stripped bytes. A corpus that declares no patterns hashes exactly what it
+did before.
+
 ## v1.36.0 — 2026-09-04
 
 ### Added — the ingest primitives every corpus was writing itself (ADR-0016)
