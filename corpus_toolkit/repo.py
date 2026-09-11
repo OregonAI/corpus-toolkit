@@ -415,8 +415,14 @@ def content_hash(raw: bytes, fmt: str,
 
     NOT the same hash as `hash_snapshot()`, which reads committed `.txt` and is deliberately
     never re-derived from the source at verification time. Frontmatter `source_sha256` is
-    therefore NOT a valid seed for a manifest baseline: the two agree only for image-only
-    scans, where both fall back to raw bytes (measured on oregon-kpm, corpus-toolkit#68).
+    therefore NOT a valid seed for a manifest baseline: the two agree only when BOTH fall
+    back to the raw-byte hash -- i.e. the fetched bytes' extracted text AND the committed
+    `.txt` are both under 200 normalized chars. This is not implied by "the source is an
+    image-only scan": a corpus that commits substantial OCR text for its scans (rather than
+    leaving them textless) will not see agreement even for its scanned sources -- 0 of 6 on
+    oregon-kpm, whose committed OCR text runs 7,761-21,209 normalized chars (corpus-toolkit#175,
+    correcting the coincidental agreement measured on a different corpus in corpus-toolkit#68).
+    Verify per-corpus rather than assuming.
     """
     if watch is not None:
         # `is not None`, NOT truthiness. `watch=[]`, `()`, `""` and `0` all fell through to

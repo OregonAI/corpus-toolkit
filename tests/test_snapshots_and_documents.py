@@ -132,6 +132,26 @@ def test_record_snapshot_for_a_source_the_manifest_does_not_declare(corpus):
                                      baseline=False).baseline == "skipped"
 
 
+def test_scan_with_committed_ocr_text_does_not_make_the_two_hashes_agree(corpus):
+    """corpus-toolkit#175: `content_hash()`'s docstring used to claim the drift baseline
+    and `hash_snapshot()` "agree only for image-only scans" -- true only by coincidence for
+    a corpus that leaves scanned documents textless. This is the counter-example: the
+    fetched bytes are image-only (no real text for `content_hash` to extract, so it falls
+    back to a raw-byte hash of `raw`), but the corpus commits substantial OCR text -- over
+    the 200-normalized-char floor, the oregon-kpm shape -- so `hash_snapshot` takes the
+    TEXT path and hashes that instead. Image-only and yet the two disagree: the actual
+    condition is "both fall back to raw bytes", not "the source is a scan"."""
+    scan_raw = b"<html><body><img src=\"page-1.png\" alt=\"\"/></body></html>"  # no real text
+    ocr_text = "Recognized statutory text promoted from OCR. " * 10             # > 200 chars
+    assert len(ocr_text) >= 200
+
+    snap = snapshots.record_snapshot(corpus, "orphan-scan", scan_raw, "html", ocr_text,
+                                     baseline=False)
+
+    assert snap.content_hash == content_hash(scan_raw, "html")   # raw-byte fallback, as claimed
+    assert snap.sha256 != snap.content_hash                      # but hash_snapshot took the text path
+
+
 def test_retrieved_date_advances_only_on_a_real_fetch(tmp_path):
     doc = tmp_path / "d.md"
     doc.write_text("---\nid: d\nretrieved: '2026-01-15'\n---\n\nbody\n")

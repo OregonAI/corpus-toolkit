@@ -7,8 +7,11 @@ nine) the manifest baseline -- and they disagreed about the parts that matter:
   * which hash goes where. The manifest baseline is the DETECTOR's hash,
     `content_hash(raw, fmt, volatile_patterns)`; the document's `source_sha256` is
     `hash_snapshot`, which reads the committed `.txt` and is never re-derived from the
-    source at verification time. They agree only for image-only PDFs
-    (corpus-toolkit#207). ERF's `snapshot_identity.py` exists to guard the confusion.
+    source at verification time. They agree only when BOTH fall back to the raw-byte hash
+    -- i.e. the extracted/committed text is under 200 normalized chars on both sides, not
+    merely "the source is an image-only scan": a corpus that commits substantial OCR text
+    for its scans will not see agreement even there (corpus-toolkit#175, corpus-toolkit#207).
+    ERF's `snapshot_identity.py` exists to guard the confusion.
   * whether ingest moves the baseline. kpm and federal-reference did; the others left it,
     so the next drift run reported every freshly ingested source as changed -- "a 100%
     false positive" in federal-reference's own words. A baseline is what the mirror HOLDS
