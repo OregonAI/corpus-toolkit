@@ -51,8 +51,9 @@ class DriftRecord(NamedTuple):
     """The last observation of one source, as `drift-state.json` records it.
 
     `outcome` uses the vocabulary of `source-outcomes.json` (`changed`, `unchanged`,
-    `no_baseline`, `fetch_failed`, `unreadable_json`, `watch_path_missing`) — the same
-    six strings, so a reader who learned one file has learned both.
+    `no_baseline`, `fetch_failed`, `unreadable_json`, `watch_path_missing`,
+    `archive_unreadable`) — the same seven strings, so a reader who learned one file has
+    learned both.
 
     `first_changed_at` is set the first run a source is observed `changed` against a given
     baseline and CARRIED while it stays changed against that same baseline; it is cleared
@@ -213,7 +214,8 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
     recs = sorted(state.values(), key=lambda r: (r.group, r.id))
     changed = [r for r in recs if r.outcome == "changed"]
     failing = [r for r in recs if r.outcome == "fetch_failed"]
-    uncompared = [r for r in recs if r.outcome in ("unreadable_json", "watch_path_missing")]
+    uncompared = [r for r in recs if r.outcome in
+                 ("unreadable_json", "watch_path_missing", "archive_unreadable")]
     no_baseline = [r for r in recs if r.outcome == "no_baseline" and not r.seeded_at]
     lr = last_run or {}
     run_date = lr.get("date", "never")
@@ -241,6 +243,8 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
         scope = ", ".join(lr.get("groups_in_scope") or []) or "(nothing in scope)"
         asked = lr.get("group_filter")
         t = lr.get("totals") or {}
+        not_comparable_now = (t.get("unreadable_json", 0) + t.get("watch_path_missing", 0)
+                              + t.get("archive_unreadable", 0))
         lines += [
             f"- **Date**: {run_date} · **toolkit**: {lr.get('toolkit_version', 'unknown')}",
             f"- **Verdict**: {verdict}",
@@ -248,8 +252,7 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
             f"- **This run**: {t.get('total', 0)} in scope · {t.get('changed', 0)} changed · "
             f"{t.get('unchanged', 0)} unchanged · {t.get('seeded', 0)} seeded · "
             f"{t.get('accepted', 0)} baselines accepted · {t.get('fetch_failed', 0)} fetch "
-            f"failed · {t.get('unreadable_json', 0) + t.get('watch_path_missing', 0)} not "
-            f"comparable",
+            f"failed · {not_comparable_now} not comparable",
             "",
         ]
     lines += [
@@ -320,7 +323,8 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
     if uncompared or no_baseline:
         lines += [f"## Not comparable ({len(uncompared) + len(no_baseline)})", "",
                   "Fetched, but not compared: a `watch`-declared source whose body is not "
-                  "JSON or lacks a declared path, or a source still without a baseline.", ""]
+                  "JSON or lacks a declared path, a `zip`-format source whose archive did "
+                  "not hold exactly one member, or a source still without a baseline.", ""]
         lines += _table(["group", "id", "why"],
                         [[r.group, f"`{r.id}`", r.outcome] for r in uncompared + no_baseline])
     lines += ["## By group", ""]

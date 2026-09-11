@@ -25,6 +25,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import zipfile
 
 import pytest
 from contextlib import redirect_stderr, redirect_stdout
@@ -286,6 +287,73 @@ class SourceOutcomesVocabularyTest(_DriftRun):
 
     def _by_id(self, report, sid):
         return next(s for s in report["sources"] if s["id"] == sid)
+
+    def test_a_zip_source_seeds_the_decompressed_members_hash_not_the_archives(self):
+        """corpus-toolkit#199, end to end through `corpus-detect-changes`, not just
+        `content_hash()` in isolation: a `.zip` url with no declared `format:` -- the shape
+        OLRC's per-title USLM release points are served as -- must seed a baseline a corpus
+        that caches the unzipped member can reproduce on its own ingestion."""
+        member = (b'<?xml version="1.0"?>\n<uslm><body><section>'
+                 + b"Some enacted statutory text, repeated past the 200-char floor. " * 4
+                 + b"</section></body></uslm>")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("usc20@119-103.xml", member)
+        zip_bytes = buf.getvalue()
+        (self.root / "_meta" / "sources" / "olrc.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "usc20-119-103"
+                url: "https://uscode.house.gov/xml_usc20@119-103.zip"
+                sha256: ""
+        """))
+        self.bodies["https://uscode.house.gov/xml_usc20@119-103.zip"] = zip_bytes
+
+        code, out, err = self.run_cli()
+
+        self.assertEqual(code, 0, f"a seeding run reported failure:\n{err}")
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        entry = self._by_id(report, "usc20-119-103")
+        self.assertEqual(entry["outcome"], "no_baseline",
+                         "fetched fine with nothing yet to compare against -- not a fetch "
+                         "failure, and not (yet) 'seeded' in the outcome vocabulary itself")
+        self.assertIn("usc20-119-103", err,
+                      "the seeded id must be named, not just counted")
+        self.assertIn("SEEDED this run", err)
+        manifest_text = (self.root / "_meta" / "sources" / "olrc.yml").read_text()
+        expected = content_hash(member, "xml")
+        self.assertIn(expected, manifest_text,
+                      "the manifest must record the DECOMPRESSED member's hash (what a "
+                      "corpus caching the unzipped bytes computes), not the archive's")
+        self.assertNotIn(content_hash(zip_bytes, "html"), manifest_text,
+                         "must not have fallen through to hashing the archive itself")
+
+    def test_an_archive_holding_more_than_one_member_is_not_reported_as_a_fetch_failure(self):
+        """The mirror image of the seeding test: a zip that does NOT hold exactly one
+        member is refused (corpus-toolkit#199), and that refusal must not be misreported as
+        our own access failing -- the bytes arrived and were a readable archive."""
+        member = b"<x>" + b"y" * 250 + b"</x>"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("a.xml", member)
+            zf.writestr("b.xml", member)
+        zip_bytes = buf.getvalue()
+        (self.root / "_meta" / "sources" / "multi.yml").write_text(textwrap.dedent("""\
+            sources:
+              - id: "multi-member-zip"
+                url: "https://example.gov/archive.zip"
+                sha256: "stale"
+        """))
+        self.bodies["https://example.gov/archive.zip"] = zip_bytes
+
+        code, out, err = self.run_cli()
+
+        report = json.loads((self.root / "source-outcomes.json").read_text())
+        entry = self._by_id(report, "multi-member-zip")
+        self.assertEqual(entry["outcome"], "archive_unreadable")
+        self.assertNotIn("FETCH FAILED", out + err)
+        self.assertIn("ARCHIVE UNREADABLE", err)
+        self.assertIn("0 fetch failure(s)", out,
+                      "the bytes arrived; this must not count as a failed fetch")
 
     def test_no_baseline_is_reported_as_such_not_changed_nor_unchanged(self):
         # Fetch succeeds; the manifest recorded no sha256 at all.
@@ -988,7 +1056,7 @@ class WatchPathReportingTest(_DriftRun):
 
     def test_watch_on_an_extension_derived_non_json_format_is_refused_too(self):
         """The refusal keyed on an EXPLICIT `format:`, but `_format_for` derives
-        `pdf/xls/xlsx/docx/xml` from the url extension just as declaratively — only the
+        `pdf/xls/xlsx/docx/xml/zip` from the url extension just as declaratively — only the
         UNRECOGNISED extension falls back to html, and that fallback is the one case the
         rationale needs to protect (a Socrata `.json` url with no `format:`).
 

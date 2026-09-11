@@ -210,8 +210,12 @@ def record_baseline(config, source_id: str, sha256: str) -> Path | None:
     fails verification. In every refusal NOTHING has been written.
 
     `sha256` must be the detector's hash -- `corpus_toolkit.repo.content_hash(raw, fmt,
-    config.volatile_patterns)` -- not the document's `source_sha256`; the two agree only for
-    image-only PDFs. `snapshots.record_snapshot` computes the right one.
+    config.volatile_patterns)` -- not the document's `source_sha256`; the two agree only
+    when BOTH fall back to the raw-byte hash, i.e. the fetched bytes' extracted text and the
+    committed `.txt` are each under `content_hash`'s 200-normalized-char floor. That is not
+    implied by "image-only scan" -- a corpus that commits substantial OCR text will not see
+    agreement even for its scanned sources (corpus-toolkit#175). `snapshots.record_snapshot`
+    computes the right one.
     """
     files = config_mod.load_source_manifest_group_files(config)
     hits: list[tuple[Path, dict]] = []
