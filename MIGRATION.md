@@ -1278,12 +1278,25 @@ refresh is only for the case where the hash's input changed and the words did no
 
 ### v1.36.2 — a `.zip` source now hashes as `zip`, not `html`
 
-Nothing to do for a corpus with no zip-wrapped source (every corpus but federal-reference,
-today). A source whose `url` ends `.zip`, or whose manifest declares `format: zip`, now takes
-a real zip branch: it is unzipped (one member required) and the decompressed bytes are hashed
-as whatever format the member's filename implies, instead of falling through to html/binary
-hashing of the archive. If a corpus already has a `.zip` source with a seeded `sha256`, that
-seed was necessarily taken over the wrong bytes (there was no other way to compute it before
-this release) — clear it to `""` and let the next `corpus-detect-changes` run reseed it
-correctly (ADR 0015), rather than assuming it happens to still match. federal-reference's one
-such source shipped with `sha256: ""` for exactly this reason and needs no action.
+Nothing to do for a corpus with no zip-wrapped source. Measured with
+`gh api search/code -f q='".zip" org:OregonAI extension:yml'` (and again for
+`extension:yaml`, 0 hits): the only manifest hit anywhere in the org today is
+federal-reference's. A source whose `url` ends `.zip`, or whose manifest declares
+`format: zip`, now takes a real zip branch: it is unzipped (one member required) and the
+decompressed bytes are hashed as whatever format the member's filename implies, instead of
+falling through to html/binary hashing of the archive. If a corpus already has a `.zip`
+source with a seeded `sha256`, that seed was necessarily taken over the wrong bytes (there
+was no other way to compute it before this release) — clear it to `""` and let the next
+`corpus-detect-changes` run reseed it correctly (ADR 0015), rather than assuming it happens
+to still match. federal-reference's one such source shipped with `sha256: ""` for exactly
+this reason and needs no action.
+
+A zip that does not hold exactly one member is refused rather than guessed at: it is now
+`corpus-detect-changes`'s own `archive_unreadable` outcome, reported in `DRIFT.md`'s "Not
+comparable" section and kept out of `failed`/`access-failures.json`/the systemic-failure
+alarm, because the bytes did arrive — this is a fact about the archive's contents, not about
+access. Bytes that are not a zip at all at a `.zip` url (an error or login page) are handled
+differently again: they fall back to being hashed as `format: html`, matching the inference
+every other unrecognised extension already gets, rather than raising. Nothing to do unless
+your corpus reads `source-outcomes.json`'s outcome vocabulary directly — it now has a
+seventh value.

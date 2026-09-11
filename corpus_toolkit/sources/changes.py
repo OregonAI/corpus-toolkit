@@ -20,7 +20,12 @@ group files — see `corpus_toolkit.config.load_source_manifest_groups`):
       sha256: <content_hash of the source as of the last review; "" until seeded>
       format: html   # optional; inferred from the URL's extension otherwise (pdf/xls/xlsx/
                      # docx/xml/zip recognised, else html). `zip` unwraps a single-member
-                     # archive and hashes the decompressed bytes (corpus-toolkit#199).
+                     # archive and hashes the decompressed bytes (corpus-toolkit#199). A zip
+                     # holding zero or more than one member is refused rather than guessed
+                     # at -- reported as its own "archive_unreadable" outcome, kept out of
+                     # `failed`/access-failures.json because the bytes did arrive. Bytes
+                     # that are not a zip at all fall back to `format: html` instead of
+                     # raising, matching the fallback every other extension already gets.
       watch:         # optional, json sources only (corpus-toolkit#72): hash ONLY these
         - rowsUpdatedAt          # paths, so vendor counters that move on their own are
         - columns[].name         # inert by construction. Absent = hash the whole document.
@@ -36,8 +41,11 @@ the next run on. The manifest edit rides the same PR as the rest of the run's st
 the new baseline without re-ingesting.
 
 Do NOT seed from a document's frontmatter `source_sha256`. That is a different hash over
-different input (`hash_snapshot`, over committed `.txt`), and the two agree only for
-image-only scans where both fall back to raw bytes.
+different input (`hash_snapshot`, over committed `.txt`), and the two agree only when BOTH
+fall back to the raw-byte hash -- i.e. the fetched bytes' extracted text and the committed
+`.txt` are each under `content_hash`'s 200-normalized-char floor. This is not implied by
+"the source is an image-only scan": a corpus that commits substantial OCR text for its
+scans will not see agreement even there (corpus-toolkit#175).
 
 AN UNSEEDED SOURCE IS NOT A CHANGED SOURCE (ADR 0010, corpus-toolkit#145). `sha256: ''`
 compares unequal to everything, so it is reported `no_baseline`, seeded, and never counted
@@ -109,8 +117,8 @@ import yaml
 from corpus_toolkit import config as config_mod
 from corpus_toolkit.config import (iter_manifest_sources,
                                    validate_watch_declarations)
-from corpus_toolkit.repo import (WatchedDocumentUnreadable, WatchedPathMissing,
-                                 content_hash)
+from corpus_toolkit.repo import (ArchiveUnreadable, WatchedDocumentUnreadable,
+                                 WatchedPathMissing, ZIP_MEMBER_FORMATS, content_hash)
 from corpus_toolkit.sources import drift_report, tls
 
 USER_AGENT = "corpus-toolkit-change-detector"
@@ -198,12 +206,19 @@ def fetch(url: str) -> bytes:
     return resp.content
 
 
+# repo.py's member-format vocabulary plus "zip" itself: a URL, unlike a decompressed
+# member's name, can legitimately end `.zip`. Sharing `ZIP_MEMBER_FORMATS` rather than
+# listing the five extensions again keeps the two vocabularies from drifting apart --
+# changes.py already imports from repo.py, so this adds no cycle.
+_URL_FORMATS = ZIP_MEMBER_FORMATS | {"zip"}
+
+
 def _format_for(url: str, declared: str | None) -> str:
     if declared:
         return declared
     path = url.lower().split("?")[0]
     ext = path.rsplit(".", 1)[-1] if "." in path.rsplit("/", 1)[-1] else "html"
-    return ext if ext in ("pdf", "xls", "xlsx", "docx", "xml", "zip") else "html"
+    return ext if ext in _URL_FORMATS else "html"
 
 
 # AN ALLOWLIST, for the same reason the feature itself is one: a `watch` list needs a json
@@ -742,7 +757,7 @@ class SourceOutcome(NamedTuple):
     (corpus-toolkit#160) writes one of per source, so that "was this compared" never has to
     be inferred from a source's absence the way `changed-sources.tsv` alone requires.
 
-    `outcome` is ONE OF SIX MUTUALLY EXCLUSIVE STRINGS, chosen the same way the fetch loop
+    `outcome` is ONE OF SEVEN MUTUALLY EXCLUSIVE STRINGS, chosen the same way the fetch loop
     already branches — this does not re-decide anything, it names the branch that was
     already taken:
 
@@ -755,6 +770,9 @@ class SourceOutcome(NamedTuple):
     * `"fetch_failed"` — the fetch itself raised.
     * `"unreadable_json"` — a `watch`-declared source returned a body that will not parse.
     * `"watch_path_missing"` — a `watch`-declared source parsed, but a declared path is gone.
+    * `"archive_unreadable"` — a `zip`-format source's bytes did not hold exactly one member
+      (corpus-toolkit#199). Bytes fetched fine and were a readable zip; the shape just is
+      not the single-file archive this platform's zip sources are today.
 
     `had_baseline` rides along SEPARATELY from `outcome`, because a source can be both
     unseeded AND fetch-failed — the fetch loop's own comment on `stats["uncompared"]` notes
@@ -770,7 +788,7 @@ class SourceOutcome(NamedTuple):
 
 
 OUTCOMES = ("changed", "unchanged", "no_baseline", "fetch_failed",
-            "unreadable_json", "watch_path_missing")
+            "unreadable_json", "watch_path_missing", "archive_unreadable")
 """The outcome vocabulary, declared once (corpus-toolkit#160).
 
 A tuple rather than six string literals scattered across the builder, the docstrings and the
@@ -946,11 +964,13 @@ class RunVerdict(NamedTuple):
     refused_write: bool
     watch_failed: int
     unreadable: int
+    archive_unreadable: int
 
     @property
     def red(self) -> bool:
         return bool(self.strict_failed or self.systemic or self.nothing_checked
-                    or self.refused_write or self.watch_failed or self.unreadable)
+                    or self.refused_write or self.watch_failed or self.unreadable
+                    or self.archive_unreadable)
 
     def reasons(self) -> list[str]:
         out = []
@@ -966,6 +986,9 @@ class RunVerdict(NamedTuple):
             out.append(f"{self.watch_failed} watched source(s) lack a declared path")
         if self.unreadable:
             out.append(f"{self.unreadable} watched source(s) returned a body that is not json")
+        if self.archive_unreadable:
+            out.append(f"{self.archive_unreadable} zip source(s) did not hold exactly one "
+                       f"member")
         return out
 
 
@@ -1021,7 +1044,7 @@ def main():
     pattern_hits = [0] * len(patterns)
     pattern_bytes = [0] * len(patterns)
     n_normalizable = normalizable_bytes = n_normalizable_in_scope = 0
-    changed, failed, watch_failed, unreadable = [], [], [], []
+    changed, failed, watch_failed, unreadable, archive_unreadable = [], [], [], [], []
     # One SourceOutcome per in-scope source, appended in the same branch that already
     # decides what happened to it (corpus-toolkit#160) — see SourceOutcome's docstring for
     # the vocabulary. This is `source-outcomes.json`'s per-source list, in detection order.
@@ -1154,6 +1177,20 @@ def main():
             outcomes.append(SourceOutcome(gname, sid, url, "watch_path_missing", bool(old)))
             print(f"WATCH PATH MISSING {sid}: {url} ({e})", file=sys.stderr)
             continue
+        except ArchiveUnreadable as e:
+            # NOT A FETCH FAILURE, same reasoning as WatchedPathMissing above: the bytes
+            # arrived and were a readable zip, they just did not hold the single member
+            # `content_hash` requires (corpus-toolkit#199). Counting it as our access
+            # failing would send the operator to audit connectivity for a source that is
+            # reachable and feed it into the >20% SYSTEMIC alarm meant for "our crawler is
+            # blocked". Bytes that are not a zip at all do NOT reach here -- content_hash
+            # falls back to hashing them as html instead of raising.
+            archive_unreadable.append(sid)
+            stats["uncompared"] += 1
+            uncompared_counts[(gname, sid)] = uncompared_counts.get((gname, sid), 0) + 1
+            outcomes.append(SourceOutcome(gname, sid, url, "archive_unreadable", bool(old)))
+            print(f"ARCHIVE UNREADABLE {sid}: {url} ({e})", file=sys.stderr)
+            continue
         except Exception as e:
             failed.append(sid)
             # Counted here for the same reason as the two above: this source was NOT
@@ -1273,11 +1310,13 @@ def main():
 
     # ONE DEFINITION of "not compared", used on every line that says it: in scope and never
     # compared to a baseline. Three adjacent lines once carried three different sets.
-    not_compared = len(failed) + len(watch_failed) + len(unreadable)
+    not_compared = len(failed) + len(watch_failed) + len(unreadable) + len(archive_unreadable)
     why = ", ".join(filter(None, [
         f"{len(failed)} fetch failed" if failed else "",
         f"{len(watch_failed)} watched path missing" if watch_failed else "",
-        f"{len(unreadable)} body not parseable as json" if unreadable else ""]))
+        f"{len(unreadable)} body not parseable as json" if unreadable else "",
+        f"{len(archive_unreadable)} archive not a single member" if archive_unreadable
+        else ""]))
     uncompared = f"{not_compared} not compared ({why}), " if not_compared else ""
     print(f"\n{len(drifted)} changed, {len(failed)} fetch failure(s), {uncompared}"
           f"{n_unseeded} with no recorded baseline, of {n_total} checked.")
@@ -1396,6 +1435,20 @@ def main():
                   f"{len(watch_failed)} source(s) were not compared because a declared "
                   f"`watch` path is absent from the fetched document: "
                   + ", ".join(watch_failed[:20]))
+    if archive_unreadable:
+        # NOT with the fetch failures below: the bytes arrived and were a readable zip, they
+        # just did not hold the single member `content_hash` requires. The remedy is
+        # reviewing the archive's contents, not chasing the network.
+        print(f"{len(archive_unreadable)} zip source(s) did not hold exactly one member, so "
+              f"they were NOT compared: "
+              + ", ".join(archive_unreadable[:20])
+              + ("…" if len(archive_unreadable) > 20 else "")
+              + ". The bytes fetched fine; this is a fact about the archive's contents.",
+              file=sys.stderr)
+        _annotate("Archives not a single member",
+                  f"{len(archive_unreadable)} source(s) were not compared because the "
+                  f"fetched zip did not hold exactly one member: "
+                  + ", ".join(archive_unreadable[:20]))
     if failed:
         print("failed sources (a fact about our access, not about upstream): "
               + ", ".join(failed[:20]) + ("…" if len(failed) > 20 else ""))
@@ -1416,7 +1469,8 @@ def main():
     verdict = RunVerdict(strict_failed=bool(failed and args.strict), systemic=bool(systemic),
                          nothing_checked=nothing_checked,
                          refused_write=bool(recorded and recorded["refused"]),
-                         watch_failed=len(watch_failed), unreadable=len(unreadable))
+                         watch_failed=len(watch_failed), unreadable=len(unreadable),
+                         archive_unreadable=len(archive_unreadable))
 
     # THE ROLLING VIEW (ADR 0015): last run's state with every in-scope observation
     # replaced, held for groups this run did not check, pruned for sources retired from
@@ -1437,7 +1491,8 @@ def main():
                    "unchanged": sum(1 for o in outcomes if o.outcome == "unchanged"),
                    "seeded": len(seeded_keys), "accepted": len(accepted_keys),
                    "fetch_failed": len(failed), "unreadable_json": len(unreadable),
-                   "watch_path_missing": len(watch_failed)},
+                   "watch_path_missing": len(watch_failed),
+                   "archive_unreadable": len(archive_unreadable)},
     }
     drift_report.write_drift_state(config.root, state, last_run)
     drift_report.write_report(config.root, drift_report.render_drift_md(

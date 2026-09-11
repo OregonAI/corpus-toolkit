@@ -153,6 +153,21 @@ class WatchedDocumentUnreadable(WatchedPathMissing):
     """
 
 
+class ArchiveUnreadable(ValueError):
+    """`content_hash(..., fmt="zip")` could not get exactly one member out of the archive:
+    it holds zero or more than one file. A ValueError subclass so `pytest.raises(ValueError)`
+    against the pre-existing refusal keeps working, and its own class for the same reason
+    `WatchedDocumentUnreadable` is its own class rather than reported as a fetch failure:
+    the bytes ARRIVED and were a readable zip -- this is a fact about the archive's shape,
+    not about whether our access worked (corpus-toolkit#199). Picking a member anyway would
+    make the choice invisible in the manifest and unreproducible by a corpus that unzips the
+    same archive differently.
+
+    Bytes that are not a zip at all are a different case and do NOT raise this -- see
+    `_single_zip_member`.
+    """
+
+
 def validate_watch(watch, where: str = ""):
     """Check a `watch` list and return it with each path trimmed. Raises ValueError.
 
@@ -357,30 +372,38 @@ def _watched_digest(raw: bytes, watch) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-# Same non-declared-extension vocabulary as `changes._format_for` (kept independent, not
-# imported, to avoid a repo.py -> sources.changes -> repo.py cycle): a member with none of
-# these extensions hashes as html, matching what a raw fetch of that filename would get.
-_ZIP_MEMBER_FORMATS = frozenset({"pdf", "xls", "xlsx", "docx", "xml"})
+# The member-format vocabulary content_hash's zip branch resolves a decompressed member's
+# name against. `changes._format_for` (the URL-extension vocabulary) imports this rather
+# than duplicating it -- changes.py already imports WatchedDocumentUnreadable/
+# WatchedPathMissing from this module, so the import direction is already
+# sources.changes -> repo.py and adding this one creates no cycle. Deliberately excludes
+# "zip": a member that is itself a `.zip` is not recursed into -- it hashes as html over
+# the inner archive's raw bytes, like any other extension outside this set -- whereas a URL
+# can legitimately end `.zip` and `_format_for` adds that itself.
+ZIP_MEMBER_FORMATS = frozenset({"pdf", "xls", "xlsx", "docx", "xml"})
 
 
 def _format_for_member_name(name: str) -> str:
     lowered = name.lower()
     ext = lowered.rsplit(".", 1)[-1] if "." in lowered else "html"
-    return ext if ext in _ZIP_MEMBER_FORMATS else "html"
+    return ext if ext in ZIP_MEMBER_FORMATS else "html"
 
 
 def _single_zip_member(raw: bytes) -> tuple[str, bytes]:
-    """The one member of a zip-wrapped source, or a ValueError naming the count.
+    """The one member of a zip-wrapped source, or an ArchiveUnreadable naming the count.
 
     Every zip source on the platform today (OLRC's per-title USLM release points,
     corpus-toolkit#199) wraps exactly one file. A zip that does not is refused rather than
     guessed at: picking a member silently would make the choice invisible in the manifest
-    and unreproducible by a corpus that unzips the same archive differently.
+    and unreproducible by a corpus that unzips the same archive differently. Raises the
+    underlying `zipfile.BadZipFile` uncaught when `raw` is not a zip at all -- the caller
+    (`content_hash`) decides what that means, because it is a different finding from a bad
+    member count.
     """
     with zipfile.ZipFile(BytesIO(raw)) as zf:
         names = [n for n in zf.namelist() if not n.endswith("/")]
         if len(names) != 1:
-            raise ValueError(
+            raise ArchiveUnreadable(
                 f"zip source has {len(names)} member(s), expected exactly 1: {names}")
         return names[0], zf.read(names[0])
 
@@ -394,11 +417,21 @@ def content_hash(raw: bytes, fmt: str,
 
     `fmt="zip"` unwraps a single-member archive first (corpus-toolkit#199 -- OLRC's
     per-title USLM release points are the first such source on the platform) and hashes
-    the decompressed bytes as whatever format the member's own filename implies, via the
-    same rule the URL-extension case below uses. That is what lets a corpus's own
-    ingestion, which typically caches the unzipped member and hashes THAT, reproduce the
-    same digest `corpus-detect-changes` computes by re-fetching and re-unzipping the URL.
-    A zip that does not hold exactly one member raises rather than guessing.
+    the decompressed bytes as whatever format the member's own filename implies, using the
+    same extension vocabulary the URL-extension case below uses (not the identical
+    derivation -- a member name carries no query string to strip). That is what lets a
+    corpus's own ingestion, which typically caches the unzipped member and hashes THAT,
+    reproduce the same digest `corpus-detect-changes` computes by re-fetching and
+    re-unzipping the URL. A zip that does not hold exactly one member raises
+    `ArchiveUnreadable` rather than guessing -- a fact about the archive's shape, kept
+    distinct from a fetch failure so a run does not report our own access as broken over a
+    source that arrived and was simply not the single-file archive this platform's zip
+    sources are today. Bytes that are not a zip at all (a login or error page served at a
+    `.zip` url -- ordinary for civic portals, see `sources.fetch.sniff`) are handled
+    differently still: rather than raise, they fall through to `fmt="html"`, the same
+    inference an unrecognised extension already gets, so a `.zip` url does not become a new
+    way for an unrelated response to crash a run that every other extension survives by
+    degrading to a wrong-but-stable hash.
 
     A json source with no `watch` still gets the raw-byte hash it always got, INCLUDING in a
     corpus that declares `volatile_patterns` -- those are declared corpus-wide and passed for
@@ -438,7 +471,15 @@ def content_hash(raw: bytes, fmt: str,
         # quietly not work for small ones.
         return _watched_digest(raw, watch)
     if fmt == "zip":
-        name, inner = _single_zip_member(raw)
+        try:
+            name, inner = _single_zip_member(raw)
+        except zipfile.BadZipFile:
+            # Not a zip at all -- fall through to the same "unrecognised, so html" inference
+            # `_format_for` already gives any other extension it does not recognise, rather
+            # than let a `.zip` url become the one extension where an ordinary error/login
+            # page (fetch.py's `sniff` docstring: "the normal case for civic portals") raises
+            # instead of degrading to a wrong-but-stable hash. See content_hash's docstring.
+            return content_hash(raw, "html", volatile_patterns)
         return content_hash(inner, _format_for_member_name(name), volatile_patterns)
     if fmt == "pdf":
         proc = subprocess.run(["pdftotext", "-layout", "-", "-"], input=raw,
