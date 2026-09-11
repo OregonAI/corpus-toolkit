@@ -13,7 +13,9 @@ import os
 import re
 import subprocess
 import sys
+import zipfile
 from collections.abc import Sequence
+from io import BytesIO
 from pathlib import Path
 
 import yaml
@@ -355,12 +357,48 @@ def _watched_digest(raw: bytes, watch) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# Same non-declared-extension vocabulary as `changes._format_for` (kept independent, not
+# imported, to avoid a repo.py -> sources.changes -> repo.py cycle): a member with none of
+# these extensions hashes as html, matching what a raw fetch of that filename would get.
+_ZIP_MEMBER_FORMATS = frozenset({"pdf", "xls", "xlsx", "docx", "xml"})
+
+
+def _format_for_member_name(name: str) -> str:
+    lowered = name.lower()
+    ext = lowered.rsplit(".", 1)[-1] if "." in lowered else "html"
+    return ext if ext in _ZIP_MEMBER_FORMATS else "html"
+
+
+def _single_zip_member(raw: bytes) -> tuple[str, bytes]:
+    """The one member of a zip-wrapped source, or a ValueError naming the count.
+
+    Every zip source on the platform today (OLRC's per-title USLM release points,
+    corpus-toolkit#199) wraps exactly one file. A zip that does not is refused rather than
+    guessed at: picking a member silently would make the choice invisible in the manifest
+    and unreproducible by a corpus that unzips the same archive differently.
+    """
+    with zipfile.ZipFile(BytesIO(raw)) as zf:
+        names = [n for n in zf.namelist() if not n.endswith("/")]
+        if len(names) != 1:
+            raise ValueError(
+                f"zip source has {len(names)} member(s), expected exactly 1: {names}")
+        return names[0], zf.read(names[0])
+
+
 def content_hash(raw: bytes, fmt: str,
                  volatile_patterns: Sequence[re.Pattern[bytes]] = (),
                  watch: Sequence[str] | None = None) -> str:
     """Content hash of a freshly-fetched source: sha256 of the whitespace-normalized
     extracted text (pdftotext for PDFs, tag-stripping for HTML/XML). Falls back to
     the raw-byte hash when extraction yields <200 chars (e.g. image-only scans).
+
+    `fmt="zip"` unwraps a single-member archive first (corpus-toolkit#199 -- OLRC's
+    per-title USLM release points are the first such source on the platform) and hashes
+    the decompressed bytes as whatever format the member's own filename implies, via the
+    same rule the URL-extension case below uses. That is what lets a corpus's own
+    ingestion, which typically caches the unzipped member and hashes THAT, reproduce the
+    same digest `corpus-detect-changes` computes by re-fetching and re-unzipping the URL.
+    A zip that does not hold exactly one member raises rather than guessing.
 
     A json source with no `watch` still gets the raw-byte hash it always got, INCLUDING in a
     corpus that declares `volatile_patterns` -- those are declared corpus-wide and passed for
@@ -393,6 +431,9 @@ def content_hash(raw: bytes, fmt: str,
         # not apply -- inheriting it would make this work for large metadata documents and
         # quietly not work for small ones.
         return _watched_digest(raw, watch)
+    if fmt == "zip":
+        name, inner = _single_zip_member(raw)
+        return content_hash(inner, _format_for_member_name(name), volatile_patterns)
     if fmt == "pdf":
         proc = subprocess.run(["pdftotext", "-layout", "-", "-"], input=raw,
                               capture_output=True, check=False)

@@ -15,6 +15,23 @@ notes and the reasoning, and remains the file to read before moving a pin.
 The audience is a corpus deciding whether a bump is safe, so each entry leads with whether
 it can break you.
 
+## v1.36.2 — 2026-09-10
+
+### Fixed — `content_hash()` can now hash a zip-wrapped source
+
+Nothing to do unless a source's `url` ends `.zip` or declares `format: zip` — no corpus does
+today. `_format_for` had no zip branch, so such a source was hashed as html/binary over the
+ARCHIVE bytes, not its content. OLRC's per-title USLM release points (e.g.
+`.../xml_usc20@119-103.zip`, first used today by federal-reference's ADR-0006 work) are the
+first zip-wrapped source on the platform — and the corpus's own ingestion caches the
+DECOMPRESSED member, so a baseline seeded from that hash could never be reproduced by a later
+`corpus-detect-changes` run against the same URL, reporting `changed` forever.
+`content_hash(raw, "zip")` now unzips (exactly one member — every known zip source on the
+platform has one; more than one raises rather than guessing) and hashes the decompressed
+bytes as whatever format the member's own filename implies, matching what a corpus that
+caches the unzipped content computes on its own ingestion. Every existing format hashes
+byte-for-byte as before (corpus-toolkit#199).
+
 ## v1.36.1 — 2026-09-05
 
 ### Fixed — a declared volatile pattern now applies to the under-200-character byte fallback too

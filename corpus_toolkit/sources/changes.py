@@ -18,7 +18,9 @@ group files — see `corpus_toolkit.config.load_source_manifest_groups`):
     - id: some-doc-id
       url: https://...
       sha256: <content_hash of the source as of the last review; "" until seeded>
-      format: html   # optional; inferred from the URL's extension otherwise
+      format: html   # optional; inferred from the URL's extension otherwise (pdf/xls/xlsx/
+                     # docx/xml/zip recognised, else html). `zip` unwraps a single-member
+                     # archive and hashes the decompressed bytes (corpus-toolkit#199).
       watch:         # optional, json sources only (corpus-toolkit#72): hash ONLY these
         - rowsUpdatedAt          # paths, so vendor counters that move on their own are
         - columns[].name         # inert by construction. Absent = hash the whole document.
@@ -201,7 +203,7 @@ def _format_for(url: str, declared: str | None) -> str:
         return declared
     path = url.lower().split("?")[0]
     ext = path.rsplit(".", 1)[-1] if "." in path.rsplit("/", 1)[-1] else "html"
-    return ext if ext in ("pdf", "xls", "xlsx", "docx", "xml") else "html"
+    return ext if ext in ("pdf", "xls", "xlsx", "docx", "xml", "zip") else "html"
 
 
 # AN ALLOWLIST, for the same reason the feature itself is one: a `watch` list needs a json

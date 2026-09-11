@@ -1274,3 +1274,16 @@ streamed document). If it does, declare the per-request tokens in `volatile_patt
 each source, prove the mirrored text equals what upstream serves today before refreshing its
 baseline -- the rule from the 2026-09 stabilisation pass: a baseline moves by ingest, and a
 refresh is only for the case where the hash's input changed and the words did not.
+
+
+### v1.36.2 — a `.zip` source now hashes as `zip`, not `html`
+
+Nothing to do for a corpus with no zip-wrapped source (every corpus but federal-reference,
+today). A source whose `url` ends `.zip`, or whose manifest declares `format: zip`, now takes
+a real zip branch: it is unzipped (one member required) and the decompressed bytes are hashed
+as whatever format the member's filename implies, instead of falling through to html/binary
+hashing of the archive. If a corpus already has a `.zip` source with a seeded `sha256`, that
+seed was necessarily taken over the wrong bytes (there was no other way to compute it before
+this release) — clear it to `""` and let the next `corpus-detect-changes` run reseed it
+correctly (ADR 0015), rather than assuming it happens to still match. federal-reference's one
+such source shipped with `sha256: ""` for exactly this reason and needs no action.
