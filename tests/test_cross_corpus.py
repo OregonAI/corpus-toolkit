@@ -368,6 +368,53 @@ class TestSiblingResolution(CrossCorpusTestCase):
         self.assertTrue(out["sibling_index_stale"])
         self.assertIn("STALE", out["note"])
 
+    def test_stale_sibling_index_no_hits_does_not_read_as_confirmed_absence(self):
+        """corpus-toolkit#201. The branch above (`test_stale_cache_surfaces_on_the_
+        resolve_response`) already qualifies `note` when something resolves from a
+        stale cache. The no-hits branch — most citations into a sparse sibling, and
+        the DOMINANT path once executive-regulatory-frameworks#400 wires in
+        `federal-usc` — dropped the same qualifier: `sibling_index_stale` was set,
+        but `note`, the field an LLM caller actually reads, said only 'index loaded,
+        but it holds no document', indistinguishable from a fresh, honest miss.
+        'Could not refresh' must never read as 'checked and absent'."""
+        repo = self.tmp / "repo"
+        cfg = make_corpus(repo, index_url="https://nonexistent.invalid/corpus-index.json")
+        cache = repo / "_meta" / ".cache" / "siblings"
+        cache.mkdir(parents=True)
+        cached = cache / "executive-regulatory-frameworks.json"
+        cached.write_text(json.dumps(SIBLING_INDEX))
+        old = time.time() - 10 * 86400
+        os.utime(cached, (old, old))
+        register_scheme("oar-rule", r"OAR\s+(?P<num>\d+-\d+-\d+)", "oar-{num}",
+                        corpus="executive-regulatory-frameworks")
+
+        out = self.framework(cfg).resolve_citation("OAR 999-999-9999")
+
+        self.assertTrue(out["unresolved"])
+        self.assertEqual(out["matches"], [])
+        self.assertNotIn("sibling_unavailable", out)      # the sibling WAS consulted
+        self.assertTrue(out["sibling_index_stale"])
+        self.assertIn("STALE", out["note"])
+        self.assertIn("holds no document", out["note"])
+        self.assertIn("NOT evidence the document is absent", out["note"])
+
+    def test_fresh_index_no_hits_note_stays_unqualified(self):
+        """The companion to the test above: a fresh, successfully-loaded index
+        answering honestly must stay clean. If staleness prose showed up here too
+        it would be noise on every ordinary miss, and callers would learn to ignore
+        it — the qualifier is only meaningful because it is NOT always present."""
+        idx = self.tmp / "sibling-index.json"
+        idx.write_text(json.dumps(SIBLING_INDEX))
+        cfg = make_corpus(self.tmp / "repo", index_path=idx)
+        register_scheme("oar-rule", r"OAR\s+(?P<num>\d+-\d+-\d+)", "oar-{num}",
+                        corpus="executive-regulatory-frameworks")
+
+        out = self.framework(cfg).resolve_citation("OAR 999-999-9999")
+
+        self.assertNotIn("sibling_index_stale", out)
+        self.assertNotIn("STALE", out["note"])
+        self.assertIn("holds no document", out["note"])
+
     def test_fresh_cache_is_served_without_a_fetch(self):
         cache = self.tmp / "cache"
         cache.mkdir()
@@ -498,6 +545,30 @@ class TestSiblingResolution(CrossCorpusTestCase):
     def test_loader_never_raises_on_a_garbage_sibling(self):
         sib = Sibling(id="x", index_url="not-a-url://///")
         self.assertIsNone(load_sibling_index(sib, self.tmp / "nonexistent-cache"))
+
+    def test_documents_as_a_json_array_is_unavailable_not_a_crash_or_false_absence(self):
+        """corpus-toolkit#201's two speculative variants, checked against the running
+        code rather than assumed: (1) a wrong-shape `documents` value reading as
+        confident absence for every id at once, and (2) a JSON-array `documents`
+        raising `AttributeError` out of `lookup()`'s `.get(doc_id)` (`remote.py:191`),
+        contradicting this module's own 'degrades, never breaks' docstring.
+
+        Neither reproduces: `_valid()` (`remote.py:83-86`) already requires
+        `documents` to be a `dict` on every path `load_sibling_index` returns through
+        (`_read_json` and `_fetch` both apply it), so a renamed key or an array value
+        is rejected at load time as an ordinary unavailable index, the same outcome
+        `test_malformed_index_is_treated_as_unavailable` proves for a non-dict
+        `documents`. This test pins the exact shape the issue described (a JSON
+        *array*, not merely a non-dict scalar) so a future change to `_valid()` that
+        loosened the check would fail here instead of surfacing as a live
+        false-absence or a raised exception."""
+        bad = self.tmp / "documents-is-array.json"
+        bad.write_text(json.dumps({"corpus": "x", "documents": [
+            ["Title", "statute", "path"],
+        ]}))
+        sib = Sibling(id="executive-regulatory-frameworks", index_path=bad)
+
+        self.assertIsNone(load_sibling_index(sib, self.tmp / "cache"))
 
 
 class TestBackwardCompatibility(CrossCorpusTestCase):
