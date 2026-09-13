@@ -2,6 +2,31 @@
 
 Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pins.
 
+## v1.36.3 — 2026-09-13
+
+### Fixed — `resolve_citation`'s no-hits note now says when the sibling's index it consulted is stale
+
+Nothing breaks: `note` grows extra prose only when a matched sibling's cached index is
+stale AND nothing resolved; an ordinary fresh no-hits note is byte-for-byte unchanged, and
+no key is added, removed or renamed. `resolve_citation` (`corpus_toolkit/mcp/framework.py`)
+appended a staleness qualifier to `note` in exactly one branch — the one where something
+already resolved. The no-hits branch — most citations into a sparse sibling, and now the
+DOMINANT path once `executive-regulatory-frameworks#400` registers a `federal-usc` scheme
+(65 of 66 U.S.C. sections resolve to no hits there) — never looked at
+`sibling_status["stale"]` at all, so a day-old cached copy of a sibling's index (served
+because the sibling's GitHub Pages briefly 502s, per `remote.py`'s own "prefers a STALE
+cache over nothing" contract) read exactly like a fresh, honest miss: `sibling_index_stale:
+true` was still set on the response, but `note` — the field an LLM caller actually reads —
+said nothing about it. "Could not refresh" read as "checked and absent". `note` now says
+the sibling's index is STALE and that a no-hits answer from it is not confirmed absence,
+whenever `sibling_status["stale"]` is true; a fresh, successfully-loaded index answering
+honestly stays unqualified. Two smaller variants flagged alongside this in
+corpus-toolkit#201 were investigated and NOT reproduced: `remote.py`'s `_valid()` already
+rejects any `documents` value that is not a `dict` (a renamed key, a JSON array) at load
+time, on every path `load_sibling_index` returns through, so neither a false confident
+absence nor an uncaught `AttributeError` can reach `resolve_citation` today — pinned by a
+new test using the exact array shape the issue described (corpus-toolkit#201).
+
 This file exists because `docs/reference-architecture.md` mandates a CHANGELOG in the repo
 anatomy every corpus must follow, and `repo.py` hardcodes `CHANGELOG.md` into
 `NON_CONTENT_NAMES` on the assumption it exists — while the toolkit itself had none

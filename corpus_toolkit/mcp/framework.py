@@ -1105,10 +1105,24 @@ class CorpusFramework:
                     f"NOT evidence the document is absent; retry, or check the sibling "
                     f"corpus directly")
             elif sibling_status:
-                out["note"] = resolver_note or (
+                # "index loaded, but it holds no document" is a CHECKED negative — the
+                # sibling was consulted and answered. When the copy consulted is stale
+                # (corpus-toolkit#201), that answer is not confirmed: a document ingested
+                # into the sibling since the cache was last refreshed reads identically to
+                # one that was never there. Said in `note` itself, not only in the separate
+                # `sibling_index_stale` key — `note` is the field an LLM caller actually
+                # reads, and the two states must never collapse into the same sentence.
+                base_note = resolver_note or (
                     f"scheme '{matched_scheme}' matched and sibling corpus "
                     f"'{matched_corpus}'s index loaded, but it holds no document with "
                     f"id(s) {', '.join(cands)}")
+                if sibling_status.get("stale"):
+                    out["note"] = (
+                        f"sibling corpus '{matched_corpus}'s cached index is STALE "
+                        f"(could not be refreshed) — this is NOT evidence the document "
+                        f"is absent; {base_note}")
+                else:
+                    out["note"] = base_note
             else:
                 out["note"] = resolver_note or (
                     f"scheme '{matched_scheme}' matched but no such document exists"
