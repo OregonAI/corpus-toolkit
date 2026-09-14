@@ -18,7 +18,12 @@ contains tooling and specs only — never civic content.
   same PR; breaking changes bump the major version.
 - Reusable workflows must stay corpus-agnostic: all corpus specifics come
   from the calling repo's `_meta/corpus.yml` and manifest.
-- Conventional commits. All changes via PR.
+- Commit subjects name the scope — the module, file, or doc touched — then what
+  the change does, with an issue reference where one applies:
+  `content_hash: give zip-wrapped sources a real hash branch (corpus-toolkit#199)`.
+  Not conventional-commit type prefixes (`feat:`/`fix:`) — the repo ran those for
+  a few weeks in August and dropped them; a scope-first subject states the
+  decision, which `fix: archive handling` would not. All changes via PR.
 - Never weaken a guardrail (validator, diff check, review gate) to make a
   corpus ingest easier; fix the corpus instead.
 
