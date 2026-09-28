@@ -2,6 +2,22 @@
 
 Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pins.
 
+## v1.36.4 — 2026-09-28
+
+### Fixed — `publish-index` no longer requires `toolkit-ref`, so a caller on `@v1` can start
+
+Nothing breaks: a caller that still passes `toolkit-ref` gets exactly what it asked for.
+ADR-0014 made `toolkit-ref` optional in every reusable workflow, defaulting to the
+workflow's own commit (`github.job_workflow_sha`), and corpora dropped the input when they
+moved to `@v1`. `publish-index.yml` was missed: it kept `required: true` with no default,
+so GitHub rejected the call before any job existed. corpus-template's `publish-index` has
+been a `startup_failure` on every run since 2026-09-03, and so is the copy in any corpus
+instantiated from the template since then. It now takes the same optional input and falls
+back to its own commit, like the other reusable workflows. `tests/test_reusable_workflows.py`
+held this shape for a hand-written list of four workflows that did not name
+`publish-index`; it now discovers every reusable workflow that declares the input, and
+fails on the old file.
+
 ## v1.36.3 — 2026-09-13
 
 ### Fixed — `resolve_citation`'s no-hits note now says when the sibling's index it consulted is stale
