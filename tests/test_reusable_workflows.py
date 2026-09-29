@@ -12,7 +12,19 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WF = ROOT / ".github" / "workflows"
-REUSABLE = ["validate-frontmatter", "verify-provenance", "check-links", "detect-upstream-changes"]
+
+
+def _is_reusable_with_toolkit_ref(path):
+    on = yaml.safe_load(path.read_text())
+    on = on.get(True, on.get("on")) or {}
+    call = on.get("workflow_call") if isinstance(on, dict) else None
+    return bool(call) and "toolkit-ref" in (call.get("inputs") or {})
+
+
+# Discovered, not listed. The hand-written list this replaced named four workflows and
+# missed publish-index, which kept `required: true` through ADR-0014 and failed every
+# caller at startup on the `@v1` float (corpus-template, 2026-09-03 onward).
+REUSABLE = sorted(p.stem for p in WF.glob("*.yml") if _is_reusable_with_toolkit_ref(p))
 
 
 def _load(name):
@@ -26,6 +38,11 @@ def _steps(d):
     for job in d["jobs"].values():
         for step in job.get("steps", []):
             yield step
+
+
+def test_discovery_finds_every_reusable_workflow_with_the_input():
+    assert {"validate-frontmatter", "verify-provenance", "check-links",
+            "detect-upstream-changes", "publish-index"} <= set(REUSABLE)
 
 
 def test_toolkit_ref_is_optional_in_every_reusable_workflow():
