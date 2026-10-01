@@ -12,11 +12,21 @@ sequentially — not just the call-count tests. Measured on this worktree (N=200
 fixture: 50 documents, 3000 graph edges, a 500-document sibling index) against the same
 fixture on `origin/main`:
 
-| hot path | before | after |
+| hot path | before | after (back-to-back) |
 |---|---:|---:|
 | `ensure_index()` (`repo_state` x2 git) | 2.13 ms/call | 0.11 ms/call |
 | `resolve_citation()` (sibling index) | 4.23 ms/call | 0.88 ms/call |
 | `corpus_overview()` (graph edge count) | 2.53 ms/call | 1.03 ms/call |
+
+The "after" column is the best case: all N calls land inside one `ensure_index()` TTL
+window, so only the first pays the `git` cost. That is not the production traffic shape —
+sequential agent/MCP tool calls are usually spaced further apart than the 2s default —
+so the benchmark also runs a spaced case (a sleep longer than the TTL between calls) for
+`ensure_index()`: every one of those calls pays the ~114 ms `git` cost again, same as
+`origin/main`. The 2s window is now also tunable per deployment via
+`CORPUS_TOOLKIT_REPO_STATE_TTL_SECONDS` (see the `repo_state()` entry below), so an
+operator whose checkout only changes on deploy can widen it well past what a benchmark's
+back-to-back burst would ever need.
 
 Production numbers (ERF's 75k-file corpus and ~7 MiB sibling index) get re-measured by an
 operator after release, per the issue's own acceptance criteria.
@@ -39,9 +49,13 @@ corpus-toolkit#207. `_resolve_in_sibling` (`corpus_toolkit/mcp/framework.py`) ca
 `load_sibling_index` (`corpus_toolkit/remote.py`) on every call with no in-process memo,
 so a warm server re-reads and `json.loads`s the cached index file on every single
 resolution — ERF's sibling index is ~7 MiB. `_read_json` now memoizes the parsed payload
-keyed on the file's identity (path, mtime, size): an unchanged file is served from memory,
-and a rewritten one (a refetch landing, or a sibling rebuilding its own local index) is
-reloaded on the very next call, not after some staleness window.
+keyed on the file's path, with the mtime/size stat tuple stored alongside it: an unchanged
+file is served from memory, and a rewritten one (a refetch landing, or a sibling rebuilding
+its own local index) replaces that same slot on the very next call, not after some
+staleness window. One entry per path — an earlier draft keyed the memo on the full
+(path, mtime, size) tuple, which left every superseded payload alive for the life of the
+process (an unbounded leak on a long-lived server refetching on a TTL); fixed before
+release.
 
 ### Fixed — `ensure_index()` no longer shells out to `git` twice on every tool call
 
@@ -57,6 +71,15 @@ request for information that changes on a commit cadence, not a per-request one.
 `repo_state()` now memoizes its result per corpus root for `DEFAULT_REPO_STATE_TTL_SECONDS`
 (2.0s; pass `ttl_seconds=0` to force a live recompute), so a burst of calls inside the
 window costs one pair of subprocess spawns instead of one pair each.
+
+This TTL only removes the `git` cost for calls landing within the window of each other;
+sequential production calls spaced further apart than that still pay it every time, same
+as before this change — the benchmark's spaced `ensure_index()` case above shows exactly
+that. The window is a hard-coded constant no longer: set the
+`CORPUS_TOOLKIT_REPO_STATE_TTL_SECONDS` env var (read fresh on every call, not frozen at
+import time) to tune it per deployment — a production checkout that only changes on
+deploy can set this far above 2s without a code change. An unparseable or negative value
+falls back to the 2.0s default.
 
 ## v1.36.4 — 2026-09-28
 
