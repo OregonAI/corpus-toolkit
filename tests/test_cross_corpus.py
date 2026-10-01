@@ -781,6 +781,35 @@ class TestSiblingIndexMemo(CrossCorpusTestCase):
             "it must be keyed on the file's identity (path + mtime/size), not just "
             "its path"))
 
+    def test_rewriting_the_same_path_twice_does_not_grow_the_memo(self):
+        """The earlier version of this memo keyed on (path, mtime_ns, size), so every
+        rewrite of the same path added a new slot and kept the old parsed payload
+        alive for the life of the process -- an unbounded leak on a long-lived server
+        that refetches a sibling index on a TTL. One path must occupy one slot."""
+        import corpus_toolkit.remote as remote_mod
+
+        idx = self.tmp / "sibling-index.json"
+        idx.write_text(json.dumps(SIBLING_INDEX))
+        sib = Sibling(id="executive-regulatory-frameworks", index_path=idx)
+
+        load_sibling_index(sib, self.tmp / "cache")
+        slots_after_first_load = len(remote_mod._parse_cache)
+
+        for i in range(2):
+            changed = json.loads(json.dumps(SIBLING_INDEX))
+            changed["documents"][f"oar-new-{i}"] = ["New Doc", "administrative-rule",
+                                                      f"rules/new-{i}.md"]
+            time.sleep(0.01)                 # ensure a distinguishable mtime
+            idx.write_text(json.dumps(changed))
+            got = load_sibling_index(sib, self.tmp / "cache")
+            self.assertIn(f"oar-new-{i}", got["documents"], (
+                "the memo must serve the freshly rewritten content, not a stale "
+                "payload from before this rewrite"))
+            self.assertEqual(len(remote_mod._parse_cache), slots_after_first_load, (
+                f"rewriting {idx} grew the memo to "
+                f"{len(remote_mod._parse_cache)} entries; a rewrite of an already-"
+                f"cached path must replace its slot, not add a new one"))
+
     def test_fresh_cache_reads_across_many_resolve_calls_parse_json_once(self):
         """The end-to-end path: `_resolve_in_sibling`, called repeatedly through
         `resolve_citation`, must not re-parse the cached index on every call."""
