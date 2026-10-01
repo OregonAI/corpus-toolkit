@@ -8,9 +8,19 @@
 
 Builds a small fixture corpus on disk (a real git repo, a sibling index, and a graph
 with a few thousand edges — the shape, not the scale, of ERF's), warms the server once,
-then times N SEQUENTIAL calls to each hot path and reports the mean per-call overhead in
-milliseconds. Run it on this worktree, then again on `origin/main` (e.g. from a second
-`git worktree add`), to see the before/after numbers quoted in the fix's PR/commit.
+then times N SEQUENTIAL, BACK-TO-BACK calls to each hot path and reports the mean per-call
+overhead in milliseconds. Run it on this worktree, then again on `origin/main` (e.g. from
+a second `git worktree add`), to see the before/after numbers quoted in the fix's
+PR/commit.
+
+Back-to-back calls are the BEST case for `ensure_index()`'s fix specifically: all N calls
+land inside one `DEFAULT_REPO_STATE_TTL_SECONDS` (2s) window, so only the first pays the
+two `git` subprocesses. Production traffic (sequential agent/MCP tool calls) is usually
+spaced further apart than that, so a SECOND, SPACED case also runs a handful of
+`ensure_index()` calls with a sleep longer than the TTL between each one — every one
+of those pays the git cost again, same as `origin/main`. Compare the two `ensure_index()`
+lines below to see how much of the back-to-back number the fix actually buys you once
+calls are not bursty.
 
     python3 scripts/bench_serving_overhead.py [N]   # default N=200
 """
@@ -31,6 +41,7 @@ from corpus_toolkit.config import load as load_config          # noqa: E402
 from corpus_toolkit.mcp.framework import (                      # noqa: E402
     CorpusFramework, clear_schemes, register_scheme,
 )
+from corpus_toolkit.repo import DEFAULT_REPO_STATE_TTL_SECONDS  # noqa: E402
 
 DOC = """\
 ---
@@ -124,8 +135,26 @@ def time_calls(label: str, fn, n: int) -> None:
           f"{elapsed:.3f}s total)")
 
 
+def time_spaced_calls(label: str, fn, n: int, gap_seconds: float) -> None:
+    """Same measurement as time_calls(), but with a sleep LONGER than the TTL between
+    each call, so every call lands outside the memo's window -- the production traffic
+    shape (sequential agent/MCP tool calls spaced seconds apart), as opposed to
+    time_calls()'s back-to-back burst, which is the best case for a TTL-based memo."""
+    fn()                                   # warm: pay any one-time cost first
+    t0 = time.perf_counter()
+    for _ in range(n):
+        time.sleep(gap_seconds)
+        fn()
+    elapsed = time.perf_counter() - t0
+    per_call_ms = ((elapsed - n * gap_seconds) / n) * 1000
+    print(f"{label:<45} {per_call_ms:8.3f} ms/call  ({n} calls spaced "
+          f"{gap_seconds:.2f}s apart, sleep excluded)")
+
+
 def main() -> None:
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 200
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    skip_spaced = "--skip-spaced" in sys.argv[1:]
+    n = int(args[0]) if args else 200
     tmp = Path(tempfile.mkdtemp(prefix="corpus-bench-"))
     try:
         clear_schemes()
@@ -135,10 +164,21 @@ def main() -> None:
         f = CorpusFramework(load_config(cfg_path))
 
         print(f"Fixture: {tmp}  (N={n} sequential calls per hot path)\n")
-        time_calls("ensure_index() [repo_state x2 git]", f.ensure_index, n)
+        time_calls("ensure_index() [repo_state x2 git], back-to-back", f.ensure_index, n)
         time_calls("resolve_citation() [sibling index]",
                    lambda: f.resolve_citation("ORS 1.010"), n)
         time_calls("corpus_overview() [graph edge count]", f.corpus_overview, n)
+
+        if skip_spaced:
+            print("\n(--skip-spaced: skipping the spaced ensure_index() case)")
+        else:
+            gap = DEFAULT_REPO_STATE_TTL_SECONDS + 0.2
+            n_spaced = 5   # each call sleeps `gap` seconds; keep this bench fast
+            print(f"\nSame hot path, calls spaced {gap:.1f}s apart (> the "
+                  f"{DEFAULT_REPO_STATE_TTL_SECONDS:.1f}s repo_state TTL) -- the shape "
+                  f"production traffic actually has, not a back-to-back burst:")
+            time_spaced_calls("ensure_index() [repo_state x2 git], spaced",
+                              f.ensure_index, n_spaced, gap)
     finally:
         clear_schemes()
         shutil.rmtree(tmp, ignore_errors=True)

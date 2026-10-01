@@ -30,6 +30,24 @@ NON_CONTENT_NAMES = {"CHANGELOG.md"}
 
 DEFAULT_REPO_STATE_TTL_SECONDS = 2.0
 
+# Env var an operator can set to override DEFAULT_REPO_STATE_TTL_SECONDS without a code
+# change (corpus-toolkit#207 review: the 2.0s constant could not be tuned per deployment,
+# and production checkouts that change only on deploy can tolerate a much longer window
+# than a dev loop that commits every few seconds).
+REPO_STATE_TTL_ENV_VAR = "CORPUS_TOOLKIT_REPO_STATE_TTL_SECONDS"
+
+
+def _default_ttl_seconds() -> float:
+    raw = os.environ.get(REPO_STATE_TTL_ENV_VAR)
+    if raw is None:
+        return DEFAULT_REPO_STATE_TTL_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_REPO_STATE_TTL_SECONDS
+    return value if value >= 0 else DEFAULT_REPO_STATE_TTL_SECONDS
+
+
 # root (resolved, as str) -> (monotonic timestamp it was computed, the fingerprint).
 #
 # `ensure_index()` calls `repo_state()` on EVERY backend operation (corpus-toolkit#207)
@@ -43,15 +61,23 @@ DEFAULT_REPO_STATE_TTL_SECONDS = 2.0
 _state_cache: dict[str, tuple[float, str]] = {}
 
 
-def repo_state(root: Path, ttl_seconds: float = DEFAULT_REPO_STATE_TTL_SECONDS) -> str:
+def repo_state(root: Path, ttl_seconds: float | None = None) -> str:
     """Cheap fingerprint of the corpus: HEAD commit + hash of `git status`
     porcelain. Used as a cache-invalidation key by the MCP framework's FTS
     index and any other derived-data cache.
 
-    Memoized for `ttl_seconds` (default 2s) per resolved root: a burst of calls within
-    the window is served from memory, and the two `git` subprocesses run again once the
-    window has passed. `ttl_seconds=0` always recomputes — the escape hatch a caller that
-    needs the true live state (or a test proving invalidation) can reach for.
+    Memoized for `ttl_seconds` per resolved root: a burst of calls within the window is
+    served from memory, and the two `git` subprocesses run again once the window has
+    passed. `ttl_seconds=0` always recomputes — the escape hatch a caller that needs the
+    true live state (or a test proving invalidation) can reach for.
+
+    `ttl_seconds=None` (the default) reads `DEFAULT_REPO_STATE_TTL_SECONDS` (2.0s) unless
+    the operator has set the `CORPUS_TOOLKIT_REPO_STATE_TTL_SECONDS` env var, read fresh
+    on every call rather than frozen at import time — a production deploy whose checkout
+    changes only on release can set this far higher than a dev loop that commits every
+    few seconds, without a code change. An unparseable or negative value falls back to
+    the default rather than raising, same posture as the rest of this module's "never
+    break serving over a derived value" rule.
 
     This trades up to `ttl_seconds` of staleness for the subprocess cost. A commit or a
     working-tree edit still invalidates the result; it just may take up to `ttl_seconds`
@@ -59,6 +85,8 @@ def repo_state(root: Path, ttl_seconds: float = DEFAULT_REPO_STATE_TTL_SECONDS) 
     fetch cost. The FTS cache a caller keys off this value is not safety-critical — a
     stale read for up to the TTL window serves slightly-behind search results, not a
     wrong answer about anything load-bearing."""
+    if ttl_seconds is None:
+        ttl_seconds = _default_ttl_seconds()
     key = str(Path(root).resolve())
     now = time.monotonic()
     if ttl_seconds > 0:
