@@ -86,12 +86,35 @@ def _valid(payload) -> bool:
     return isinstance(payload, dict) and isinstance(payload.get("documents"), dict)
 
 
+# (resolved path as str, mtime_ns, size) -> parsed, valid payload.
+#
+# `load_sibling_index` is called on EVERY `_resolve_in_sibling` call with no memo
+# (corpus-toolkit#207): a warm server re-reads and `json.loads`s the cached file every
+# time, and ERF's sibling index is ~7 MiB. Keyed on the file's identity rather than a
+# TTL, so a rewritten cache file (a refetch, or a local index a sibling corpus rebuilt)
+# is reloaded on the very next call instead of serving a window of staleness — this is
+# cheaper to get exactly right than the repo_state() TTL in repo.py, because `stat()` is
+# the only extra cost of checking identity, not a second subprocess.
+_parse_cache: dict[tuple[str, int, int], dict] = {}
+
+
 def _read_json(path: Path):
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    cached = _parse_cache.get(key)
+    if cached is not None:
+        return cached
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return payload if _valid(payload) else None
+    if not _valid(payload):
+        return None
+    _parse_cache[key] = payload
+    return payload
 
 
 def _mark(payload: dict, source: str) -> dict:

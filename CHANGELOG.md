@@ -4,6 +4,18 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Fixed — a sibling corpus's index is no longer re-parsed on every cross-corpus resolution
+
+Nothing breaks: `load_sibling_index`'s resolution order, TTL/refetch and stale-cache
+fallback are all unchanged; only a re-read of the SAME unchanged file is skipped.
+corpus-toolkit#207. `_resolve_in_sibling` (`corpus_toolkit/mcp/framework.py`) calls
+`load_sibling_index` (`corpus_toolkit/remote.py`) on every call with no in-process memo,
+so a warm server re-reads and `json.loads`s the cached index file on every single
+resolution — ERF's sibling index is ~7 MiB. `_read_json` now memoizes the parsed payload
+keyed on the file's identity (path, mtime, size): an unchanged file is served from memory,
+and a rewritten one (a refetch landing, or a sibling rebuilding its own local index) is
+reloaded on the very next call, not after some staleness window.
+
 ### Fixed — `ensure_index()` no longer shells out to `git` twice on every tool call
 
 Nothing breaks: `repo_state()`'s return value and meaning are unchanged, and a commit or
