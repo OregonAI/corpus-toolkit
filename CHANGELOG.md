@@ -4,6 +4,23 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — `scripts/bench_serving_overhead.py`, a local benchmark for the serving path's per-call overhead
+
+corpus-toolkit#207's acceptance criteria asked for a local benchmark proving the
+before/after per-call cost of the three fixes below, on a fixture corpus, warm, called
+sequentially — not just the call-count tests. Measured on this worktree (N=200, small
+fixture: 50 documents, 3000 graph edges, a 500-document sibling index) against the same
+fixture on `origin/main`:
+
+| hot path | before | after |
+|---|---:|---:|
+| `ensure_index()` (`repo_state` x2 git) | 2.13 ms/call | 0.11 ms/call |
+| `resolve_citation()` (sibling index) | 4.23 ms/call | 0.88 ms/call |
+| `corpus_overview()` (graph edge count) | 2.53 ms/call | 1.03 ms/call |
+
+Production numbers (ERF's 75k-file corpus and ~7 MiB sibling index) get re-measured by an
+operator after release, per the issue's own acceptance criteria.
+
 ### Fixed — `corpus_overview` no longer re-sums the whole graph's edge count on every call
 
 Nothing breaks: `graph_edges` is byte-for-byte the same value, computed once instead of
