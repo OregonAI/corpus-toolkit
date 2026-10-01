@@ -481,10 +481,12 @@ class FileBackend:
     def index_status(self, state: str | None = None) -> tuple[bool, str]:
         """Would ensure_index() reuse the cache as-is? -> (current, reason).
 
-        `state` lets a caller that has already computed the content key pass it in.
-        repo_state() shells out to git twice and costs ~114 ms on a 75k-file corpus, and
-        this runs on EVERY tool call via ensure_index -- computing it a second time here
-        would double that for no new information.
+        `state` lets a caller that has already computed the content key pass it in and
+        skip even the memo lookup. repo_state() shells out to git twice and costs ~114 ms
+        on a 75k-file corpus on a cold recompute, but it is memoized per root for
+        DEFAULT_REPO_STATE_TTL_SECONDS (corpus-toolkit#207), so most calls via
+        ensure_index -- which runs on every tool call -- answer from memory instead.
+        Passing `state` still avoids that memo lookup and, on a cold call, the recompute.
 
         Exists so a deploy script can ask this question WITHOUT reimplementing it. The
         answer depends on two independent keys (see ensure_index), and platform-deploy was
