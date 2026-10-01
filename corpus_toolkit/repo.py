@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import zipfile
 from collections.abc import Sequence
 from io import BytesIO
@@ -27,15 +28,50 @@ _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 NON_CONTENT_NAMES = {"CHANGELOG.md"}
 
 
-def repo_state(root: Path) -> str:
+DEFAULT_REPO_STATE_TTL_SECONDS = 2.0
+
+# root (resolved, as str) -> (monotonic timestamp it was computed, the fingerprint).
+#
+# `ensure_index()` calls `repo_state()` on EVERY backend operation (corpus-toolkit#207)
+# to decide whether the FTS cache is still current, which means a warm server pays two
+# `git` subprocess spawns (~114 ms measured on a 75k-file corpus) per call for
+# information that is almost always unchanged since the last call. This memo answers a
+# repeat call inside `ttl_seconds` from memory instead of re-shelling out.
+#
+# A plain dict, not an LRU: one entry per corpus root a process ever serves, which for
+# every deployed shape of this toolkit (one corpus per server process) is one entry.
+_state_cache: dict[str, tuple[float, str]] = {}
+
+
+def repo_state(root: Path, ttl_seconds: float = DEFAULT_REPO_STATE_TTL_SECONDS) -> str:
     """Cheap fingerprint of the corpus: HEAD commit + hash of `git status`
     porcelain. Used as a cache-invalidation key by the MCP framework's FTS
-    index and any other derived-data cache."""
+    index and any other derived-data cache.
+
+    Memoized for `ttl_seconds` (default 2s) per resolved root: a burst of calls within
+    the window is served from memory, and the two `git` subprocesses run again once the
+    window has passed. `ttl_seconds=0` always recomputes — the escape hatch a caller that
+    needs the true live state (or a test proving invalidation) can reach for.
+
+    This trades up to `ttl_seconds` of staleness for the subprocess cost. A commit or a
+    working-tree edit still invalidates the result; it just may take up to `ttl_seconds`
+    to be observed, same as the sibling-index TTL in `remote.py` trades freshness for
+    fetch cost. The FTS cache a caller keys off this value is not safety-critical — a
+    stale read for up to the TTL window serves slightly-behind search results, not a
+    wrong answer about anything load-bearing."""
+    key = str(Path(root).resolve())
+    now = time.monotonic()
+    if ttl_seconds > 0:
+        cached = _state_cache.get(key)
+        if cached is not None and (now - cached[0]) < ttl_seconds:
+            return cached[1]
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
                           capture_output=True, text=True).stdout.strip()
     status = subprocess.run(["git", "status", "--porcelain"], cwd=root,
                             capture_output=True, text=True).stdout
-    return head + ":" + hashlib.sha256(status.encode()).hexdigest()[:16]
+    value = head + ":" + hashlib.sha256(status.encode()).hexdigest()[:16]
+    _state_cache[key] = (now, value)
+    return value
 
 
 def yaml_load(text: str):

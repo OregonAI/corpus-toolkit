@@ -2,6 +2,23 @@
 
 Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pins.
 
+## Unreleased
+
+### Fixed — `ensure_index()` no longer shells out to `git` twice on every tool call
+
+Nothing breaks: `repo_state()`'s return value and meaning are unchanged, and a commit or
+an uncommitted working-tree edit still invalidates the FTS cache — just within a short
+window (default 2s) instead of instantly. Production measurements on
+corpus-toolkit#207 (filed against executive-regulatory-frameworks#76) found a keyword-only
+search — no vector arm, no ANN — missing a 1s p95 budget on every mode. `repo_state()`
+(`corpus_toolkit/repo.py`) runs `git rev-parse HEAD` and `git status --porcelain` on every
+`ensure_index()` call (`corpus_toolkit/mcp/backends.py`), i.e. on every file-backed tool
+call a warm server serves — about 114ms measured on a 75k-file corpus, paid again on each
+request for information that changes on a commit cadence, not a per-request one.
+`repo_state()` now memoizes its result per corpus root for `DEFAULT_REPO_STATE_TTL_SECONDS`
+(2.0s; pass `ttl_seconds=0` to force a live recompute), so a burst of calls inside the
+window costs one pair of subprocess spawns instead of one pair each.
+
 ## v1.36.4 — 2026-09-28
 
 ### Fixed — `publish-index` no longer requires `toolkit-ref`, so a caller on `@v1` can start
