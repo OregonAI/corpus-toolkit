@@ -1435,3 +1435,48 @@ def test_ensure_index_rebuilds_after_a_working_tree_edit_once_the_memo_expires(c
     assert [h["id"] for h in f.search_corpus("REVISEDTEXT")] == ["ors-1.010"], (
         "a working-tree edit, visible to `git status --porcelain`, did not invalidate "
         "the FTS cache once the repo_state memo's TTL had passed")
+
+
+def test_corpus_overview_graph_edges_count_is_correct(corpus):
+    (corpus / "_meta" / "graph.json").write_text(json.dumps({
+        "nodes": [{"id": "ors-1.010", "title": "Definitions", "doc_type": "statute"},
+                  {"id": "ors-2.020", "title": "Fees", "doc_type": "statute"}],
+        "edges": [{"from": "ors-2.020", "to": "ors-1.010", "type": "references"},
+                  {"from": "ors-1.010", "to": "ors-2.020", "type": "referenced_by"}]}))
+    f = fw(corpus)
+
+    assert f.corpus_overview()["graph_edges"] == 2
+
+
+def test_corpus_overview_does_not_recompute_the_edge_count_sum_every_call(corpus, monkeypatch):
+    """`corpus_overview` summed `len(v) for d in self.graph()[1].values() for v in
+    d.values()` -- O(E) over the WHOLE graph -- on every single call
+    (corpus-toolkit#207). The graph dict itself is already memoized (`self.graph()`),
+    but the sum over it was not: cache the count alongside the graph cache instead of
+    re-walking every edge bucket on every call."""
+    from corpus_toolkit.mcp import framework as framework_mod
+
+    (corpus / "_meta" / "graph.json").write_text(json.dumps({
+        "nodes": [{"id": "ors-1.010", "title": "Definitions", "doc_type": "statute"},
+                  {"id": "ors-2.020", "title": "Fees", "doc_type": "statute"}],
+        "edges": [{"from": "ors-2.020", "to": "ors-1.010", "type": "references"}]}))
+    f = fw(corpus)
+
+    calls = []
+    real_sum = sum
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return real_sum(*a, **kw)
+
+    # Shadow the builtin ONLY in framework.py's module namespace (name resolution
+    # checks module globals before falling back to builtins), so sqlite3/pytest/etc.
+    # calling the real `sum` elsewhere in the same test are unaffected.
+    monkeypatch.setitem(framework_mod.__dict__, "sum", spy)
+
+    for _ in range(5):
+        assert f.corpus_overview()["graph_edges"] == 1
+
+    assert len(calls) <= 1, (
+        f"corpus_overview() re-summed the graph's edge count {len(calls)} times "
+        f"across 5 calls against an unchanged, already-cached graph")

@@ -4,6 +4,16 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Fixed — `corpus_overview` no longer re-sums the whole graph's edge count on every call
+
+Nothing breaks: `graph_edges` is byte-for-byte the same value, computed once instead of
+summed on every call. corpus-toolkit#207. `corpus_overview` (`corpus_toolkit/mcp/
+framework.py`) read `sum(len(v) for d in self.graph()[1].values() for v in d.values())`
+on every call — O(E) over the whole graph — even though the graph dict it walked was
+already memoized by `self.graph()`. The edge count is now computed once, in `graph()`
+itself, next to the dict it describes, and cached in `_graph_edge_count` alongside
+`_graph_cache`: whatever invalidates one invalidates both, so they can never disagree.
+
 ### Fixed — a sibling corpus's index is no longer re-parsed on every cross-corpus resolution
 
 Nothing breaks: `load_sibling_index`'s resolution order, TTL/refetch and stale-cache
