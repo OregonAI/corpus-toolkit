@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from corpus_toolkit import repo
 from corpus_toolkit.config import load as load_config
 from corpus_toolkit.mcp.backends import FileBackend, RetrievalBackend
 from corpus_toolkit.mcp.framework import CorpusFramework
@@ -1380,3 +1381,102 @@ def test_no_graph_relation_can_displace_a_response_key_either(corpus, reserved):
     # corpus_overview and resolve_citation too, neither of which can have a key displaced
     # by a relation name.
     assert "error" not in f.corpus_overview()
+
+
+# ---------- corpus-toolkit#207: per-call fixed overhead on the serving path ----------
+
+def test_ensure_index_does_not_reshell_to_git_on_every_call(corpus, monkeypatch):
+    """`ensure_index()` is on the path of every file-backed tool call
+    (`index_status`'s own docstring: "this runs on EVERY tool call via ensure_index").
+    `repo_state()` shells out to `git` twice; a memo inside it must turn a burst of
+    back-to-back calls into one pair of subprocess spawns, not N pairs."""
+    import subprocess as subprocess_mod
+
+    f = fw(corpus)
+    f.ensure_index().close()                    # build once, outside the count
+
+    calls = []
+    real_run = subprocess_mod.run
+
+    def spy(args, **kw):
+        calls.append(args)
+        return real_run(args, **kw)
+
+    monkeypatch.setattr(subprocess_mod, "run", spy)
+
+    for _ in range(10):
+        f.ensure_index().close()
+
+    git_calls = [c for c in calls if c[:1] == ["git"]]
+    assert len(git_calls) <= 2, (
+        f"10 back-to-back ensure_index() calls with nothing changed shelled out to git "
+        f"{len(git_calls)} times; repo_state()'s memo should have served all but the "
+        f"first pair")
+
+
+def test_ensure_index_rebuilds_after_a_working_tree_edit_once_the_memo_expires(corpus):
+    """The other half of the same guarantee: the memo trades a little latency, never
+    correctness. A plain uncommitted edit to a tracked content file — the case
+    `repo_state`'s docstring calls out by name — must still force a rebuild, once its
+    short TTL has passed."""
+    import time
+
+    f = fw(corpus)
+    f.ensure_index().close()
+    assert f.search_corpus("REVISEDTEXT") == []
+
+    edited = (corpus / "statutes" / "ors-1.010.md").read_text().replace(
+        "A person may not appropriate water without a permit issued by the department.",
+        "A person may not appropriate water without a REVISEDTEXT issued by the department.")
+    (corpus / "statutes" / "ors-1.010.md").write_text(edited)
+
+    time.sleep(repo.DEFAULT_REPO_STATE_TTL_SECONDS + 0.2)
+
+    assert [h["id"] for h in f.search_corpus("REVISEDTEXT")] == ["ors-1.010"], (
+        "a working-tree edit, visible to `git status --porcelain`, did not invalidate "
+        "the FTS cache once the repo_state memo's TTL had passed")
+
+
+def test_corpus_overview_graph_edges_count_is_correct(corpus):
+    (corpus / "_meta" / "graph.json").write_text(json.dumps({
+        "nodes": [{"id": "ors-1.010", "title": "Definitions", "doc_type": "statute"},
+                  {"id": "ors-2.020", "title": "Fees", "doc_type": "statute"}],
+        "edges": [{"from": "ors-2.020", "to": "ors-1.010", "type": "references"},
+                  {"from": "ors-1.010", "to": "ors-2.020", "type": "referenced_by"}]}))
+    f = fw(corpus)
+
+    assert f.corpus_overview()["graph_edges"] == 2
+
+
+def test_corpus_overview_does_not_recompute_the_edge_count_sum_every_call(corpus, monkeypatch):
+    """`corpus_overview` summed `len(v) for d in self.graph()[1].values() for v in
+    d.values()` -- O(E) over the WHOLE graph -- on every single call
+    (corpus-toolkit#207). The graph dict itself is already memoized (`self.graph()`),
+    but the sum over it was not: cache the count alongside the graph cache instead of
+    re-walking every edge bucket on every call."""
+    from corpus_toolkit.mcp import framework as framework_mod
+
+    (corpus / "_meta" / "graph.json").write_text(json.dumps({
+        "nodes": [{"id": "ors-1.010", "title": "Definitions", "doc_type": "statute"},
+                  {"id": "ors-2.020", "title": "Fees", "doc_type": "statute"}],
+        "edges": [{"from": "ors-2.020", "to": "ors-1.010", "type": "references"}]}))
+    f = fw(corpus)
+
+    calls = []
+    real_sum = sum
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return real_sum(*a, **kw)
+
+    # Shadow the builtin ONLY in framework.py's module namespace (name resolution
+    # checks module globals before falling back to builtins), so sqlite3/pytest/etc.
+    # calling the real `sum` elsewhere in the same test are unaffected.
+    monkeypatch.setitem(framework_mod.__dict__, "sum", spy)
+
+    for _ in range(5):
+        assert f.corpus_overview()["graph_edges"] == 1
+
+    assert len(calls) <= 1, (
+        f"corpus_overview() re-summed the graph's edge count {len(calls)} times "
+        f"across 5 calls against an unchanged, already-cached graph")

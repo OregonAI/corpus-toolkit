@@ -307,6 +307,14 @@ class CorpusFramework:
             "NON-AUTHORITATIVE curated copy for AI-agent reference. Not the "
             "official text — always cite and verify against source_url.")
         self._graph_cache = None
+        # Total edge count, cached alongside `_graph_cache` (corpus-toolkit#105 and
+        # corpus-toolkit#207): `corpus_overview` used to walk every relation bucket of
+        # every node with `sum(...)` on EVERY call, O(E) over the whole graph, even
+        # though the graph dict it walks was already memoized. Computed once in
+        # `graph()`, next to the dict it describes, so the two can never disagree and
+        # never need a separate invalidation rule — whatever resets `_graph_cache`
+        # recomputes this too.
+        self._graph_edge_count = 0
         # Relation names in this corpus's graph that collide with response keys
         # `graph_neighbors` writes (corpus-toolkit#105). Populated when the graph is parsed
         # and read only by that tool; empty for every corpus on the platform today.
@@ -506,6 +514,7 @@ class CorpusFramework:
         if self._graph_cache is None:
             if not self.config.graph_path.is_file():
                 self._graph_cache = ({}, {})
+                self._graph_edge_count = 0
             else:
                 g = json.loads(self.config.graph_path.read_text())
                 nodes = {n["id"]: n for n in g["nodes"]}
@@ -551,6 +560,8 @@ class CorpusFramework:
                     {rel for rels in edges.values() for rel in rels}
                     & self._reserved_response_keys())
                 self._graph_cache = (nodes, edges)
+                self._graph_edge_count = sum(len(v) for d in edges.values()
+                                             for v in d.values())
         return self._graph_cache
 
     def _graph_lookup(self, doc_id: str):
@@ -1215,6 +1226,7 @@ class CorpusFramework:
         return out
 
     def corpus_overview(self) -> dict:
+        self.graph()          # ensures `_graph_edge_count` is populated, below
         out = {
             **self.backend.overview(),
             # EVERYTHING THIS FRAMEWORK ASSERTS GOES AFTER THE BACKEND'S MAPPING
@@ -1235,7 +1247,7 @@ class CorpusFramework:
             "jurisdiction": self.config.jurisdiction,
             "disclaimer": self.disclaimer,
             **self._envelope(),
-            "graph_edges": sum(len(v) for d in self.graph()[1].values() for v in d.values()),
+            "graph_edges": self._graph_edge_count,
             "contract_version": self.config.contract_version,
         }
         if (fault := self.config.front_door_fault):

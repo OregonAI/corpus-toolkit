@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import jsonschema
@@ -726,6 +727,120 @@ class TestConfig(CrossCorpusTestCase):
         sib = config_mod.load(cfg).siblings[0]
         got = load_sibling_index(sib, self.tmp / "cache")
         self.assertEqual(got["_source"], "local")
+
+
+class TestSiblingIndexMemo(CrossCorpusTestCase):
+    """corpus-toolkit#207. `_resolve_in_sibling` calls `load_sibling_index` on EVERY
+    call, with no in-process memo -- so a warm server re-reads and `json.loads`s the
+    cached file (ERF's is ~7 MiB) on every single resolution, even when nothing on
+    disk changed between one call and the next."""
+
+    def test_repeated_loads_of_an_unchanged_local_file_parse_json_once(self):
+        import corpus_toolkit.remote as remote_mod
+
+        idx = self.tmp / "sibling-index.json"
+        idx.write_text(json.dumps(SIBLING_INDEX))
+        sib = Sibling(id="executive-regulatory-frameworks", index_path=idx)
+
+        calls = []
+        real_loads = json.loads
+
+        def spy(*a, **kw):
+            calls.append(1)
+            return real_loads(*a, **kw)
+
+        with unittest.mock.patch.object(remote_mod.json, "loads", spy):
+            for _ in range(10):
+                got = load_sibling_index(sib, self.tmp / "cache")
+                self.assertEqual(got["_source"], "local")
+
+        self.assertEqual(len(calls), 1, (
+            f"load_sibling_index() re-parsed an unchanged file's JSON {len(calls)} "
+            f"times across 10 calls; an in-process memo keyed on file identity "
+            f"should have served 9 of them"))
+
+    def test_a_rewritten_local_file_is_reloaded_not_served_stale(self):
+        import time
+
+        idx = self.tmp / "sibling-index.json"
+        idx.write_text(json.dumps(SIBLING_INDEX))
+        sib = Sibling(id="executive-regulatory-frameworks", index_path=idx)
+
+        first = load_sibling_index(sib, self.tmp / "cache")
+        self.assertIn("oar-166-300-0040", first["documents"])
+
+        changed = json.loads(json.dumps(SIBLING_INDEX))
+        changed["documents"]["oar-999-999-9999"] = ["New Doc", "administrative-rule",
+                                                     "rules/oar-999/new.md"]
+        time.sleep(0.01)                     # ensure a distinguishable mtime
+        idx.write_text(json.dumps(changed))
+
+        second = load_sibling_index(sib, self.tmp / "cache")
+        self.assertIn("oar-999-999-9999", second["documents"], (
+            "the memo kept serving the old parse after the file on disk changed -- "
+            "it must be keyed on the file's identity (path + mtime/size), not just "
+            "its path"))
+
+    def test_rewriting_the_same_path_twice_does_not_grow_the_memo(self):
+        """The earlier version of this memo keyed on (path, mtime_ns, size), so every
+        rewrite of the same path added a new slot and kept the old parsed payload
+        alive for the life of the process -- an unbounded leak on a long-lived server
+        that refetches a sibling index on a TTL. One path must occupy one slot."""
+        import corpus_toolkit.remote as remote_mod
+
+        idx = self.tmp / "sibling-index.json"
+        idx.write_text(json.dumps(SIBLING_INDEX))
+        sib = Sibling(id="executive-regulatory-frameworks", index_path=idx)
+
+        load_sibling_index(sib, self.tmp / "cache")
+        slots_after_first_load = len(remote_mod._parse_cache)
+
+        for i in range(2):
+            changed = json.loads(json.dumps(SIBLING_INDEX))
+            changed["documents"][f"oar-new-{i}"] = ["New Doc", "administrative-rule",
+                                                      f"rules/new-{i}.md"]
+            time.sleep(0.01)                 # ensure a distinguishable mtime
+            idx.write_text(json.dumps(changed))
+            got = load_sibling_index(sib, self.tmp / "cache")
+            self.assertIn(f"oar-new-{i}", got["documents"], (
+                "the memo must serve the freshly rewritten content, not a stale "
+                "payload from before this rewrite"))
+            self.assertEqual(len(remote_mod._parse_cache), slots_after_first_load, (
+                f"rewriting {idx} grew the memo to "
+                f"{len(remote_mod._parse_cache)} entries; a rewrite of an already-"
+                f"cached path must replace its slot, not add a new one"))
+
+    def test_fresh_cache_reads_across_many_resolve_calls_parse_json_once(self):
+        """The end-to-end path: `_resolve_in_sibling`, called repeatedly through
+        `resolve_citation`, must not re-parse the cached index on every call."""
+        import corpus_toolkit.remote as remote_mod
+
+        idx = self.tmp / "sibling-index.json"
+        idx.write_text(json.dumps(SIBLING_INDEX))
+        cfg = make_corpus(self.tmp / "repo", index_path=idx)
+        register_scheme("oar-rule", r"OAR\s+(?P<num>\d+-\d+-\d+)", "oar-{num}",
+                        corpus="executive-regulatory-frameworks")
+        f = self.framework(cfg)
+
+        calls = []
+        real_loads = json.loads
+
+        def spy(*a, **kw):
+            calls.append(1)
+            return real_loads(*a, **kw)
+
+        with unittest.mock.patch.object(remote_mod.json, "loads", spy):
+            out = f.resolve_citation("OAR 166-300-0040")   # warms the graph + sibling parse
+            self.assertEqual(len(out["matches"]), 1)
+            after_first = len(calls)
+
+            for _ in range(9):
+                out = f.resolve_citation("OAR 166-300-0040")
+                self.assertEqual(len(out["matches"]), 1)
+
+        self.assertEqual(len(calls), after_first, (
+            f"resolve_citation() re-parsed JSON {len(calls) - after_first} more times "
+            f"across 9 further calls that named the same unchanged sibling-index file"))
 
 
 if __name__ == "__main__":
