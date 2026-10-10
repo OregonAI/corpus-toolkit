@@ -4,6 +4,15 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — a `LICENSE` file: MIT
+
+The repository is public and had no license file, so nobody outside it had
+permission to use, copy or adapt the code, whatever the intent. The corpus repositories
+already license their tooling MIT (the second half of their split `LICENSE`); this adds the
+same text here, with the same copyright line. There is no CC0 half because the toolkit holds
+no corpus content. `pyproject.toml` is unchanged: setuptools picks up `LICENSE` on its own,
+and no build metadata moves.
+
 ### Added — `scripts/bench_serving_overhead.py`, a local benchmark for the serving path's per-call overhead
 
 corpus-toolkit#207's acceptance criteria asked for a local benchmark proving the

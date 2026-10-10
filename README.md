@@ -29,6 +29,11 @@ candidate. A corpus's served image pins an exact tag in `requirements.txt`, whic
 `propagate-pin` bumps by PR after each release. Breaking changes to the schema or MCP
 contract bump the major version with a migration note in the relevant doc.
 
+## License
+
+MIT. See [`LICENSE`](LICENSE). It is the same license the corpus repositories apply to
+their tooling; this repository holds no corpus content, so there is no content half.
+
 ## Status
 
 - [x] `corpus_toolkit/` package extracted from oregon-policy-repo (Phase 1)
