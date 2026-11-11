@@ -162,3 +162,42 @@ def test_frontmatter_gate_accepts_a_stub_file_end_to_end(corpus):
     fmv._init_worker(fmv.bundled_schema(), cfg, None)
     _, findings, doc_id = fmv.check_file(corpus / "statutes" / "wa-stub-1.md")
     assert doc_id == "wa-stub-1" and findings == []
+
+
+# ---------- a stub is never a search passage ----------
+
+def test_a_stub_is_never_returned_by_keyword_search(corpus):
+    _add_stub(corpus, title="Permit security standard", citation="WA SEC permit")
+    f = fw(corpus)
+    for mode in ("keyword", "hybrid"):
+        ids = [h["id"] for h in f.search_corpus("permit security standard", mode=mode)]
+        assert "wa-stub-1" not in ids, mode
+    # even a query that matches nothing else
+    assert all(h["id"] != "wa-stub-1" for h in f.search_corpus("Reason issuing agency"))
+    assert all(h["id"] != "wa-stub-1" for h in f.search_corpus("WA SEC"))
+
+
+def test_a_stub_is_not_returned_by_compare(corpus):
+    _add_stub(corpus, title="Permit security standard")
+    out = fw(corpus).compare("security standard", ["us-wa"], mode="keyword")
+    assert out["groups"][0]["hits"] == []
+
+
+def test_a_semantic_candidate_that_is_a_stub_is_dropped(corpus):
+    _add_stub(corpus)
+
+    class Sem:
+        def available(self): return True
+        def rank(self, q, n): return ["wa-stub-1", "ors-1.010"]
+
+    f = fw(corpus)
+    f.backend._semantic = Sem()
+    ids = [h["id"] for h in f.search_corpus("anything", mode="semantic")]
+    assert ids == ["ors-1.010"]
+
+
+def test_stubs_are_not_embedded(corpus):
+    from corpus_toolkit.semantic.build import doc_units
+    _add_stub(corpus)
+    _, _, units = doc_units(corpus / "statutes" / "wa-stub-1.md")
+    assert units == []

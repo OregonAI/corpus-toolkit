@@ -90,6 +90,9 @@ BIG_DOC_BYTES = 50 * 1024
 # FTS `tags` column, where a word match would let `air-quality` satisfy a filter on `air`.
 SCHEMA_VERSION = 5
 
+# `content_mode` value of a stub document (corpus-toolkit#213, ADR-0017).
+STUB_MODE = "stub"
+
 # What FTS5's own tokenizer would treat as a word, near enough for locating matches. Kept
 # identical to the pattern the query side uses so a term that can MATCH can also be found
 # in the text for highlighting.
@@ -672,9 +675,14 @@ class FileBackend:
         # d.* not f.*: reading a column off a contentless fts table returns NULL. Joining
         # on rowid for the same reason -- `f.id` is NULL too, so the old `d.id = f.id`
         # join would match zero rows and report an empty corpus.
+        # A STUB IS NEVER A PASSAGE (corpus-toolkit#213, ADR-0017). Its title, citation and
+        # tags are indexed so the row exists, but it holds no text: a hit on it would put
+        # "this exists" in the slot an agent reads as "this says". It is reached through
+        # get_document and resolve_citation, and counted by coverage.
         sql = ("SELECT d.id, d.title, d.citation, d.doc_type, d.issuing_body, d.path, "
                "bm25(fts) FROM fts f "
-               "JOIN docs d ON d.rowid = f.rowid WHERE fts MATCH ?")
+               "JOIN docs d ON d.rowid = f.rowid WHERE fts MATCH ? "
+               f"AND d.content_mode != '{STUB_MODE}'")
         sql_args = [match]
         if doc_type:
             sql += " AND d.doc_type = ?"; sql_args.append(doc_type)
@@ -797,6 +805,12 @@ class FileBackend:
                 if callable(rank_chunks) else {}
             sem_order = (list(sem_chunks) if sem_chunks
                          else list(self._semantic.rank(query, pool) or []))
+            # The semantic artifact is built without stubs, but one built before a stub was
+            # added (or by a custom module) can still name one. Never a passage.
+            stubs = {r[0] for r in con.execute(
+                "SELECT id FROM docs WHERE content_mode = ?", (STUB_MODE,))}
+            if stubs:
+                sem_order = [d for d in sem_order if d not in stubs]
             if doc_type or issuing_body or issuing_body_slug or jurisdiction or tags:
                 keep = []
                 for d in sem_order:

@@ -68,6 +68,11 @@ def doc_units(path: Path, body_headings: list[str] | None = None,
     """(doc_id, title, [(heading, text), ...]) -- the embeddable units of one document."""
     fm, body = parse_frontmatter(path)
     units = []
+    if fm.get("content_mode") == "stub":
+        # A stub holds a disclaimer and a reason, no text (corpus-toolkit#213). The
+        # whole-body fallback below would otherwise embed that, and a stub must never come
+        # back as a passage.
+        return fm["id"], fm.get("title", ""), units
     glance = _section(body, GLANCE_HEADING)
     if glance:
         units.append((GLANCE_HEADING, glance))
