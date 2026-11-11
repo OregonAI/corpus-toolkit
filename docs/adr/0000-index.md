@@ -24,6 +24,7 @@ in that repo's own `docs/adr/`.
 | [0015](0015-drift-is-reported-not-filed.md) | Drift is reported, not filed: one rolling `DRIFT.md` per corpus, seeding is the run's job, no issues |
 | [0016](0016-ingest-primitives-are-shared-orchestration-is-local.md) | Ingest primitives are shared; ingest orchestration stays in the corpus |
 | [0017](0017-a-stub-is-a-document-with-content-mode-stub.md) | A stub is a document with `content_mode: stub` (proposed, awaiting owner confirmation) |
+| [0018](0018-a-challenged-host-may-be-fetched-with-curl-under-the-same-user-agent.md) | A challenged host may be fetched with the system curl under the same User-Agent (proposed, awaiting owner confirmation; opt-in) |
 
 0015 was decided on 2026-09-03, grilling the drift candidate of the same review (90 of 172 open issues were drift tickets). 0014 was decided on 2026-09-03, grilling the first candidate of the 2026-09-02 whole-platform architecture review (154 of 616 merged PRs were pin bumps). 0013 was decided on 2026-09-02, grilling corpus-toolkit#166. 0012 was decided on 2026-08-27, grilling executive-regulatory-frameworks#264 and #140. 0011 was decided on 2026-08-26, grilling corpus-toolkit#158. 0010 was decided on 2026-08-22, grilling corpus-toolkit#132. The first nine were decided together on 2026-08-12, in a review of the platform's cross-repo shape
 following `PLATFORM-REVIEW-2026-08-01.md`. That review's own three named weaknesses had all

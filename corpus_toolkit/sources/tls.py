@@ -170,6 +170,37 @@ def load(meta_dir: Path, now: datetime | None = None) -> dict[str, ssl.SSLContex
     return contexts
 
 
+def ca_bundle(meta_dir: Path, host: str, out_dir: Path, now: datetime | None = None
+              ) -> Path | None:
+    """For a client that cannot take an SSL context (curl): a PEM file holding the SYSTEM
+    roots plus `<meta_dir>/tls-chain/<host>.pem`, or None when `host` has no supplement.
+
+    It is the same trust `load()` builds -- default store plus the reviewed supplement,
+    under the same refusals (self-signed, private key, near-expiry) -- and it is written for
+    that one host. NOT the supplement alone: `curl --cacert <intermediate-only>` accepts a
+    partial chain (see the module docstring), so handing curl the bare file would be a wider
+    trust than the Python client has. If the system store file cannot be found this raises
+    rather than writing a bundle that is only the supplement.
+    """
+    host = host.split(":")[0].lower()
+    path = Path(meta_dir) / SUPPLEMENT_DIR_NAME / f"{host}.pem"
+    if not path.is_file():
+        return None
+    if not _HOST_RE.match(host):
+        raise SupplementRefused(f"{path.name}: {host!r} is not a hostname")
+    _check(path, now or datetime.now(timezone.utc))
+    paths = ssl.get_default_verify_paths()
+    system = next((Path(p) for p in (paths.cafile, paths.openssl_cafile)
+                   if p and Path(p).is_file()), None)
+    if system is None:
+        raise SupplementRefused(
+            f"{path.name}: no system CA file found ({paths.cafile or paths.openssl_cafile or 'none'}), "
+            f"so a curl bundle cannot be built. Refusing to hand curl the supplement alone.")
+    out = Path(out_dir) / f"{host}.ca-bundle.pem"
+    out.write_bytes(system.read_bytes().rstrip(b"\n") + b"\n" + path.read_bytes())
+    return out
+
+
 def mounts(contexts: dict[str, ssl.SSLContext]) -> dict[str, object]:
     """httpx mounts that apply each context to ITS host and no other.
 

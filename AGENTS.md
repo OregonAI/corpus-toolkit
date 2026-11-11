@@ -61,6 +61,13 @@ gating. The same rule holds for the ingest fetcher (`corpus_toolkit.sources.fetc
 v1.36.0): it reports (`Fetcher.robots`, `Fetcher.allowed`) and enforces only when the
 corpus passes `enforce_robots=True`, which is that corpus's own recorded decision.
 
+Transport is a separate axis from identity. A host that challenges the Python client (403 +
+`cf-mitigated: challenge`) while answering system curl 200 under the same User-Agent can be
+fetched with `Fetcher(curl_on_challenge=True)` (ADR-0018, awaiting owner confirmation): opt-in,
+the same honest User-Agent, never a browser string, header set, impersonation library, cookie
+or challenge solver. A host that challenges curl too stays `Challenge`. For a ranged read use
+`Fetcher.get_range`, not `Fetcher.client()`.
+
 Two questions the checker keeps apart, and you need both:
 
 * **Does robots.txt permit our user agent?** The literal compliance question, and the only

@@ -4,6 +4,30 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — opt-in curl transport for challenged hosts, and a public ranged get (ADR-0018, awaiting owner confirmation)
+
+`www.cdt.ca.gov` answers the ingest Fetcher (httpx, HTTP/2) 403 with `cf-mitigated: challenge`
+and system curl 8.5, sending the identical User-Agent, 200 (measured 2026-11-11): the host
+scores the Python client's connection, not our identity.
+
+- **`Fetcher(curl_on_challenge=True)`.** Off by default; nothing changes for a corpus that does
+  not pass it. A `Challenge` from the Python client is repeated through the system `curl` with
+  the same honest User-Agent (remembered per host). Interval, 429 backoff, `Refused` /
+  `Challenge` classification (a host that challenges curl too is still `Challenge`), robots,
+  TLS chain supplements (`tls.ca_bundle`: system roots plus the host's supplement),
+  binary bodies, final URL and status all hold. `timeout` keeps httpx's meaning, per step:
+  curl gets `--connect-timeout` and `--speed-limit 1 --speed-time <timeout>` (abort when no data
+  arrives for `timeout` seconds), so a long PDF that keeps arriving is not cut at `timeout`;
+  a one-hour total cap stops only a host that trickles forever. Each curl request has its own
+  scratch files, so a Fetcher shared across threads cannot return one URL's body for another. No browser User-Agent or headers,
+  no impersonation library, no cookies, no challenge solving; `-q` keeps `~/.curlrc` out.
+  Missing `curl` raises `CurlUnavailable` at construction. Feature-detect from an older
+  toolkit with `"curl_on_challenge" in inspect.signature(Fetcher.__init__).parameters`.
+- **`Fetcher.get_range(url, start, end=None)`** and **`Fetcher.get_response(url, byte_range)`**.
+  A byte range (negative `start` = last N bytes) and the full `httpx.Response` (for
+  `Content-Range`), with the same guarantees, so a corpus need not use `client()` for a ranged
+  read. `Fetched` is unchanged.
+
 ### Added — stub documents and a `coverage` tool (corpus-toolkit#213)
 
 Some instruments are known to exist but are not public, or their official source refuses a
