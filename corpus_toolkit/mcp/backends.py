@@ -1166,7 +1166,7 @@ class FileBackend:
             # the same string that goes into the index.
             empty = dict(con.execute(
                 "SELECT doc_type, COUNT(*) FROM docs WHERE body_chars = 0 "
-                "GROUP BY doc_type"))
+                "AND content_mode != ? GROUP BY doc_type", (STUB_MODE,)))
         except Exception as e:                       # noqa: BLE001
             return {"reachable": False, "checked_at": None,
                     "detail": f"{type(e).__name__}: {e}"}
@@ -1176,8 +1176,11 @@ class FileBackend:
         detail = f"{n} document(s) indexed"
         problems = {}
         for dt, cnt in empty.items():
-            total = con.execute("SELECT COUNT(*) FROM docs WHERE doc_type = ?",
-                                (dt,)).fetchone()[0]
+            # Stubs are bodiless by definition, so they neither count as empty nor
+            # dilute the total: a doc_type of stubs plus real documents is judged on the
+            # real ones (corpus-toolkit#213).
+            total = con.execute("SELECT COUNT(*) FROM docs WHERE doc_type = ? "
+                                "AND content_mode != ?", (dt, STUB_MODE)).fetchone()[0]
             # Some documents legitimately have no body (a stub, a metadata-only record).
             # A doc_type where ALL of them are empty is a configuration fault.
             if total and cnt == total:

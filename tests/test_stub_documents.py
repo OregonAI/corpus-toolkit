@@ -241,3 +241,17 @@ def test_resolve_citation_does_not_flag_a_normal_document(corpus):
     out = f.resolve_citation("ors-1.010")
     for x in out["matches"]:
         assert "stub" not in x
+
+
+def test_health_does_not_warn_that_a_stub_only_doc_type_has_no_text(corpus):
+    """Stubs are bodiless by definition; a doc_type holding only stubs is not a
+    misconfigured index_headings."""
+    for n in ("ors-1.010", "ors-2.020"):
+        (corpus / "statutes" / f"{n}.md").unlink()
+    _add_stub(corpus)
+    yml = corpus / "_meta" / "corpus.yml"
+    yml.write_text(yml.read_text() + "index_headings:\n  statute: [\"Full text\"]\n")
+    _commit(corpus)
+    h = fw(corpus).backend.health()
+    assert h["reachable"] is True
+    assert "WARNING" not in h["detail"] and h["empty_body_by_doc_type"] == {}
