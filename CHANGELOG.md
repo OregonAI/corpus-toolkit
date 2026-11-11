@@ -29,7 +29,10 @@ represent one (a `policy` with no snapshot failed the schema and the provenance 
   no jurisdiction under `unspecified`. The release-gate smoke now requires and round-trips it.
 
 Backward compatible: no existing tool, parameter, response or validation result changes for a
-corpus with no stub; the eight live corpora gain only the `coverage` tool.
+corpus with no stub; the eight live corpora gain two optional tools, `compare` (#212) and
+`coverage`, on every file-backed server, whether or not they hold a second jurisdiction.
+Before upgrading, grep each corpus's `tools_module` for tool names `compare` and `coverage`:
+both are reserved, so a module that registers either now refuses to start.
 `docs/mcp-interface-contract.md` documents the change (contract stays v1), as do
 `docs/provenance-schema-v1.md`, `docs/verification-loop.md` and CONTEXT.md ("Stub").
 
@@ -70,8 +73,11 @@ one, the same value `corpus_overview` counts) and `tags` (a list; the document m
 every tag, each matched as a whole tag, so `air` does not match `air-quality`). They are
 applied to the keyword SQL and to each semantic candidate before fusion, so they hold in
 `hybrid`, `keyword` and `semantic` mode and when the semantic artifact is absent. When a
-filter is set the semantic ranker is asked for 200 candidates instead of 40, because a
-selective filter applied afterwards would otherwise leave an empty answer. A filtered search
+filter is set the semantic ranker is asked for every document in the index (never fewer than
+200, instead of 40), because a selective filter applied after the ranker's cut would
+otherwise leave an empty answer: a fixed pool does not prevent that, since more than 200
+documents of one jurisdiction can outrank the only one of another. The semantic module scores
+every chunk regardless, so the larger cut costs only the sort. A filtered search
 with no matches returns one `no_hits` record carrying `filters`, as the `issuing_body` filter
 does.
 

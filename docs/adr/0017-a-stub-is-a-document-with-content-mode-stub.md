@@ -60,7 +60,8 @@ seed-list concept (that is a corpus-side artefact).
 
 - **Contract.** Additive and stays v1: new enum value, new optional tool (`coverage`, name
   reserved), new fields only on a stub's responses. The eight live corpora are single
-  jurisdiction, hold no stubs and see no change except `coverage` appearing on their servers.
+  jurisdiction, hold no stubs and see no change except `compare` (#212) and `coverage`
+  appearing on their servers.
 - **A stub in a `doc_type` that must be verbatim** (`statute`, `policy`, ...) is the one
   place the `content_exception` escape hatch is not used: the exemption is by
   `content_mode`, not by an excuse. That is deliberate and should be confirmed: it means a

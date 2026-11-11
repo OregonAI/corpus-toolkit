@@ -790,8 +790,12 @@ class FileBackend:
         pool = max(n * 4, 40) if use_sem else n
         if use_sem and (jurisdiction or tags):
             # A selective filter applied AFTER the semantic ranker answers can empty the
-            # list when the ranker's top slice is all another jurisdiction's.
-            pool = max(pool, SEMANTIC_FILTER_POOL)
+            # list when the ranker's top slice is all another jurisdiction's, and no fixed
+            # pool is safe: 257 documents of one jurisdiction outranked the single
+            # document of another. Ask for every candidate; the semantic module scores
+            # every chunk anyway, so the larger cut costs only the sort.
+            total = con.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+            pool = max(pool, SEMANTIC_FILTER_POOL, total)
         rows, kw_order = self._fts_rows(con, query, doc_type, issuing_body, pool,
                                         issuing_body_slug, jurisdiction, tags)
         sem_chunks: dict = {}

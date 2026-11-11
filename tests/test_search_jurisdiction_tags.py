@@ -165,3 +165,49 @@ def test_the_mcp_tool_exposes_both_filters(corpus):
     fn = tool.fn
     assert _ids(fn("permit", jurisdiction="us-wa", tags=["ai"], mode="keyword")) == ["ors-2.020"]
     assert _ids(fn("permit", mode="keyword")) == ["ors-1.010", "ors-2.020"]
+
+
+class _CrowdedRanker:
+    """Ranks every large-jurisdiction document above the one small-jurisdiction document,
+    and honours `want` the way the real semantic module does: it returns at most that many."""
+
+    def __init__(self, order):
+        self.order = order
+
+    def available(self):
+        return True
+
+    def rank(self, query, want):
+        return self.order[:want]
+
+
+def test_a_small_jurisdiction_is_not_crowded_out_of_the_semantic_pool(corpus):
+    """257 us-wa documents rank above the single us-or one. The filter runs after the
+    ranker's cut, so a fixed pool of 200 returned "no hits" for us-or; the pool has to
+    cover every candidate when a filter is set."""
+    from tests.test_compare import _add
+    _edit(corpus, "ors-1.010", "us-or", ["ai"])
+    _edit(corpus, "ors-2.020", "us-wa", ["ai"])
+    wa = [_add(corpus, i, "us-wa", "Something else entirely.") for i in range(3, 3 + 255)]
+    _commit(corpus)
+    cfg = load_config(str(corpus / "_meta" / "corpus.yml"))
+    be = FileBackend(cfg, _CrowdedRanker(wa + ["ors-2.020", "ors-1.010"]))
+    assert _ids(be.search("zzzz", jurisdiction="us-or", mode="semantic")) == ["ors-1.010"]
+    assert _ids(be.search("zzzz", tags=["ai"], jurisdiction="us-or",
+                          mode="hybrid")) == ["ors-1.010"]
+
+
+def test_compare_does_not_read_a_crowded_out_jurisdiction_as_no_hits(corpus):
+    """The #212 failure through the tool: in_corpus is true, so an empty us-or group would
+    claim "documents carry this jurisdiction and none matched" while one does."""
+    from tests.test_compare import _add
+    _edit(corpus, "ors-1.010", "us-or", ["ai"])
+    _edit(corpus, "ors-2.020", "us-wa", ["ai"])
+    wa = [_add(corpus, i, "us-wa", "Something else entirely.") for i in range(3, 3 + 255)]
+    _commit(corpus)
+    f = fw(corpus)
+    f.backend = FileBackend(f.config, _CrowdedRanker(wa + ["ors-2.020", "ors-1.010"]))
+    out = f.compare("zzzz", ["us-or", "us-wa"], mode="semantic")
+    g = next(g for g in out["groups"] if g["jurisdiction"] == "us-or")
+    assert g["in_corpus"] is True and g["has_hits"] is True
+    assert [h["id"] for h in g["hits"]] == ["ors-1.010"]
