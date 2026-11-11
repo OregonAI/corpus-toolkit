@@ -1219,13 +1219,20 @@ class CorpusFramework:
         for i in cands:
             node = nodes.get(i)
             if node is not None:
-                hits.append({"id": i, "title": node["title"],
-                             "doc_type": node["doc_type"]})
-                continue
-            found = self.backend.exists(i)
-            if found:
-                hits.append({"id": found["id"], "title": found.get("title", ""),
-                             "doc_type": found.get("doc_type", "")})
+                hit = {"id": i, "title": node["title"], "doc_type": node["doc_type"]}
+            else:
+                found = self.backend.exists(i)
+                if not found:
+                    continue
+                hit = {"id": found["id"], "title": found.get("title", ""),
+                       "doc_type": found.get("doc_type", "")}
+            # A stub resolves -- "exists, not public" is the answer the tool is for -- but
+            # is flagged, so the match is not read as a document an agent can quote
+            # (corpus-toolkit#213). Added only on a stub; an optional backend capability.
+            is_stub = getattr(self.backend, "is_stub", None)
+            if callable(is_stub) and is_stub(hit["id"]):
+                hit["stub"] = True
+            hits.append(hit)
         out = {"citation": citation, "matches": hits, **self._envelope()}
 
         sibling_status = None
@@ -1240,6 +1247,10 @@ class CorpusFramework:
 
         if hits and resolver_note:
             out["note"] = resolver_note
+        if any(h.get("stub") for h in hits):
+            out["note"] = "; ".join(filter(None, [
+                out.get("note"), "a match marked stub exists but is not public: no text "
+                                 "is mirrored, so it cannot be quoted"]))
         if hits and sibling_status and sibling_status.get("stale"):
             out.setdefault("note", (
                 f"resolved from a STALE cached copy of sibling corpus "

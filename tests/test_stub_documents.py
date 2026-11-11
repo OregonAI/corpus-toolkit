@@ -201,3 +201,43 @@ def test_stubs_are_not_embedded(corpus):
     _add_stub(corpus)
     _, _, units = doc_units(corpus / "statutes" / "wa-stub-1.md")
     assert units == []
+
+
+# ---------- exists, not public: get_document and resolve_citation ----------
+
+def test_get_document_answers_for_a_stub_and_says_it_is_one(corpus):
+    _add_stub(corpus, reason="Not published by the issuing agency.")
+    out = fw(corpus).get_document("wa-stub-1")
+    assert "error" not in out
+    assert out["content_mode"] == "stub" and out["stub"] is True
+    assert out["stub_reason"] == "Not published by the issuing agency."
+    assert out["citation"] == "WA SEC-1" and out["source_url"].startswith("https://")
+    assert "NON-AUTHORITATIVE" in out["disclaimer"]
+    assert "not public" in out["note"].lower()
+
+
+def test_a_normal_document_response_gains_no_stub_fields(corpus):
+    out = fw(corpus).get_document("ors-1.010")
+    assert "stub" not in out and "stub_reason" not in out and "note" not in out
+
+
+def test_resolve_citation_finds_a_stub_and_flags_it(corpus):
+    from corpus_toolkit.mcp.framework import clear_schemes, register_scheme
+    _add_stub(corpus)
+    clear_schemes()
+    register_scheme("wasec", r"WA SEC-(?P<n>\d+)", "wa-stub-{n}")
+    try:
+        out = fw(corpus).resolve_citation("WA SEC-1")
+    finally:
+        clear_schemes()
+    assert [m["id"] for m in out["matches"]] == ["wa-stub-1"]
+    assert out["matches"][0]["stub"] is True
+    assert "unresolved" not in out
+    assert "not public" in out["note"].lower()
+
+
+def test_resolve_citation_does_not_flag_a_normal_document(corpus):
+    f = fw(corpus)
+    out = f.resolve_citation("ors-1.010")
+    for x in out["matches"]:
+        assert "stub" not in x

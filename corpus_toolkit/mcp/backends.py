@@ -92,6 +92,9 @@ SCHEMA_VERSION = 5
 
 # `content_mode` value of a stub document (corpus-toolkit#213, ADR-0017).
 STUB_MODE = "stub"
+STUB_NOTE = ("this instrument exists but is not public, or its official source cannot be "
+             "fetched; no text is mirrored. This is NOT evidence the instrument says "
+             "nothing on a topic -- see stub_reason and the official source.")
 
 # What FTS5's own tokenizer would treat as a word, near enough for locating matches. Kept
 # identical to the pattern the query side uses so a term that can MATCH can also be found
@@ -855,6 +858,11 @@ class FileBackend:
                     out.append(hit)
         return out
 
+    def is_stub(self, doc_id: str) -> bool:
+        con = self.ensure_index()
+        r = con.execute("SELECT content_mode FROM docs WHERE id = ?", (doc_id,)).fetchone()
+        return bool(r) and r[0] == STUB_MODE
+
     def exists(self, doc_id: str) -> dict | None:
         con = self.ensure_index()
         r = self._doc_meta_row(con, doc_id)
@@ -885,6 +893,12 @@ class FileBackend:
                 "authoritative_source": r[DOC_SOURCE_URL]}
         if r[DOC_EXCEPTION]:
             meta["content_exception"] = r[DOC_EXCEPTION]
+        if r[DOC_CONTENT_MODE] == STUB_MODE:
+            # Additive, and only on a stub: "exists, not public" must be unmistakable on the
+            # one response an agent would otherwise read as an empty document.
+            meta["stub"] = True
+            meta["stub_reason"] = fm.get("stub_reason", "")
+            meta["note"] = STUB_NOTE
         # Corpus-specific frontmatter this corpus has declared it serves.
         #
         # Without this the fixed key set above is all an agent ever sees, and a field can
