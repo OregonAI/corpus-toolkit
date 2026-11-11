@@ -13,6 +13,7 @@ True for us in that case, which is exactly why the position has to be reported s
 Parsing is tested against real fixture text rather than over the network: the point is what
 we conclude from a given file, and a network test would assert on someone else's server.
 """
+import io
 import unittest
 from unittest import mock
 
@@ -150,14 +151,7 @@ class AllowedTest(unittest.TestCase):
             rec = robots.ai_position("https://vendor.example/x", "corpus-toolkit")
         self.assertEqual(rec.crawl_delay, 5.0)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ---- the crawler-form User-Agent and the robots product token (ADR-0019) ------------------
-
-import io
 
 COMPAT = "Mozilla/5.0 (compatible; OregonAI-CivicCorpus/1.36.5; +https://github.com/OregonAI/x)"
 
@@ -205,6 +199,10 @@ class ProductTokenTest(unittest.TestCase):
                    "OregonAI-CivicCorpus/1 (+https://x)"):
             self.assertEqual(robots.product_token(ua), ua)
 
+    def test_the_detector_crawler_form_yields_its_token(self):
+        ua = "Mozilla/5.0 (compatible; corpus-toolkit-change-detector/1.36.5; +https://github.com/OregonAI/corpus-toolkit)"
+        self.assertEqual(robots.product_token(ua), "corpus-toolkit-change-detector")
+
     def test_a_real_browser_string_is_not_rewritten(self):
         ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
         self.assertEqual(robots.product_token(ua), ua)
@@ -239,3 +237,18 @@ class CrawlerFormMatchingTest(unittest.TestCase):
         patch, _ = _serve("User-agent: corpus-toolkit-change-detector\nDisallow: /\n")
         with patch:
             self.assertFalse(robots.allowed("https://h.gov/a", "corpus-toolkit-change-detector"))
+
+
+    def test_a_caller_crawler_form_agent_is_matched_as_it_always_was(self):
+        # Only OUR tokens are unwrapped; a caller's own Mozilla-compatible string keeps the
+        # matching it had before ADR-0019 (the text before the first "/", i.e. `Mozilla`).
+        ua = "Mozilla/5.0 (compatible; MyBot/1.0; +https://x)"
+        self.assertEqual(robots.product_token(ua), ua)
+        patch, _ = _serve(ADDRESSED_TO_MOZILLA)
+        with patch:
+            self.assertFalse(robots.allowed("https://h.gov/a", ua))
+            self.assertEqual(robots.ai_position("https://h.gov/", ua).crawl_delay, 9.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

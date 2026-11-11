@@ -184,10 +184,36 @@ def test_the_default_user_agent_is_honest_versioned_and_linked():
         assert token not in ua
 
 
+def _serve_robots(monkeypatch, text):
+    import io
+
+    class Resp(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    fetch.robots.clear_cache()
+    monkeypatch.setattr(fetch.robots.urllib.request, "urlopen",
+                        lambda req, timeout=None: Resp(text.encode()))
+    return fetch.robots.clear_cache
+
+
 def test_the_fetcher_matches_robots_on_its_product_token(monkeypatch):
     f, _ = fetcher(lambda req: httpx.Response(200))
     assert f.user_agent.startswith("Mozilla/5.0 (compatible; ")
     assert robots_token_of(f) == "OregonAI-CivicCorpus"
+    url = "https://h.gov/a"
+    clear = _serve_robots(monkeypatch, "User-agent: OregonAI-CivicCorpus\nDisallow: /\n")
+    try:
+        assert f.allowed(url) is False
+        g, _ = fetcher(lambda req: httpx.Response(200), enforce_robots=True)
+        with pytest.raises(Refused):
+            g.get(url)
+        clear()
+        _serve_robots(monkeypatch, "User-agent: Mozilla\nDisallow: /\n")
+        assert f.allowed(url) is True
+    finally:
+        clear()
 
 
 def robots_token_of(f):

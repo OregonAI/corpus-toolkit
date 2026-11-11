@@ -69,6 +69,9 @@ FETCH_TIMEOUT_S = 15
 # The conventional crawler form (Googlebot, Bingbot): `Mozilla/5.0 (compatible; Name/1.2; +url)`.
 _COMPATIBLE = re.compile(r"Mozilla/\d[\d.]*\s+\(compatible;\s*([^/;\s)]+)")
 
+# Only the toolkit's own products are unwrapped; a caller's agent is never rewritten.
+_OUR_TOKENS = frozenset({"OregonAI-CivicCorpus", "corpus-toolkit-change-detector"})
+
 
 def product_token(user_agent: str) -> str:
     """The name robots.txt directives are matched against, from a User-Agent HEADER.
@@ -76,12 +79,13 @@ def product_token(user_agent: str) -> str:
     `urllib.robotparser` takes the text before the first "/" of whatever it is given, so the
     crawler form `Mozilla/5.0 (compatible; OregonAI-CivicCorpus/1.36.5; +...)` would be
     matched as `Mozilla` -- rules written for a browser family, not for us (ADR-0019). For
-    that form this returns the product inside the parenthesis; any other string (a bare
-    token such as the drift detector's, or a caller's own) is returned unchanged, so it
-    matches exactly as it always did. Header = what the host sees; token = what we match.
+    that form, when the product is one of ours (`OregonAI-CivicCorpus`,
+    `corpus-toolkit-change-detector`), this returns it; any other string (a bare token, or a
+    caller's own agent, crawler-form or not) is returned unchanged, so it matches exactly as
+    it always did. Header = what the host sees; token = what we match.
     """
     m = _COMPATIBLE.match(user_agent or "")
-    return m.group(1) if m else user_agent
+    return m.group(1) if m and m.group(1) in _OUR_TOKENS else user_agent
 
 
 @dataclass
