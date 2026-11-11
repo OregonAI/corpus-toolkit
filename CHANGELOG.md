@@ -2,7 +2,7 @@
 
 Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pins.
 
-## Unreleased
+## v1.37.0 — 2026-11-11
 
 ### Changed — the default User-Agent is the conventional crawler form (ADR-0019)
 
