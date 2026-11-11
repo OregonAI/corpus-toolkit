@@ -19,6 +19,12 @@ material we are entitled to reproduce, state or federal):
     coverage_warn_threshold (both configurable in corpus.yml's
     `provenance:` block; default 0.70 / 0.90).
 
+content_mode: stub (corpus-toolkit#213, ADR-0017): the instrument exists but is not public.
+There is no snapshot and nothing to verify, so the snapshot and verbatim checks do not
+apply -- and the gate instead refuses any text a stub carries (a '## Full text' section, a
+[VERBATIM] block, or a body longer than STUB_MAX_BODY_CHARS), because an unverified
+paraphrase is exactly what a stub is not allowed to hold.
+
 Non-verbatim state-authored docs fail unless frontmatter carries
 content_exception or migration_pending (warn instead). external_reference
 must be summary. Legacy [VERBATIM] quote blocks are checked wherever present.
@@ -64,6 +70,11 @@ VERBATIM_REQUIRED = {"statute", "rule", "executive_order", "policy", "procedure"
                      # the agency made. That is the whole distinction the corpus carries.
                      "performance_report"}
 
+# A stub holds the disclaimer and a one-line reason. The disclaimer line is the longest
+# thing in a well-formed one; this leaves room for it and a sentence or two, and refuses a
+# body that is evidently carrying content.
+STUB_MAX_BODY_CHARS = 1000
+
 # Deprecated alias. The old name is inaccurate now but was importable, so it stays.
 STATE_AUTHORED = VERBATIM_REQUIRED
 
@@ -90,6 +101,23 @@ def quote_in_text(quote: str, text: str) -> bool:
     return True
 
 
+def _stub_findings(body):
+    """A stub has nothing to verify against, so what the gate checks is that it holds
+    nothing that would need verifying."""
+    out = []
+    if extract_fulltext(body) is not None:
+        out.append(("error", "content_mode: stub but the body has a '## Full text' section "
+                             "-- a stub holds no text"))
+    if extract_verbatim_quotes(body):
+        out.append(("error", "content_mode: stub but the body has [VERBATIM] quote blocks "
+                             "-- a stub holds no text"))
+    if len(body.strip()) > STUB_MAX_BODY_CHARS:
+        out.append(("error", f"content_mode: stub but the body is {len(body.strip())} "
+                             f"characters (> {STUB_MAX_BODY_CHARS}) -- a stub holds the "
+                             f"disclaimer and a one-line reason, not content"))
+    return out
+
+
 def check_file(path):
     """Verify one content file. Returns (rel, findings, checked, fulltexts, quotes)."""
     config, slice_fn = _CONFIG, _SLICE_FN
@@ -101,6 +129,10 @@ def check_file(path):
     except ValueError as e:
         return rel, [("error", str(e))], 0, 0, 0
     doc_id = fm.get("id")
+    if fm.get("content_mode") == "stub":
+        # BEFORE the snapshot checks, and keyed on content_mode alone: no other document
+        # reaches this branch, so nothing is excused from a rule it was under before.
+        return rel, _stub_findings(body), 0, 0, 0
     snap_id = fm.get("snapshot_id") or doc_id
     fmt = fm.get("source_format", "html")
     raw = config.snapshot_dir / f"{snap_id}.{fmt}"
