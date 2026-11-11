@@ -13,6 +13,9 @@ platform rests on, so:
   - A host that answers 401/403/429 to an honest agent has refused us at the HTTP layer.
     That source is UNAVAILABLE and is recorded as such; `Refused` is raised so the caller
     cannot mistake it for a 404. We do not then retry wearing a Chrome fingerprint.
+    (ADR-0018 adds ONE opt-in exception to "retry": a Cloudflare/Sucuri CHALLENGE, which is
+    scored on the Python client's connection, may be repeated through the system curl under
+    this same honest User-Agent. See "CURL ON CHALLENGE" below.)
   - One request per source, cached on disk forever after (`snapshot`). Re-fetching is
     opt-in, never a side effect of running an ingester again.
   - `min_interval` between requests to the same host, always.
@@ -28,6 +31,19 @@ the SAME User-Agent: `curl --http2` -> 200, `curl --http1.1` -> 403. Python's ur
 only HTTP/1.1, so every request was scored on protocol version and refused. Speaking HTTP/2
 is not impersonation -- it is being a current client, with the honest User-Agent unchanged.
 This is also why `httpx[http2]` is a toolkit dependency rather than an extra.
+
+CURL ON CHALLENGE (ADR-0018, AWAITING OWNER CONFIRMATION). The same shape came back with
+HTTP/2 already in place: www.cdt.ca.gov answers this client 403 `cf-mitigated: challenge`
+and system curl 8.5, sending the SAME User-Agent, 200. The host scores the Python client's
+connection, not our identity, so recording it `Refused` would misstate the publisher.
+`Fetcher(curl_on_challenge=True)` therefore repeats a CHALLENGED request (only that: not a
+plain 403, not a 404) through the system `curl`, with every guarantee below kept. Off by
+default; a missing curl raises `CurlUnavailable` at construction. THE LINE IS THE IDENTITY
+RULE: the User-Agent is always `self.user_agent`; never a browser string or header set,
+never an impersonation build (curl-impersonate, curl_cffi), never challenge solving, never
+a cookie. A host that challenges curl too is still `Challenge`. Using a different
+implementation of the same protocols is being a current client; claiming to be someone else
+is not.
 
 TLS. Some hosts serve their leaf certificate without the intermediate, so every verifying
 client fails while browsers paper over it. That is the host's misconfiguration; the remedy
@@ -224,7 +240,14 @@ class Fetcher:
       * `enforce_robots=True` consults robots.txt for the configured agent before each
         request and raises `Refused` on an explicit disallow. An unreachable robots.txt is
         `None`, not permission, and is let through -- the corpus decides what unknown means.
-      * `transport`, `sleep` and `clock` exist so tests can run it with no network and no
+      * `get_range(url, start, end)` / `get_response(url, byte_range)` are the public ranged
+        and full-response gets, with all of the above. Do not reach into `client()` for them:
+        that skips the interval, the backoff and the curl opt-in.
+      * `curl_on_challenge=True` (ADR-0018): a host that challenges the Python client is
+        fetched with the system curl, same User-Agent, remembered per host. To use it from
+        a corpus that may run on an older toolkit, feature-detect:
+        `"curl_on_challenge" in inspect.signature(Fetcher.__init__).parameters`.
+      * `transport`, `runner`, `sleep` and `clock` exist so tests can run it with no network and no
         waiting; production callers leave them alone.
     """
 
