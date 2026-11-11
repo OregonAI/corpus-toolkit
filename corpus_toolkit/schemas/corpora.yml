@@ -23,7 +23,7 @@
 #   ci_track     calls the toolkit's reusable workflows; a canary target when live + public
 #   toolkit_pin  pins the toolkit in requirements*.txt; a propagate-pin target when live
 repos:
-  # ---- corpus tier: eight live, one retired -------------------------------------------
+  # ---- corpus tier: nine live, one retired -------------------------------------------
   - name: executive-regulatory-frameworks
     tier: corpus
     visibility: public
@@ -72,6 +72,15 @@ repos:
     status: live
     ci_track: true
     toolkit_pin: true
+  # Cross-state corpus (Oregon, Washington, California, Colorado at first): how state
+  # governments regulate their own IT. Renamed from states-it-governance and made public on
+  # 2026-11-11. First multi-jurisdiction corpus (v1.37.0).
+  - name: states-government-it
+    tier: corpus
+    visibility: public
+    status: live
+    ci_track: true
+    toolkit_pin: true
   # Folded into executive-regulatory-frameworks on 2026-08-01; the route serves a tombstone.
   - name: oregon-records-retention
     tier: corpus
@@ -98,6 +107,22 @@ repos:
     status: live
     ci_track: false
     toolkit_pin: true
+  # SessionGateway is the TypeScript MCP server over one legislative session; it does not
+  # use this toolkit. hearing-transcripts holds machine transcripts of committee hearings
+  # that SessionGateway reads (data only). Neither calls the reusable workflows or pins the
+  # toolkit; they are listed because this file is a claim about the whole org.
+  - name: SessionGateway
+    tier: consumer
+    visibility: public
+    status: live
+    ci_track: false
+    toolkit_pin: false
+  - name: hearing-transcripts
+    tier: consumer
+    visibility: public
+    status: live
+    ci_track: false
+    toolkit_pin: false
   # ---- platform tier -------------------------------------------------------------------
   # The template calls the reusable workflows and pins the toolkit, so it is BOTH a canary
   # target and a bump target: it is the corpus every new corpus starts as, and it is how
