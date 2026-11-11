@@ -613,6 +613,41 @@ its registry commented out and `oregon-audits` declares none, so requiring one
 would leave this tool unregistered on two of the three corpora a cross-corpus
 agency profile has to ask.
 
+### `compare(query, jurisdictions, doc_type?, issuing_body?, tags?, limit_per_jurisdiction?, mode?)`
+
+One query run **separately** for each requested jurisdiction, the top passages returned
+grouped by jurisdiction (corpus-toolkit#212). It exists for a corpus whose documents carry
+different `jurisdiction`s (see `corpus_overview().jurisdictions`). In a single merged
+ranking a jurisdiction with more text outranks one with less, and the caller cannot tell
+"no hits" from "outranked"; each group here is its own `search_corpus` call with
+`jurisdiction` set, so neither can happen.
+
+    {query, filters, mode, limit_per_jurisdiction,
+     groups: [{jurisdiction, has_hits, returned, in_corpus, hits: [...]}],
+     corpus, archetype, authoritative_source, disclaimer, contract_version}
+
+`groups` follow the request order, with duplicates and blanks dropped. Each `hits` list
+holds `search_corpus` hits (same shape), at most `limit_per_jurisdiction` (default 3,
+clamped to 1-20). `doc_type`, `issuing_body`, `tags` and `mode` mean what they mean in
+`search_corpus` and apply inside every group; `filters` echoes those that were set.
+
+**A jurisdiction with no hits is an explicit empty group** (`hits: []`,
+`has_hits: false`), never an omitted one. `in_corpus` tells two empty groups apart: `true`
+means documents carry this jurisdiction and none matched; `false` means no document does,
+so this corpus cannot answer for it at all; `null` means that could not be checked (the
+backend's `overview()` reports no `jurisdictions`). The `no_hits` record `search_corpus`
+uses is never placed in `hits`.
+
+**Refusals** carry `error` and no `groups`: an empty `jurisdictions` list, or a backend
+whose `search` cannot filter by jurisdiction (each group would otherwise come back as the
+whole corpus).
+
+**Optional, not core.** Registered when the retrieval backend's `search` names the
+`jurisdiction` keyword (the capability `search_corpus` already requires to filter), on any
+archetype. Single-jurisdiction corpora get it too and it is harmless there. Because it is
+not core, "servers must not remove core tools" does not bind it, but the name is
+**reserved**. Additive, so the contract stays v1.
+
 ## API-corpus extensions
 
 - `list_datasets()` — datasets/entities with descriptions and freshness.
@@ -646,13 +681,14 @@ or not this corpus happens to serve it:
 
     search_corpus   get_document        resolve_citation   graph_neighbors
     corpus_overview authority_chain     issuing_body_profile
-    documents_by_agency
+    documents_by_agency compare
 
 `authority_chain` and `issuing_body_profile` are conditional on archetype;
 `issuing_body_profile` and `documents_by_agency` are conditional on the backend
 implementing `holdings_for` / `documents_for_slug`. `documents_by_agency` has no
-archetype condition — an `api` corpus registers it too. All three are reserved
-anyway. A corpus
+archetype condition — an `api` corpus registers it too. `compare` is conditional on
+the backend's `search` naming `jurisdiction`, also with no archetype condition. All
+four are reserved anyway. A corpus
 that claimed a conditional name would start clean, serve corpus semantics under
 a core tool's name, and turn fatal the day the condition changed with no edit to
 its tools module.

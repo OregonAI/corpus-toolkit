@@ -4,6 +4,29 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — `compare` tool: one query per jurisdiction, results grouped (corpus-toolkit#212)
+
+For a corpus whose documents carry different jurisdictions (states-it-governance), a merged
+`search_corpus` ranking lets a jurisdiction with more text crowd out one with less, and the
+caller cannot tell "no hits" from "outranked". `compare(query, jurisdictions, doc_type?,
+issuing_body?, tags?, limit_per_jurisdiction?, mode?)` runs the search separately per
+jurisdiction (it is `search_corpus` with the #211 `jurisdiction` filter, once each) and
+returns `groups`, one per jurisdiction in request order, each with its top `hits`. A
+jurisdiction with no match is an explicit empty group, and `in_corpus` (`true` / `false` /
+`null` for could-not-check) separates "held but nothing matched" from "no document carries
+this jurisdiction", so an empty group is never the only word.
+
+It is an OPTIONAL tool, not a core one, on the pattern of `documents_by_agency`: registered
+when the backend's `search` names `jurisdiction`, on any archetype; the name `compare` is
+added to the reserved set (a corpus `tools_module` that registers its own `compare` now
+refuses to start, as for the other reserved names). The framework method refuses, with
+`error`, an empty jurisdiction list or a backend that cannot filter by jurisdiction.
+
+Backward compatible: no existing tool, parameter, response or ranking changes, and no index
+rebuild. `docs/mcp-interface-contract.md` documents the tool and the reserved name; the
+contract stays v1. The release-gate smoke (`.github/scripts/contract_smoke.py`) now requires
+and round-trips `compare` on the file-backed template corpus.
+
 ### Added — `search_corpus` filters on `jurisdiction` and `tags` (corpus-toolkit#211)
 
 `search_corpus` filtered on `doc_type` and `issuing_body` only; `tags` were searchable text,

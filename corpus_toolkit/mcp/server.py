@@ -82,6 +82,9 @@ RESERVED_TOOL_NAMES = frozenset({
     # what is present would let a corpus claim the name today and turn fatal the day the
     # condition changed, with no edit to its tools module (corpus-toolkit#111).
     "documents_by_agency",
+    # CONDITIONAL on the backend filtering by jurisdiction (corpus-toolkit#212); reserved
+    # for the same reason as the names above.
+    "compare",
 })
 
 
@@ -236,6 +239,25 @@ def build_server(config):
                   f"backend ({fw.backend.name}) implements no holdings_for(slug), so the "
                   f"tool would raise on every call. Implement it to serve this tool.",
                   file=sys.stderr)
+
+    # OPTIONAL, NOT CORE, like `documents_by_agency` (corpus-toolkit#212). Every live corpus
+    # is single-jurisdiction and a comparison across one is meaningless, so it is not in the
+    # corpus contract's core set and "servers must not remove core tools" does not bind it.
+    # Gated on the capability, not on the archetype: it is `search_corpus` run once per
+    # jurisdiction, so a backend whose `search` cannot filter by jurisdiction would only ever
+    # answer unfiltered groups -- the landmine corpus-toolkit#38 forbids registering.
+    if fw._backend_takes("jurisdiction"):
+        @mcp.tool()
+        def compare(query: str, jurisdictions: list[str], doc_type: str = "",
+                    issuing_body: str = "", tags: list[str] | None = None,
+                    limit_per_jurisdiction: int = 3, mode: str = "hybrid") -> ResponseEnvelope:
+            """Run one query separately for each jurisdiction and return the top passages
+            grouped by jurisdiction, so a jurisdiction with more text cannot crowd out one
+            with less. A jurisdiction with no hits is returned as an explicit empty group;
+            `in_corpus` says whether any document carries it. Takes the same doc_type,
+            issuing_body, tags and mode filters as search_corpus."""
+            return fw.compare(query, jurisdictions, doc_type or None, issuing_body or None,
+                              tags or None, limit_per_jurisdiction, mode)
 
     # NOT gated on a registry, unlike `issuing_body_profile` directly above.
     #

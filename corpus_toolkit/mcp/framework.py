@@ -852,6 +852,67 @@ class CorpusFramework:
             hit["issuing_body_filter"] = dict(filt)
         return hits
 
+    def compare(self, query: str, jurisdictions: list[str], doc_type: str | None = None,
+                issuing_body: str | None = None, tags: list[str] | None = None,
+                limit_per_jurisdiction: int = 3, mode: str = "hybrid") -> dict:
+        """One `search_corpus` per jurisdiction, answered as groups (corpus-toolkit#212).
+
+        WHY NOT ONE SEARCH. In a merged ranking a jurisdiction with more text outranks one
+        with less, and the caller cannot tell "no hits" from "outranked". Each group here
+        is its own filtered search, so the top passages of a small jurisdiction cannot be
+        displaced by a large one, and a jurisdiction with nothing is a group that says so.
+
+        THE SAME FILTERS AS `search_corpus` (doc_type, issuing_body, tags) apply inside
+        every group; `jurisdiction` is the grouping key and is not a filter here.
+
+        TWO EMPTY GROUPS THAT MEAN DIFFERENT THINGS, kept apart by `in_corpus`: `true`
+        -- documents carry this jurisdiction and none matched -- and `false` -- no
+        document carries it, so the corpus cannot answer for it at all. `null` is "could
+        not check": a backend whose `overview()` reports no jurisdictions. `has_hits` is
+        never the only word on an empty group.
+
+        A backend whose `search` cannot filter by jurisdiction is REFUSED, not run: each
+        group would come back as the whole corpus and read as a per-jurisdiction answer.
+        """
+        seen: list[str] = []
+        for j in (jurisdictions or []):
+            j = str(j or "").strip()
+            if j and j not in seen:
+                seen.append(j)
+        if not seen:
+            return {"error": "compare needs at least one jurisdiction; none was given.",
+                    **self._envelope(), "disclaimer": self.disclaimer,
+                    "contract_version": self.config.contract_version}
+        if not self._backend_takes("jurisdiction"):
+            return {"error": (f"the retrieval backend {self.backend.name!r} cannot filter by "
+                              f"jurisdiction (its search() does not take it), so no group "
+                              f"could be run. This is not a statement that nothing matches."),
+                    **self._envelope(), "disclaimer": self.disclaimer,
+                    "contract_version": self.config.contract_version}
+        try:
+            held = self.backend.overview().get("jurisdictions")
+        except Exception:                                   # noqa: BLE001
+            held = None
+        held = held if isinstance(held, dict) else None
+        n = max(1, min(int(limit_per_jurisdiction), 20))
+        groups = []
+        for jur in seen:
+            raw = self.search_corpus(query, doc_type, issuing_body, n, mode, jur, tags)
+            hits = [h for h in raw if not h.get("no_hits")]
+            groups.append({
+                "jurisdiction": jur,
+                "has_hits": bool(hits),
+                "returned": len(hits),
+                "in_corpus": None if held is None else jur in held,
+                "hits": hits,
+            })
+        filters = {k: v for k, v in (("doc_type", doc_type), ("issuing_body", issuing_body),
+                                     ("tags", [t for t in (tags or []) if t] or None)) if v}
+        return {"query": query, "filters": filters, "mode": mode,
+                "limit_per_jurisdiction": n, "groups": groups,
+                **self._envelope(), "disclaimer": self.disclaimer,
+                "contract_version": self.config.contract_version}
+
     def _no_filtered_hits(self, query: str, doc_type: str | None, filters: dict) -> dict:
         """The one record a jurisdiction/tag-filtered search with no matches answers with.
         Same reasoning as `_no_issuing_body_hits`: not a hit (no id/path/snippet), and it

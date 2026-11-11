@@ -537,6 +537,10 @@ def check_result_marshalling(dest: Path) -> None:
         # round-trips whatever the code does. That is the vacuity the `search_corpus`
         # special-case below guards against, and the first version of this line had it.
         ("documents_by_agency", {"slug": _smoke_slug(dest)}),
+        # corpus-toolkit#212. The declared jurisdiction is what every document without its
+        # own resolves to, so the group has hits to round-trip.
+        ("compare", {"query": "correspondence",
+                     "jurisdictions": [PLACEHOLDERS["JURISDICTION"]], "mode": "keyword"}),
     ]
     # PRESENT, NOT MERELY COVERED. The loop below skips any tool that is not registered, and
     # `documents_by_agency` is not in MANDATORY_CORE_TOOLS — so if its registration gate
@@ -549,6 +553,11 @@ def check_result_marshalling(dest: Path) -> None:
             "capability gate in server.py inverted or FileBackend lost documents_for_slug; "
             "either way the tool every corpus-gateway agency lookup depends on is gone, and "
             "the calls below would have skipped it silently.")
+    if "compare" not in tools:
+        raise GateFailure(
+            "compare is not registered on a file-backed corpus. Either the capability gate "
+            "in server.py inverted or FileBackend.search stopped naming `jurisdiction`; the "
+            "call below would have skipped it silently (corpus-toolkit#212).")
     for name, args in calls:
         if name == "documents_by_agency" and not args.get("slug"):
             raise GateFailure(
@@ -576,6 +585,9 @@ def check_result_marshalling(dest: Path) -> None:
             problems.append(f"documents_by_agency returned {len(raw.get('documents', []))} "
                             f"document(s) for {args['slug']!r}, so its per-document "
                             f"assertions would pass over an empty list")
+        if name == "compare" and not any(g.get("hits") for g in raw.get("groups", [])):
+            problems.append("compare returned no hits in any group, so its round-trip "
+                            "would assert nothing about the field serialization could drop")
         if name == "search_corpus" and not any(h.get("id") == DOC_ID for h in raw):
             # Otherwise this tool's whole leg is `[] == []`: every assertion below holds
             # for an empty answer. Step 5 asserts hits exist, but against the server it
