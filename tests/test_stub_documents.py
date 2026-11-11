@@ -45,6 +45,8 @@ def test_a_stub_must_say_why():
 def test_a_stub_carries_no_snapshot_pin():
     # A hash on a stub would claim a snapshot the gate has none of to check.
     assert _errors(_stub(source_sha256="a" * 64))
+    assert _errors(_stub(snapshot_id="x"))
+    assert _errors(_stub(snapshot_policy="hash-only"))
 
 
 def test_the_same_document_without_stub_mode_still_fails_as_before():
@@ -255,6 +257,18 @@ def test_health_does_not_warn_that_a_stub_only_doc_type_has_no_text(corpus):
     h = fw(corpus).backend.health()
     assert h["reachable"] is True
     assert "WARNING" not in h["detail"] and h["empty_body_by_doc_type"] == {}
+
+
+def test_a_stub_does_not_dilute_the_empty_body_count_of_real_documents(corpus):
+    """A doc_type of stubs plus real documents is judged on the real ones: the one real
+    document's headings match nothing, so the warning must still fire."""
+    (corpus / "statutes" / "ors-2.020.md").unlink()
+    _add_stub(corpus)
+    yml = corpus / "_meta" / "corpus.yml"
+    yml.write_text(yml.read_text() + "index_headings:\n  statute: [\"No such heading\"]\n")
+    _commit(corpus)
+    h = fw(corpus).backend.health()
+    assert "WARNING" in h["detail"] and h["empty_body_by_doc_type"] == {"statute": 1}
 
 
 # ---------- coverage ----------

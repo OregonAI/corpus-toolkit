@@ -6,6 +6,7 @@ value untouched and adds `jurisdictions`: {jurisdiction: document count} read fr
 documents. A single-jurisdiction corpus is unchanged except for the one additive field.
 """
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -46,9 +47,18 @@ def test_two_jurisdiction_corpus_reports_each_with_its_count(corpus):
 
 
 def test_counts_are_ordered_largest_first_and_sum_to_the_corpus(corpus):
+    # 2 against 1: a tie would pass in any order, and dict equality ignores order anyway.
     _set_jurisdiction(corpus, "ors-1.010", "us-wa")
+    p = corpus / "statutes" / "ors-2.020.md"
+    p.write_text(p.read_text().replace("status: current\n", "status: current\njurisdiction: us-wa\n", 1))
+    _commit(corpus)
+    shutil.copy(corpus / "statutes" / "ors-1.010.md", corpus / "statutes" / "ors-3.030.md")
+    q = corpus / "statutes" / "ors-3.030.md"
+    q.write_text(re.sub(r"^jurisdiction:.*\n", "", q.read_text(), flags=re.M)
+                 .replace("ors-1.010", "ors-3.030"))
+    _commit(corpus)
     o = fw(corpus).corpus_overview()
-    assert o["jurisdictions"] == {"oregon": 1, "us-wa": 1}
+    assert list(o["jurisdictions"].items()) == [("us-wa", 2), ("oregon", 1)]
     assert sum(o["jurisdictions"].values()) == sum(o["documents_by_type"].values())
 
 
