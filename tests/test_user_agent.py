@@ -6,9 +6,11 @@ sibling-index fetch, and this platform asks publishers to make deliberate decisi
 agent — `corpus-detect-changes --check-robots` exists for exactly that. Telling them a version
 that has not existed since v1.1 undercuts the whole posture.
 
-Note what is NOT tested here: `sources/changes.py`'s `corpus-toolkit-change-detector`. That
-string is passed to `robots.allowed()` and `robots.ai_position()`, so it is the token matched
-against robots.txt directives — load-bearing rather than cosmetic, and deliberately left alone.
+Note what is NOT tested here: `sources/changes.py`'s drift header. Its robots token,
+`corpus-toolkit-change-detector`, is what robots.txt directives are matched against —
+load-bearing rather than cosmetic (tests/test_http2_fetch.py pins it). This module's
+`remote.USER_AGENT` is deliberately NOT the crawler form of ADR-0019: it only talks to our
+own sibling indexes.
 """
 import json
 import pathlib

@@ -63,10 +63,11 @@ def _toolkit_version() -> str:
 # --check-robots` exists for that, and AGENTS.md devotes a section to recording the answer —
 # so identifying ourselves accurately is part of the posture, not decoration.
 #
-# NOT the string robots.txt is matched against. That is `sources/changes.py`'s
-# `corpus-toolkit-change-detector`, which is passed to `robots.allowed()` and
-# `robots.ai_position()` and is therefore load-bearing; it is deliberately left unversioned so
-# a directive naming it keeps matching. This one is identification only.
+# NOT the string robots.txt is matched against. That is the detector's product token
+# `corpus-toolkit-change-detector` (`sources/changes.py` ROBOTS_TOKEN), which is load-bearing
+# and unversioned so a directive naming it keeps matching. This one is identification only,
+# and stays as it is: it fetches our own sibling indexes, so the crawler form of ADR-0019
+# (which exists for third-party firewalls) does not apply.
 USER_AGENT = (f"corpus-toolkit/{_toolkit_version()} "
               f"(+https://github.com/OregonAI/corpus-toolkit) sibling-index-fetch")
 
