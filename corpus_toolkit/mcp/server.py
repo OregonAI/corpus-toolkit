@@ -82,6 +82,12 @@ RESERVED_TOOL_NAMES = frozenset({
     # what is present would let a corpus claim the name today and turn fatal the day the
     # condition changed, with no edit to its tools module (corpus-toolkit#111).
     "documents_by_agency",
+    # CONDITIONAL on the backend filtering by jurisdiction (corpus-toolkit#212); reserved
+    # for the same reason as the names above.
+    "compare",
+    # CONDITIONAL on the backend implementing coverage() (corpus-toolkit#213); reserved for
+    # the same reason.
+    "coverage",
 })
 
 
@@ -156,9 +162,13 @@ def build_server(config):
 
     @mcp.tool()
     def search_corpus(query: str, doc_type: str = "", issuing_body: str = "",
-                      limit: int = 10, mode: str = "hybrid") -> list[dict]:
+                      limit: int = 10, mode: str = "hybrid", jurisdiction: str = "",
+                      tags: list[str] | None = None) -> list[dict]:
         """Search the corpus. Returns ranked matches with snippets, never whole
-        documents. Optional filters: doc_type, issuing_body. mode: 'hybrid'
+        documents. Optional filters: doc_type, issuing_body, jurisdiction, tags.
+        `jurisdiction` matches a document's own jurisdiction (else the corpus's
+        declared one) exactly; `tags` keeps only documents carrying EVERY tag
+        listed. Both apply to keyword and semantic results alike. mode: 'hybrid'
         (default, keyword+semantic when this corpus has semantic search
         configured), 'keyword' (BM25 only), 'semantic' (vector only, falls
         back to keyword if unavailable).
@@ -172,7 +182,8 @@ def build_server(config):
         with no matches returns one `no_hits` record saying what was searched
         for — never a bare empty list, which cannot tell "this body has nothing
         here" from "you passed the other kind of string"."""
-        return fw.search_corpus(query, doc_type or None, issuing_body or None, limit, mode)
+        return fw.search_corpus(query, doc_type or None, issuing_body or None, limit, mode,
+                                jurisdiction or None, tags or None)
 
     @mcp.tool()
     def get_document(doc_id: str, part: str = "auto") -> ResponseEnvelope:
@@ -231,6 +242,36 @@ def build_server(config):
                   f"backend ({fw.backend.name}) implements no holdings_for(slug), so the "
                   f"tool would raise on every call. Implement it to serve this tool.",
                   file=sys.stderr)
+
+    # OPTIONAL, NOT CORE, like `documents_by_agency` (corpus-toolkit#212). Every live corpus
+    # is single-jurisdiction and a comparison across one is meaningless, so it is not in the
+    # corpus contract's core set and "servers must not remove core tools" does not bind it.
+    # Gated on the capability, not on the archetype: it is `search_corpus` run once per
+    # jurisdiction, so a backend whose `search` cannot filter by jurisdiction would only ever
+    # answer unfiltered groups -- the landmine corpus-toolkit#38 forbids registering.
+    if fw._backend_takes("jurisdiction"):
+        @mcp.tool()
+        def compare(query: str, jurisdictions: list[str], doc_type: str = "",
+                    issuing_body: str = "", tags: list[str] | None = None,
+                    limit_per_jurisdiction: int = 3, mode: str = "hybrid") -> ResponseEnvelope:
+            """Run one query separately for each jurisdiction and return the top passages
+            grouped by jurisdiction, so a jurisdiction with more text cannot crowd out one
+            with less. A jurisdiction with no hits is returned as an explicit empty group;
+            `in_corpus` says whether any document carries it. Takes the same doc_type,
+            issuing_body, tags and mode filters as search_corpus."""
+            return fw.compare(query, jurisdictions, doc_type or None, issuing_body or None,
+                              tags or None, limit_per_jurisdiction, mode)
+
+    # OPTIONAL, NOT CORE (corpus-toolkit#213). Gated on the capability: a backend with no
+    # `coverage()` would only ever answer an empty table, which reads as "nothing is held".
+    if callable(getattr(fw.backend, "coverage", None)):
+        @mcp.tool()
+        def coverage(jurisdiction: str = "") -> ResponseEnvelope:
+            """What the corpus holds per jurisdiction and tag, with stubs (instruments known
+            to exist whose text is not held) counted apart from documents, so "no provision
+            found" can be told from "not in the corpus". Pass a jurisdiction to ask about
+            one; one the corpus does not carry comes back as an explicit zero entry."""
+            return fw.coverage(jurisdiction or None)
 
     # NOT gated on a registry, unlike `issuing_body_profile` directly above.
     #

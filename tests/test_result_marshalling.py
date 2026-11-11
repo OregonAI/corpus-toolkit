@@ -176,7 +176,8 @@ def register(mcp, framework):
 # Tools whose payload is a LIST that must come back non-empty, or the round-trip compares
 # `[] == []` and asserts nothing about the one field serialization could drop. Keyed by the
 # response key, checked wherever CALLS is driven (corpus-toolkit#46).
-NON_EMPTY_LIST_PAYLOADS = {"documents_by_agency": "documents"}
+NON_EMPTY_LIST_PAYLOADS = {"documents_by_agency": "documents", "compare": "groups"}
+# `coverage` is a mapping, not a list: its non-vacuity is that the table is not empty.
 
 CALLS = {
     "corpus_overview": {},
@@ -187,6 +188,8 @@ CALLS = {
     "authority_chain": {"doc_id": "alpha"},
     "issuing_body_profile": {"slug_or_query": "archives-division"},
     "documents_by_agency": {"slug": "archives-division"},
+    "compare": {"query": QUERY, "jurisdictions": ["oregon"], "mode": "keyword"},
+    "coverage": {},
     "list_datasets": {},
     "query_dataset": {"key": "budget", "limit": 2},
     "join_lookup": {"document_id": "alpha"},

@@ -43,6 +43,9 @@ ACTS = {
     "summary": ("open the official link; confirm identity, metadata (term/dates/"
                 "version), and that the summary misstates nothing"),
     "mixed": "both of the above, per section",
+    "stub": ("open the official link; confirm the instrument still exists and is still "
+             "not public (or still cannot be fetched) -- if its text is now available, "
+             "ingest it and drop the stub"),
 }
 
 

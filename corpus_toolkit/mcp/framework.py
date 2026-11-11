@@ -769,7 +769,8 @@ class CorpusFramework:
 
     def search_corpus(self, query: str, doc_type: str | None = None,
                       issuing_body: str | None = None, limit: int = 10,
-                      mode: str = "hybrid") -> list[dict]:
+                      mode: str = "hybrid", jurisdiction: str | None = None,
+                      tags: list[str] | None = None) -> list[dict]:
         """mode: 'hybrid' (default) fuses BM25 keyword + a registered
         semantic_search_module via RRF; 'keyword' is FTS5/BM25 only;
         'semantic' is vector-only. Hybrid/semantic silently degrade to
@@ -800,25 +801,196 @@ class CorpusFramework:
             two different findings -- a real body holding nothing here, and a string that
             is nobody's frontmatter value -- arrived identical.
 
-        UNFILTERED SEARCH IS BYTE-IDENTICAL. The blast radius is the parameter under
-        repair: pass no `issuing_body` and the hit shape is exactly what it was.
+        `jurisdiction` AND `tags` (corpus-toolkit#211) filter on a document's own
+        `jurisdiction` (else the corpus's declared one) and on its frontmatter tags -- every
+        listed tag must be on the document. The backend applies them to the keyword and the
+        semantic ranking alike, before the two are fused. A backend whose `search` does not
+        NAME them cannot filter, and is not asked: it would answer unfiltered, and that
+        would be read as the filtered answer. The reply is one `no_hits` record carrying
+        `filters_unsupported` instead.
+
+        UNFILTERED SEARCH IS BYTE-IDENTICAL. The blast radius is the parameters under
+        repair: pass no `issuing_body`, `jurisdiction` or `tags` and the hit shape is
+        exactly what it was.
         """
+        extra: dict = {}
+        filters: dict = {}
+        jur = str(jurisdiction or "").strip()
+        if jur:
+            filters["jurisdiction"] = jur
+        if isinstance(tags, str):
+            tags = [tags]
+        tag_list = [t for t in (str(x).strip() for x in (tags or [])) if t]
+        if tag_list:
+            filters["tags"] = tag_list
+        if filters:
+            unsupported = [k for k in filters if not self._backend_takes(k)]
+            if unsupported:
+                return [self._filters_unsupported(query, filters, unsupported)]
+            extra = dict(filters)
         value = str(issuing_body or "").strip()
         if not value:
-            return self.backend.search(query, doc_type=doc_type, issuing_body=None,
-                                       limit=limit, mode=mode)
+            hits = self.backend.search(query, doc_type=doc_type, issuing_body=None,
+                                       limit=limit, mode=mode, **extra)
+            if not hits and filters:
+                return [self._no_filtered_hits(query, doc_type, filters)]
+            return hits
         filt = self._issuing_body_filter(value)
         if filt["matched"] == "registry_slug":
             hits = self.backend.search(query, doc_type=doc_type, issuing_body=None,
-                                       issuing_body_slug=value, limit=limit, mode=mode)
+                                       issuing_body_slug=value, limit=limit, mode=mode,
+                                       **extra)
         else:
             hits = self.backend.search(query, doc_type=doc_type, issuing_body=value,
-                                       limit=limit, mode=mode)
+                                       limit=limit, mode=mode, **extra)
         if not hits:
-            return [self._no_issuing_body_hits(query, doc_type, filt)]
+            rec = self._no_issuing_body_hits(query, doc_type, filt)
+            if filters:
+                rec["filters"] = filters
+            return [rec]
         for hit in hits:
             hit["issuing_body_filter"] = dict(filt)
         return hits
+
+    def compare(self, query: str, jurisdictions: list[str], doc_type: str | None = None,
+                issuing_body: str | None = None, tags: list[str] | None = None,
+                limit_per_jurisdiction: int = 3, mode: str = "hybrid") -> dict:
+        """One `search_corpus` per jurisdiction, answered as groups (corpus-toolkit#212).
+
+        WHY NOT ONE SEARCH. In a merged ranking a jurisdiction with more text outranks one
+        with less, and the caller cannot tell "no hits" from "outranked". Each group here
+        is its own filtered search, so the top passages of a small jurisdiction cannot be
+        displaced by a large one, and a jurisdiction with nothing is a group that says so.
+
+        THE SAME FILTERS AS `search_corpus` (doc_type, issuing_body, tags) apply inside
+        every group; `jurisdiction` is the grouping key and is not a filter here.
+
+        TWO EMPTY GROUPS THAT MEAN DIFFERENT THINGS, kept apart by `in_corpus`: `true`
+        -- documents carry this jurisdiction and none matched -- and `false` -- no
+        document carries it, so the corpus cannot answer for it at all. `null` is "could
+        not check": a backend whose `overview()` reports no jurisdictions. `has_hits` is
+        never the only word on an empty group.
+
+        A backend whose `search` cannot filter by jurisdiction is REFUSED, not run: each
+        group would come back as the whole corpus and read as a per-jurisdiction answer.
+        """
+        seen: list[str] = []
+        for j in (jurisdictions or []):
+            j = str(j or "").strip()
+            if j and j not in seen:
+                seen.append(j)
+        if not seen:
+            return {"error": "compare needs at least one jurisdiction; none was given.",
+                    **self._envelope(), "disclaimer": self.disclaimer,
+                    "contract_version": self.config.contract_version}
+        if not self._backend_takes("jurisdiction"):
+            return {"error": (f"the retrieval backend {self.backend.name!r} cannot filter by "
+                              f"jurisdiction (its search() does not take it), so no group "
+                              f"could be run. This is not a statement that nothing matches."),
+                    **self._envelope(), "disclaimer": self.disclaimer,
+                    "contract_version": self.config.contract_version}
+        try:
+            held = self.backend.overview().get("jurisdictions")
+        except Exception:                                   # noqa: BLE001
+            held = None
+        held = held if isinstance(held, dict) else None
+        n = max(1, min(int(limit_per_jurisdiction), 20))
+        groups = []
+        for jur in seen:
+            raw = self.search_corpus(query, doc_type, issuing_body, n, mode, jur, tags)
+            hits = [h for h in raw if not h.get("no_hits")]
+            groups.append({
+                "jurisdiction": jur,
+                "has_hits": bool(hits),
+                "returned": len(hits),
+                "in_corpus": None if held is None else jur in held,
+                "hits": hits,
+            })
+        filters = {k: v for k, v in (("doc_type", doc_type), ("issuing_body", issuing_body),
+                                     ("tags", [t for t in (tags or []) if t] or None)) if v}
+        return {"query": query, "filters": filters, "mode": mode,
+                "limit_per_jurisdiction": n, "groups": groups,
+                **self._envelope(), "disclaimer": self.disclaimer,
+                "contract_version": self.config.contract_version}
+
+    def coverage(self, jurisdiction: str | None = None) -> dict:
+        """What the corpus holds per jurisdiction and tag, stubs counted apart
+        (corpus-toolkit#213, ADR-0017).
+
+        The question this answers is the one a search cannot: "no provision found" versus
+        "not in the corpus". A jurisdiction the corpus does not carry is an explicit
+        zero entry with `in_corpus: false`; a stub is an instrument known to exist whose
+        text is not held (`stubs`), so it is counted neither as a document nor as absent.
+        `stub_share` is null when there is nothing to divide.
+
+        A backend with no `coverage()` is REFUSED with `error`, not answered with an empty
+        table: an empty table reads as "nothing is held".
+        """
+        env = {**self._envelope(), "disclaimer": self.disclaimer,
+               "contract_version": self.config.contract_version}
+        fn = getattr(self.backend, "coverage", None)
+        if not callable(fn):
+            return {"error": (f"the retrieval backend {self.backend.name!r} implements no "
+                              f"coverage(), so nothing can be said about what is held. "
+                              f"This is not a statement that the corpus is empty."), **env}
+        jurisdiction = (jurisdiction or "").strip() or None
+        raw = fn(jurisdiction) if jurisdiction else fn()
+        jurs = raw.get("jurisdictions") or {}
+        parts = list(jurs.values()) + ([raw["unspecified"]] if raw.get("unspecified") else [])
+        docs = sum(p["documents"] for p in parts)
+        stubs = sum(p["stubs"] for p in parts)
+        out = {"jurisdictions": jurs}
+        if raw.get("unspecified"):
+            out["unspecified"] = raw["unspecified"]
+        out["totals"] = {"documents": docs, "stubs": stubs, "total": docs + stubs}
+        return {**out, **env}
+
+    def _no_filtered_hits(self, query: str, doc_type: str | None, filters: dict) -> dict:
+        """The one record a jurisdiction/tag-filtered search with no matches answers with.
+        Same reasoning as `_no_issuing_body_hits`: not a hit (no id/path/snippet), and it
+        says what was searched for, because an empty list cannot."""
+        also = f" and doc_type={doc_type!r}" if doc_type else ""
+        return {
+            "no_hits": True,
+            "query": query,
+            "filters": dict(filters),
+            "note": (f"no document matched {query!r} with "
+                     f"{self._describe_filters(filters)}{also}. This is what was searched "
+                     f"for, not a statement that this corpus holds nothing for it."),
+        }
+
+    @staticmethod
+    def _describe_filters(filters: dict) -> str:
+        parts = []
+        if "jurisdiction" in filters:
+            parts.append(f"jurisdiction={filters['jurisdiction']!r}")
+        if "tags" in filters:
+            parts.append(f"tags={filters['tags']!r} (all required)")
+        return " and ".join(parts)
+
+    def _filters_unsupported(self, query: str, filters: dict, unsupported: list) -> dict:
+        return {
+            "no_hits": True,
+            "query": query,
+            "filters": dict(filters),
+            "filters_unsupported": list(unsupported),
+            "note": (f"the retrieval backend {self.backend.name!r} cannot filter by "
+                     f"{', '.join(unsupported)} (its search() does not take "
+                     f"{'it' if len(unsupported) == 1 else 'them'}), so the filter was "
+                     f"NOT applied and no search was run. This is not a statement that "
+                     f"nothing matches."),
+        }
+
+    def _backend_takes(self, name: str) -> bool:
+        """Does this backend's `search` NAME the keyword `name`? Same rule, and the same
+        reason, as `_backend_takes_slug_filter`: `**kwargs` does not count."""
+        fn = getattr(self.backend, "search", None)
+        try:
+            param = inspect.signature(fn).parameters.get(name)
+        except (TypeError, ValueError):
+            return False
+        return param is not None and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 
     # What each `matched` value actually filtered on, in the words a caller can act on.
     _FILTERED_COLUMN = {
@@ -1079,13 +1251,20 @@ class CorpusFramework:
         for i in cands:
             node = nodes.get(i)
             if node is not None:
-                hits.append({"id": i, "title": node["title"],
-                             "doc_type": node["doc_type"]})
-                continue
-            found = self.backend.exists(i)
-            if found:
-                hits.append({"id": found["id"], "title": found.get("title", ""),
-                             "doc_type": found.get("doc_type", "")})
+                hit = {"id": i, "title": node["title"], "doc_type": node["doc_type"]}
+            else:
+                found = self.backend.exists(i)
+                if not found:
+                    continue
+                hit = {"id": found["id"], "title": found.get("title", ""),
+                       "doc_type": found.get("doc_type", "")}
+            # A stub resolves -- "exists, not public" is the answer the tool is for -- but
+            # is flagged, so the match is not read as a document an agent can quote
+            # (corpus-toolkit#213). Added only on a stub; an optional backend capability.
+            is_stub = getattr(self.backend, "is_stub", None)
+            if callable(is_stub) and is_stub(hit["id"]):
+                hit["stub"] = True
+            hits.append(hit)
         out = {"citation": citation, "matches": hits, **self._envelope()}
 
         sibling_status = None
@@ -1100,6 +1279,10 @@ class CorpusFramework:
 
         if hits and resolver_note:
             out["note"] = resolver_note
+        if any(h.get("stub") for h in hits):
+            out["note"] = "; ".join(filter(None, [
+                out.get("note"), "a match marked stub exists but is not public: no text "
+                                 "is mirrored, so it cannot be quoted"]))
         if hits and sibling_status and sibling_status.get("stale"):
             out.setdefault("note", (
                 f"resolved from a STALE cached copy of sibling corpus "

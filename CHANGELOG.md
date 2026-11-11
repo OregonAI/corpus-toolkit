@@ -4,6 +4,108 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — stub documents and a `coverage` tool (corpus-toolkit#213)
+
+Some instruments are known to exist but are not public, or their official source refuses a
+fetch. A **stub** records that: `content_mode: stub`, frontmatter, the disclaimer and a
+one-line `stub_reason`, with no text and no snapshot. Before this there was no way to
+represent one (a `policy` with no snapshot failed the schema and the provenance gate).
+
+- **Schema.** `stub` is a new `content_mode`; it requires `stub_reason` and forbids
+  `source_sha256`, `snapshot_id` and `snapshot_policy`. For a stub only, `retrieved`,
+  `authority_level` and the external_reference `summary` rule are not applied. Every rule
+  for a non-stub document is unchanged.
+- **Provenance gate** (`corpus-verify-provenance`). A stub needs no snapshot, and is refused
+  if it holds text: a `## Full text` section, a `[VERBATIM]` block, or a body over 1000
+  characters. The exemption is keyed on `content_mode: stub` alone.
+- **Never a passage.** Excluded from keyword search, semantic candidates, `compare` and the
+  semantic build. `get_document` answers for it with `stub: true`, `stub_reason` and a
+  `note`; `resolve_citation` resolves it with `stub: true` and a note. `corpus_overview`
+  counts it under `content_mode.stub`. `health()` no longer treats a bodiless stub as an
+  empty-index fault. No index schema change; no rebuild.
+- **`coverage(jurisdiction?)`**, a new optional tool (registered when the backend implements
+  `coverage()`; name reserved): documents and stubs, with `stub_share`, per jurisdiction and
+  per tag, an explicit `in_corpus: false` zero for a jurisdiction not held, and documents with
+  no jurisdiction under `unspecified`. The release-gate smoke now requires and round-trips it.
+
+Backward compatible: no existing tool, parameter, response or validation result changes for a
+corpus with no stub; the eight live corpora gain two optional tools, `compare` (#212) and
+`coverage`, on every file-backed server, whether or not they hold a second jurisdiction.
+Before upgrading, grep each corpus's `tools_module` for tool names `compare` and `coverage`:
+both are reserved, so a module that registers either now refuses to start.
+`docs/mcp-interface-contract.md` documents the change (contract stays v1), as do
+`docs/provenance-schema-v1.md`, `docs/verification-loop.md` and CONTEXT.md ("Stub").
+
+**The representation is the owner's call.** A stub as a document with `content_mode: stub`
+(rather than a new `status`, or a seed-list-only record read by `coverage`) was decided
+provisionally during an unattended build; ADR-0017 records the reasoning and is marked
+awaiting the owner's confirmation. Also added the missing ADR-0016 row to the ADR index.
+
+### Added — `compare` tool: one query per jurisdiction, results grouped (corpus-toolkit#212)
+
+For a corpus whose documents carry different jurisdictions (states-it-governance), a merged
+`search_corpus` ranking lets a jurisdiction with more text crowd out one with less, and the
+caller cannot tell "no hits" from "outranked". `compare(query, jurisdictions, doc_type?,
+issuing_body?, tags?, limit_per_jurisdiction?, mode?)` runs the search separately per
+jurisdiction (it is `search_corpus` with the #211 `jurisdiction` filter, once each) and
+returns `groups`, one per jurisdiction in request order, each with its top `hits`. A
+jurisdiction with no match is an explicit empty group, and `in_corpus` (`true` / `false` /
+`null` for could-not-check) separates "held but nothing matched" from "no document carries
+this jurisdiction", so an empty group is never the only word.
+
+It is an OPTIONAL tool, not a core one, on the pattern of `documents_by_agency`: registered
+when the backend's `search` names `jurisdiction`, on any archetype; the name `compare` is
+added to the reserved set (a corpus `tools_module` that registers its own `compare` now
+refuses to start, as for the other reserved names). The framework method refuses, with
+`error`, an empty jurisdiction list or a backend that cannot filter by jurisdiction.
+
+Backward compatible: no existing tool, parameter, response or ranking changes, and no index
+rebuild. `docs/mcp-interface-contract.md` documents the tool and the reserved name; the
+contract stays v1. The release-gate smoke (`.github/scripts/contract_smoke.py`) now requires
+and round-trips `compare` on the file-backed template corpus.
+
+### Added — `search_corpus` filters on `jurisdiction` and `tags` (corpus-toolkit#211)
+
+`search_corpus` filtered on `doc_type` and `issuing_body` only; `tags` were searchable text,
+not a filter, and there was no jurisdiction filter. Two optional parameters are added:
+`jurisdiction` (exact match on a document's own jurisdiction, else the corpus's declared
+one, the same value `corpus_overview` counts) and `tags` (a list; the document must carry
+every tag, each matched as a whole tag, so `air` does not match `air-quality`). They are
+applied to the keyword SQL and to each semantic candidate before fusion, so they hold in
+`hybrid`, `keyword` and `semantic` mode and when the semantic artifact is absent. When a
+filter is set the semantic ranker is asked for every document in the index (never fewer than
+200, instead of 40), because a selective filter applied after the ranker's cut would
+otherwise leave an empty answer: a fixed pool does not prevent that, since more than 200
+documents of one jurisdiction can outrank the only one of another. The semantic module scores
+every chunk regardless, so the larger cut costs only the sort. A filtered search
+with no matches returns one `no_hits` record carrying `filters`, as the `issuing_body` filter
+does.
+
+A custom retrieval backend whose `search` does not name `jurisdiction`/`tags` is never handed
+them (`**kwargs` does not count); a filtered search against it returns one `no_hits` record
+with `filters_unsupported` rather than an unfiltered answer read as a filtered one.
+
+Backward compatible: with neither parameter the call, the hit shape and the ranking are
+unchanged. The FTS index gains a `doc_tags` table under the same `SCHEMA_VERSION` 5 that
+#210 already moved (unreleased), so no further rebuild. `docs/mcp-interface-contract.md`
+documents the parameters; the contract stays v1.
+
+### Added — `corpus_overview` reports the jurisdictions the documents carry (corpus-toolkit#210)
+
+`corpus.yml` declares one `jurisdiction`, but a document may carry its own in frontmatter
+(a corpus such as states-it-governance holds several states' instruments) and nothing read
+it. `corpus_overview` now adds `jurisdictions`: `{jurisdiction: document count}`, largest
+first, each document counted under its own `jurisdiction` or, absent that, the corpus's
+declared one. Documents with neither are counted in `jurisdiction_unspecified` (present only
+when non-zero) rather than filed under an invented name. The existing `jurisdiction` field is
+unchanged, and so is every other field.
+
+Backward compatible: single-jurisdiction corpora gain one additive field
+(`{"<declared>": N}`) and nothing else. The FTS index `SCHEMA_VERSION` moves 4 to 5 for the
+new `jurisdiction` column, so each deployed index rebuilds once on first start (the same cost
+as the 3 to 4 bump); no indexed value changes. `docs/mcp-interface-contract.md` documents the
+new field; the contract stays v1. The server description still names the declared value only.
+
 ### Added — a `LICENSE` file: MIT
 
 The repository is public and had no license file, so nobody outside it had
