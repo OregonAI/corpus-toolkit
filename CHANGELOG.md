@@ -15,7 +15,11 @@ scores the Python client's connection, not our identity.
   the same honest User-Agent (remembered per host). Interval, 429 backoff, `Refused` /
   `Challenge` classification (a host that challenges curl too is still `Challenge`), robots,
   TLS chain supplements (`tls.ca_bundle`: system roots plus the host's supplement),
-  timeouts, binary bodies, final URL and status all hold. No browser User-Agent or headers,
+  binary bodies, final URL and status all hold. `timeout` keeps httpx's meaning, per step:
+  curl gets `--connect-timeout` and `--speed-limit 1 --speed-time <timeout>` (abort when no data
+  arrives for `timeout` seconds), so a long PDF that keeps arriving is not cut at `timeout`;
+  a one-hour total cap stops only a host that trickles forever. Each curl request has its own
+  scratch files, so a Fetcher shared across threads cannot return one URL's body for another. No browser User-Agent or headers,
   no impersonation library, no cookies, no challenge solving; `-q` keeps `~/.curlrc` out.
   Missing `curl` raises `CurlUnavailable` at construction. Feature-detect from an older
   toolkit with `"curl_on_challenge" in inspect.signature(Fetcher.__init__).parameters`.

@@ -225,11 +225,82 @@ def test_curl_exit_codes_map_to_the_errors_the_python_path_raises():
         f.get("https://h.example.gov/a")
 
 
-def test_timeout_is_passed_to_curl():
+def _flag(call, name):
+    return call[call.index(name) + 1]
+
+
+def test_timeout_means_what_httpx_means_per_step_not_a_cap_on_the_whole_transfer():
+    # httpx applies `timeout` to connect and to each read; a long body that keeps arriving
+    # never trips it. curl's --max-time caps the whole transfer, so it must not carry `timeout`.
     curl = FakeCurl(ok())
     f, _ = make(challenged, curl, timeout=33.0)
     f.get("https://h.example.gov/a")
-    assert curl.calls[0][curl.calls[0].index("--max-time") + 1] == "33"
+    call = curl.calls[0]
+    assert _flag(call, "--connect-timeout") == "33"
+    assert _flag(call, "--speed-limit") == "1"
+    assert _flag(call, "--speed-time") == "33"
+    assert float(_flag(call, "--max-time")) > 33.0 * 10
+
+
+def test_the_subprocess_backstop_outlasts_the_total_cap():
+    seen = []
+
+    def spy(argv, timeout):
+        seen.append((float(_flag(argv, "--max-time")), timeout))
+        return FakeCurl(ok())(argv, timeout)
+
+    f, _ = make(challenged, spy, timeout=33.0)
+    f.get("https://h.example.gov/a")
+    cap, backstop = seen[0]
+    assert backstop >= cap
+
+
+def test_concurrent_curl_requests_never_share_files():
+    # Two requests in flight on one Fetcher (the client is thread-safe, max_connections=4):
+    # the inner request runs while the outer is "inside curl". Fixed file names would let the
+    # inner overwrite the outer's body.
+    inner_curl = FakeCurl(ok(body=b"INNER", url="https://h.example.gov/b"))
+    holder = {}
+
+    def outer(argv, timeout):
+        outer_paths = (_flag(argv, "-o"), _flag(argv, "-D"))
+        got = holder["f"]._send_curl("https://h.example.gov/b", {})
+        assert got.content == b"INNER"
+        assert (_flag(inner_curl.calls[0], "-o"), _flag(inner_curl.calls[0], "-D")) != outer_paths
+        return FakeCurl(ok(body=b"OUTER"))(argv, timeout)
+
+    f, _ = make(challenged, outer)
+    holder["f"] = f
+    orig = f._runner
+    calls = {"n": 0}
+
+    def route(argv, timeout):
+        calls["n"] += 1
+        return orig(argv, timeout) if calls["n"] == 1 else inner_curl(argv, timeout)
+
+    f._runner = route
+    resp = f._send_curl("https://h.example.gov/a", {})
+    assert resp.content == b"OUTER"
+
+
+@pytest.mark.parametrize("reply", [28, 56, "bad-headers"])
+def test_curl_scratch_files_are_removed_on_every_outcome_including_failure(reply):
+    import os
+
+    def runner(argv, timeout):
+        if reply == "bad-headers":
+            open(_flag(argv, "-o"), "wb").write(b"x")
+            open(_flag(argv, "-D"), "wb").write(b"garbage")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return subprocess.CompletedProcess(argv, reply, b"", b"curl: boom")
+
+    f, _ = make(challenged, runner)
+    with pytest.raises(Exception):
+        f._send_curl("https://h.example.gov/a", {})
+    assert os.listdir(f._scratch.name) == []
+    f2, _ = make(challenged, FakeCurl(ok()))
+    f2._send_curl("https://h.example.gov/a", {})
+    assert os.listdir(f2._scratch.name) == []
 
 
 def test_a_supplement_is_passed_to_curl_as_system_roots_plus_the_supplement_for_its_host(

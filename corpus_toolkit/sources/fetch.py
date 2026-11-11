@@ -58,6 +58,7 @@ INGEST.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import subprocess
@@ -72,6 +73,10 @@ import httpx
 from corpus_toolkit.sources import robots, tls
 
 TIMEOUT = 120.0
+# The curl transport's cap on a WHOLE transfer. `timeout` is a per-step limit (as in httpx), so
+# a long body that keeps arriving must not be cut at `timeout`; this only stops a host that
+# trickles one byte per `timeout` forever.
+CURL_TOTAL_CAP = 3600.0
 MIN_INTERVAL = 2.0           # seconds between requests to the SAME host
 # Escalating waits after a 429. Ends rather than looping forever, so a host that genuinely
 # will not serve us produces a recorded refusal instead of an ingest that never finishes.
@@ -191,7 +196,8 @@ def _fetched(resp: httpx.Response) -> Fetched:
 
 
 def _run_curl(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
-    # curl enforces --max-time itself; the subprocess limit is a backstop for a hung binary.
+    # `timeout` is the total cap, which curl enforces itself via --max-time; the subprocess
+    # limit is a backstop for a hung binary.
     return subprocess.run(argv, capture_output=True, timeout=timeout + 15)
 
 
@@ -453,34 +459,45 @@ class Fetcher:
         if self._scratch is None:
             self._scratch = tempfile.TemporaryDirectory(prefix="fetch-curl-")
         scratch = pathlib.Path(self._scratch.name)
-        body_path, head_path = scratch / "body", scratch / "headers"
-        argv = [self._curl, "-q", "--silent", "--show-error", "--location",
-                "--max-redirs", "20", "--proto", "=http,https", "--globoff",
-                "--max-time", f"{self.timeout:g}", "-A", self.user_agent]
-        for name, value in {**self.headers, **extra}.items():
-            if name.lower() != "user-agent":
-                argv += ["-H", f"{name}: {value}"]
-        config_path = getattr(self.config, "config_path", None)
-        bundle = tls.ca_bundle(pathlib.Path(config_path).parent, host, scratch) \
-            if config_path is not None else None
-        if bundle is not None:
-            argv += ["--cacert", str(bundle)]
-        argv += ["-o", str(body_path), "-D", str(head_path), "-w", "%{url_effective}",
-                 "--url", url]
+        # Per-call files: one Fetcher may be shared across threads, and a fixed name would let
+        # a concurrent request overwrite this one's body and headers.
+        fd, body_name = tempfile.mkstemp(dir=scratch, prefix="body-")
+        os.close(fd)
+        fd, head_name = tempfile.mkstemp(dir=scratch, prefix="headers-")
+        os.close(fd)
+        body_path, head_path = pathlib.Path(body_name), pathlib.Path(head_name)
         try:
-            proc = self._runner(argv, self.timeout)
-        except subprocess.TimeoutExpired as e:
-            raise httpx.ReadTimeout(f"{url}: curl exceeded {self.timeout:g}s") from e
-        if proc.returncode != 0:
-            raise _curl_error(url, host, proc.returncode,
-                              (proc.stderr or b"").decode("utf-8", "replace").strip())
-        status, headers = _parse_curl_headers(head_path.read_bytes())
-        final = (proc.stdout or b"").decode("utf-8", "replace").strip() or url
-        resp = httpx.Response(status, headers=headers, content=body_path.read_bytes(),
-                              request=httpx.Request("GET", final))
-        body_path.unlink(missing_ok=True)
-        head_path.unlink(missing_ok=True)
-        return resp
+            argv = [self._curl, "-q", "--silent", "--show-error", "--location",
+                    "--max-redirs", "20", "--proto", "=http,https", "--globoff",
+                    # httpx's `timeout` is per step (connect, each read), not a cap on the
+                    # transfer: abort when no data arrives for `timeout` seconds.
+                    "--connect-timeout", f"{self.timeout:g}",
+                    "--speed-limit", "1", "--speed-time", f"{self.timeout:g}",
+                    "--max-time", f"{CURL_TOTAL_CAP:g}", "-A", self.user_agent]
+            for name, value in {**self.headers, **extra}.items():
+                if name.lower() != "user-agent":
+                    argv += ["-H", f"{name}: {value}"]
+            config_path = getattr(self.config, "config_path", None)
+            bundle = tls.ca_bundle(pathlib.Path(config_path).parent, host, scratch) \
+                if config_path is not None else None
+            if bundle is not None:
+                argv += ["--cacert", str(bundle)]
+            argv += ["-o", str(body_path), "-D", str(head_path), "-w", "%{url_effective}",
+                     "--url", url]
+            try:
+                proc = self._runner(argv, CURL_TOTAL_CAP)
+            except subprocess.TimeoutExpired as e:
+                raise httpx.ReadTimeout(f"{url}: curl exceeded {CURL_TOTAL_CAP:g}s") from e
+            if proc.returncode != 0:
+                raise _curl_error(url, host, proc.returncode,
+                                  (proc.stderr or b"").decode("utf-8", "replace").strip())
+            status, headers = _parse_curl_headers(head_path.read_bytes())
+            final = (proc.stdout or b"").decode("utf-8", "replace").strip() or url
+            return httpx.Response(status, headers=headers, content=body_path.read_bytes(),
+                                  request=httpx.Request("GET", final))
+        finally:
+            body_path.unlink(missing_ok=True)
+            head_path.unlink(missing_ok=True)
 
     def snapshot(self, url: str, dest: pathlib.Path, refetch: bool = False) -> tuple[bytes, bool]:
         """Fetch to `dest` unless it already exists. Returns (bytes, fresh).
