@@ -18,11 +18,14 @@ def test_the_shipped_manifest_validates():
     assert len(repos) >= 10
 
 
-def test_eight_live_corpora_as_context_md_says():
-    """CONTEXT.md: 'Eight live'. corpus-gateway's registry holds eight. This is the count
-    that has been written wrong more than once (a memory note records 'nine' three times),
-    so the manifest states it and this test pins it."""
-    assert len(corpora.live_corpora(corpora.load_manifest())) == 8
+def test_nine_live_corpora_as_context_md_says():
+    """CONTEXT.md: 'Nine live' since states-government-it joined on 2026-11-11.
+    corpus-gateway's registry holds the other eight until that corpus passes its pilot test.
+    This is the count that has been written wrong more than once, so the manifest states it
+    and this test pins it."""
+    live = corpora.live_corpora(corpora.load_manifest())
+    assert len(live) == 9
+    assert "states-government-it" in live
 
 
 def test_canary_targets_are_live_public_corpora_on_the_ci_track():
@@ -30,7 +33,7 @@ def test_canary_targets_are_live_public_corpora_on_the_ci_track():
     by = {r["name"]: r for r in repos}
     targets = corpora.canary_targets(repos)
     assert set(targets) == set(corpora.live_corpora(repos)), \
-        "every live corpus is public and on the CI track today, so the canary covers all eight"
+        "every live corpus is public and on the CI track today, so the canary covers all nine"
     for name in targets:
         r = by[name]
         assert r["visibility"] == "public" and r["status"] == "live" and r["ci_track"]

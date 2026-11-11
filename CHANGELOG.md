@@ -2,6 +2,17 @@
 
 Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pins.
 
+## v1.37.1 — 2026-11-11
+
+### Fixed — the corpora manifest matches the org again, so `propagate-pin` can run
+
+`propagate-pin`'s preflight failed after v1.37.0 because two repositories existed in the org
+and were missing from `corpora.yml` (ADR-0008): `SessionGateway` and `hearing-transcripts`.
+Both are added as consumer-tier entries that neither call the reusable workflows nor pin the
+toolkit. `states-government-it` (renamed from `states-it-governance`, public since
+2026-11-11) is added as the ninth live corpus: a canary target and a pin target.
+`CORPUS_PIN_TOKEN` must have write access to it or the preflight fails on that repo.
+
 ## v1.37.0 — 2026-11-11
 
 ### Changed — the default User-Agent is the conventional crawler form (ADR-0019)
