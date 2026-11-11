@@ -117,8 +117,11 @@ def test_no_browser_headers_no_cookies_no_impersonation_flags():
     curl = FakeCurl(ok())
     f, _ = make(challenged, curl)
     f.get("https://h.example.gov/a")
-    flat = " ".join(curl.calls[0]).lower()
-    for forbidden in ("mozilla", "chrome", "sec-ch", "sec-fetch", "--cookie", " -b ",
+    argv = list(curl.calls[0])
+    assert argv[argv.index("-A") + 1] == f.user_agent      # the crawler form (ADR-0019)
+    del argv[argv.index("-A") + 1]                         # the one place "Mozilla/5.0 (compatible;" may appear
+    flat = " ".join(argv).lower()
+    for forbidden in ("mozilla", "chrome", "safari", "applewebkit", "gecko", "x11", "sec-ch", "sec-fetch", "--cookie", " -b ",
                       "cookie:", "impersonate", "--insecure", " -k ", "referer"):
         assert forbidden not in flat, forbidden
     assert "--proto" in flat                                       # http(s) only
