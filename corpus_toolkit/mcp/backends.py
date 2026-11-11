@@ -863,6 +863,46 @@ class FileBackend:
         r = con.execute("SELECT content_mode FROM docs WHERE id = ?", (doc_id,)).fetchone()
         return bool(r) and r[0] == STUB_MODE
 
+    def coverage(self, jurisdiction: str | None = None) -> dict:
+        """What is held per jurisdiction and tag, stubs counted apart (corpus-toolkit#213).
+
+        `documents` is every document that is NOT a stub, `stubs` the ones with
+        content_mode: stub. A document with no jurisdiction anywhere is reported under
+        `unspecified` rather than filed under "" or an invented name, as `overview` does.
+        With `jurisdiction`, only that one is reported, and one the corpus does not carry
+        is a zero entry with `in_corpus: false` -- the answer coverage exists to give."""
+        con = self.ensure_index()
+
+        def tally(where: str, args: tuple) -> dict:
+            n_doc, n_stub = con.execute(
+                "SELECT COALESCE(SUM(content_mode != ?), 0), "
+                "COALESCE(SUM(content_mode = ?), 0) FROM docs WHERE " + where,
+                (STUB_MODE, STUB_MODE) + args).fetchone()
+            tags: dict = {}
+            for tag, is_stub, n in con.execute(
+                    "SELECT t.tag, d.content_mode = ?, COUNT(*) FROM doc_tags t "
+                    "JOIN docs d ON d.rowid = t.doc_rowid WHERE " + where.replace(
+                        "jurisdiction", "d.jurisdiction") + " GROUP BY t.tag, 2 ORDER BY t.tag",
+                    (STUB_MODE,) + args):
+                tags.setdefault(tag, {"documents": 0, "stubs": 0})[
+                    "stubs" if is_stub else "documents"] = n
+            total = n_doc + n_stub
+            return {"documents": n_doc, "stubs": n_stub, "total": total,
+                    "stub_share": (n_stub / total) if total else None, "tags": tags}
+
+        if jurisdiction:
+            entry = tally("jurisdiction = ?", (jurisdiction,))
+            entry["in_corpus"] = entry["total"] > 0
+            return {"jurisdictions": {jurisdiction: entry}}
+        jurs = [r[0] for r in con.execute(
+            "SELECT jurisdiction FROM docs WHERE jurisdiction != '' "
+            "GROUP BY jurisdiction ORDER BY COUNT(*) DESC, 1")]
+        out = {"jurisdictions": {j: {**(e := tally("jurisdiction = ?", (j,))),
+                                     "in_corpus": True} for j in jurs}}
+        if con.execute("SELECT 1 FROM docs WHERE jurisdiction = '' LIMIT 1").fetchone():
+            out["unspecified"] = tally("jurisdiction = ?", ("",))
+        return out
+
     def exists(self, doc_id: str) -> dict | None:
         con = self.ensure_index()
         r = self._doc_meta_row(con, doc_id)

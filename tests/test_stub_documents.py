@@ -255,3 +255,63 @@ def test_health_does_not_warn_that_a_stub_only_doc_type_has_no_text(corpus):
     h = fw(corpus).backend.health()
     assert h["reachable"] is True
     assert "WARNING" not in h["detail"] and h["empty_body_by_doc_type"] == {}
+
+
+# ---------- coverage ----------
+
+def _wa_ca(root: Path):
+    """us-wa: one document, two stubs. us-or: one document. One document with no jurisdiction
+    anywhere is not added (the corpus declares one); see the unspecified test."""
+    p = root / "statutes" / "ors-1.010.md"
+    p.write_text(p.read_text().replace("status: current\n", "status: current\njurisdiction: us-or\n", 1))
+    q = root / "statutes" / "ors-2.020.md"
+    q.write_text(q.read_text().replace("status: current\n", "status: current\njurisdiction: us-wa\n", 1)
+                 .replace('tags: ["ors"]', 'tags: ["ors", "ai"]'))
+    _add_stub(root, "wa-stub-1", tags='"ai"', commit=False)
+    _add_stub(root, "wa-stub-2", citation="WA SEC-2", tags='"ai", "privacy"', commit=False)
+    _commit(root)
+
+
+def test_coverage_counts_documents_and_stubs_apart_per_jurisdiction(corpus):
+    _wa_ca(corpus)
+    out = fw(corpus).coverage()
+    wa = out["jurisdictions"]["us-wa"]
+    assert (wa["documents"], wa["stubs"], wa["total"]) == (1, 2, 3)
+    assert wa["stub_share"] == 2 / 3
+    orr = out["jurisdictions"]["us-or"]
+    assert (orr["documents"], orr["stubs"], orr["total"], orr["stub_share"]) == (1, 0, 1, 0.0)
+    assert out["totals"] == {"documents": 2, "stubs": 2, "total": 4}
+    assert "NON-AUTHORITATIVE" in out["disclaimer"]
+
+
+def test_coverage_breaks_each_jurisdiction_down_by_tag(corpus):
+    _wa_ca(corpus)
+    tags = fw(corpus).coverage()["jurisdictions"]["us-wa"]["tags"]
+    assert tags["ai"] == {"documents": 1, "stubs": 2}
+    assert tags["privacy"] == {"documents": 0, "stubs": 1}
+    assert tags["ors"] == {"documents": 1, "stubs": 0}
+
+
+def test_coverage_for_one_jurisdiction_not_held_says_so(corpus):
+    _wa_ca(corpus)
+    out = fw(corpus).coverage(jurisdiction="us-co")
+    assert list(out["jurisdictions"]) == ["us-co"]
+    co = out["jurisdictions"]["us-co"]
+    assert co["in_corpus"] is False and co["total"] == 0 and co["stub_share"] is None
+    held = fw(corpus).coverage(jurisdiction="us-wa")["jurisdictions"]["us-wa"]
+    assert held["in_corpus"] is True and held["stubs"] == 2
+
+
+def test_coverage_with_no_jurisdiction_stated_is_unspecified_not_invented(corpus):
+    yml = corpus / "_meta" / "corpus.yml"
+    yml.write_text(yml.read_text().replace("  jurisdiction: oregon\n", ""))
+    _commit(corpus)
+    out = fw(corpus).coverage()
+    assert out["jurisdictions"] == {}
+    assert out["unspecified"]["documents"] == 2
+
+
+def test_a_single_jurisdiction_corpus_with_no_stubs_reports_zero_stubs(corpus):
+    out = fw(corpus).coverage()
+    assert out["jurisdictions"]["oregon"]["stubs"] == 0
+    assert out["jurisdictions"]["oregon"]["documents"] == 2

@@ -85,6 +85,9 @@ RESERVED_TOOL_NAMES = frozenset({
     # CONDITIONAL on the backend filtering by jurisdiction (corpus-toolkit#212); reserved
     # for the same reason as the names above.
     "compare",
+    # CONDITIONAL on the backend implementing coverage() (corpus-toolkit#213); reserved for
+    # the same reason.
+    "coverage",
 })
 
 
@@ -258,6 +261,17 @@ def build_server(config):
             issuing_body, tags and mode filters as search_corpus."""
             return fw.compare(query, jurisdictions, doc_type or None, issuing_body or None,
                               tags or None, limit_per_jurisdiction, mode)
+
+    # OPTIONAL, NOT CORE (corpus-toolkit#213). Gated on the capability: a backend with no
+    # `coverage()` would only ever answer an empty table, which reads as "nothing is held".
+    if callable(getattr(fw.backend, "coverage", None)):
+        @mcp.tool()
+        def coverage(jurisdiction: str = "") -> ResponseEnvelope:
+            """What the corpus holds per jurisdiction and tag, with stubs (instruments known
+            to exist whose text is not held) counted apart from documents, so "no provision
+            found" can be told from "not in the corpus". Pass a jurisdiction to ask about
+            one; one the corpus does not carry comes back as an explicit zero entry."""
+            return fw.coverage(jurisdiction or None)
 
     # NOT gated on a registry, unlike `issuing_body_profile` directly above.
     #

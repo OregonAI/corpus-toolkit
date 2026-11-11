@@ -913,6 +913,38 @@ class CorpusFramework:
                 **self._envelope(), "disclaimer": self.disclaimer,
                 "contract_version": self.config.contract_version}
 
+    def coverage(self, jurisdiction: str | None = None) -> dict:
+        """What the corpus holds per jurisdiction and tag, stubs counted apart
+        (corpus-toolkit#213, ADR-0017).
+
+        The question this answers is the one a search cannot: "no provision found" versus
+        "not in the corpus". A jurisdiction the corpus does not carry is an explicit
+        zero entry with `in_corpus: false`; a stub is an instrument known to exist whose
+        text is not held (`stubs`), so it is counted neither as a document nor as absent.
+        `stub_share` is null when there is nothing to divide.
+
+        A backend with no `coverage()` is REFUSED with `error`, not answered with an empty
+        table: an empty table reads as "nothing is held".
+        """
+        env = {**self._envelope(), "disclaimer": self.disclaimer,
+               "contract_version": self.config.contract_version}
+        fn = getattr(self.backend, "coverage", None)
+        if not callable(fn):
+            return {"error": (f"the retrieval backend {self.backend.name!r} implements no "
+                              f"coverage(), so nothing can be said about what is held. "
+                              f"This is not a statement that the corpus is empty."), **env}
+        jurisdiction = (jurisdiction or "").strip() or None
+        raw = fn(jurisdiction) if jurisdiction else fn()
+        jurs = raw.get("jurisdictions") or {}
+        parts = list(jurs.values()) + ([raw["unspecified"]] if raw.get("unspecified") else [])
+        docs = sum(p["documents"] for p in parts)
+        stubs = sum(p["stubs"] for p in parts)
+        out = {"jurisdictions": jurs}
+        if raw.get("unspecified"):
+            out["unspecified"] = raw["unspecified"]
+        out["totals"] = {"documents": docs, "stubs": stubs, "total": docs + stubs}
+        return {**out, **env}
+
     def _no_filtered_hits(self, query: str, doc_type: str | None, filters: dict) -> dict:
         """The one record a jurisdiction/tag-filtered search with no matches answers with.
         Same reasoning as `_no_issuing_body_hits`: not a hit (no id/path/snippet), and it

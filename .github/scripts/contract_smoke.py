@@ -541,6 +541,8 @@ def check_result_marshalling(dest: Path) -> None:
         # own resolves to, so the group has hits to round-trip.
         ("compare", {"query": "correspondence",
                      "jurisdictions": [PLACEHOLDERS["JURISDICTION"]], "mode": "keyword"}),
+        # corpus-toolkit#213.
+        ("coverage", {}),
     ]
     # PRESENT, NOT MERELY COVERED. The loop below skips any tool that is not registered, and
     # `documents_by_agency` is not in MANDATORY_CORE_TOOLS — so if its registration gate
@@ -558,6 +560,11 @@ def check_result_marshalling(dest: Path) -> None:
             "compare is not registered on a file-backed corpus. Either the capability gate "
             "in server.py inverted or FileBackend.search stopped naming `jurisdiction`; the "
             "call below would have skipped it silently (corpus-toolkit#212).")
+    if "coverage" not in tools:
+        raise GateFailure(
+            "coverage is not registered on a file-backed corpus. Either the capability gate "
+            "in server.py inverted or FileBackend lost coverage(); the call below would "
+            "have skipped it silently (corpus-toolkit#213).")
     for name, args in calls:
         if name == "documents_by_agency" and not args.get("slug"):
             raise GateFailure(
@@ -585,6 +592,9 @@ def check_result_marshalling(dest: Path) -> None:
             problems.append(f"documents_by_agency returned {len(raw.get('documents', []))} "
                             f"document(s) for {args['slug']!r}, so its per-document "
                             f"assertions would pass over an empty list")
+        if name == "coverage" and not raw.get("jurisdictions"):
+            problems.append("coverage returned an empty table, so its round-trip would "
+                            "assert nothing about the counts serialization could drop")
         if name == "compare" and not any(g.get("hits") for g in raw.get("groups", [])):
             problems.append("compare returned no hits in any group, so its round-trip "
                             "would assert nothing about the field serialization could drop")
