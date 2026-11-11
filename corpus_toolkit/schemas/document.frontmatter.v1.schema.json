@@ -40,7 +40,10 @@
     "source_version": { "type": ["string", "null"] },
     "status": { "type": "string", "enum": ["current", "superseded", "repealed", "proposed", "draft", "suspended"],
       "description": "current, superseded, repealed, proposed, draft describe WHICH VERSION of the text this is, except repealed, which is also the one FORCE value: a permanent loss of force. suspended is the other force value: in force until recently, out of force now, expected to return -- a temporary, usually dated loss of force, as distinct from repealed's permanent one. The end date, where the source states one, lives in the document's own text, not in a structured field." },
-    "content_mode": { "type": "string", "enum": ["verbatim", "summary", "mixed"] },
+    "content_mode": { "type": "string", "enum": ["verbatim", "summary", "mixed", "stub"],
+      "description": "stub: the instrument is known to exist but is not public, or its official source cannot be fetched (corpus-toolkit#213, ADR-0017). A stub holds frontmatter, the disclaimer and a one-line stub_reason; no verbatim text and no snapshot. It is answered by get_document and resolve_citation, never returned as a search passage, and counted apart by coverage." },
+    "stub_reason": { "type": "string", "minLength": 1, "pattern": "^[^\\n]+$",
+      "description": "Required when content_mode is stub: one line saying why there is no text (not published, source refuses a fetch, ...)." },
     "content_exception": { "type": "string" },
     "migration_pending": { "type": "boolean" },
     "conversion_notes": { "type": "string" },
@@ -80,7 +83,8 @@
         "not": {
           "anyOf": [
             { "required": ["content_exception"] },
-            { "required": ["migration_pending"] }
+            { "required": ["migration_pending"] },
+            { "required": ["content_mode"], "properties": { "content_mode": { "const": "stub" } } }
           ]
         }
       },
@@ -98,7 +102,17 @@
     },
     {
       "if": { "properties": { "doc_type": { "const": "external_reference" } } },
-      "then": { "properties": { "content_mode": { "const": "summary" } }, "required": ["content_mode"] }
+      "then": { "properties": { "content_mode": { "enum": ["summary", "stub"] } }, "required": ["content_mode"] }
+    },
+    {
+      "if": { "required": ["content_mode"], "properties": { "content_mode": { "const": "stub" } } },
+      "then": {
+        "required": ["stub_reason"],
+        "not": { "anyOf": [
+          { "required": ["source_sha256"] }, { "required": ["snapshot_id"] },
+          { "required": ["snapshot_policy"] }
+        ] }
+      }
     }
   ]
 }
