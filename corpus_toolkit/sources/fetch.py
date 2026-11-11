@@ -43,6 +43,7 @@ INGEST.
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
 import time
 import urllib.parse
@@ -88,6 +89,10 @@ class Challenge(Refused):
     Both are indistinguishable from a dead link unless you look, and both mean the opposite
     of one.
     """
+
+
+class CurlUnavailable(FetchError):
+    """Placeholder."""
 
 
 class Fetched(NamedTuple):
@@ -183,7 +188,8 @@ class Fetcher:
     def __init__(self, config=None, *, user_agent: str | None = None,
                  min_interval: float = MIN_INTERVAL, timeout: float = TIMEOUT,
                  backoff: tuple[float, ...] = BACKOFF, max_connections: int = 4,
-                 enforce_robots: bool = False, transport: httpx.BaseTransport | None = None,
+                 enforce_robots: bool = False, curl_on_challenge: bool = False,
+                 runner=None, transport: httpx.BaseTransport | None = None,
                  log: Callable[[str], None] | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic):
@@ -302,6 +308,12 @@ class Fetcher:
             ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
             return Fetched(resp.content, ctype, code, str(resp.url))
         raise FetchError(f"{url}: unreachable after backoff")   # pragma: no cover
+
+    def get_response(self, url, byte_range=None):
+        raise NotImplementedError
+
+    def get_range(self, url, start, end=None):
+        raise NotImplementedError
 
     def snapshot(self, url: str, dest: pathlib.Path, refetch: bool = False) -> tuple[bytes, bool]:
         """Fetch to `dest` unless it already exists. Returns (bytes, fresh).
