@@ -253,7 +253,9 @@ def test_a_supplement_is_passed_to_curl_as_system_roots_plus_the_supplement_for_
             seen_bundle.append(open(argv[argv.index("--cacert") + 1], "rb").read())
         return inner(argv, timeout)
     f, _ = make(challenged, spy, config=cfg)
-    f.runner = spy
+    # A mounted host's Python attempt would use the real supplemented transport (no network
+    # in unit tests), so start it as already-challenged; the host is then fetched by curl.
+    f._curl_hosts.add("h.example.gov")
     f.get("https://h.example.gov/a")
     f.get("https://other.example.gov/a")
     assert len(seen_bundle) == 1                                   # only the covered host
@@ -302,3 +304,75 @@ def test_get_range_416_is_a_status_error_and_a_bad_range_is_refused_up_front():
     for args in ((5, 2), (0, -1)):
         with pytest.raises(ValueError):
             f.get_range("https://h.example.gov/a", *args)
+
+
+def test_a_bundle_is_never_the_supplement_alone(tmp_path, monkeypatch):
+    fixtures = __import__("pathlib").Path(__file__).parent / "fixtures" / "tls"
+    (tmp_path / "tls-chain").mkdir()
+    (tmp_path / "tls-chain" / "h.example.gov.pem").write_bytes(
+        (fixtures / "example-intermediate.pem").read_bytes())
+    monkeypatch.setattr(tls.ssl, "get_default_verify_paths",
+                        lambda: SimpleNamespace(cafile=None, openssl_cafile="/nonexistent"))
+    with pytest.raises(tls.SupplementRefused, match="supplement alone"):
+        tls.ca_bundle(tmp_path, "h.example.gov", tmp_path)
+    assert tls.ca_bundle(tmp_path, "other.example.gov", tmp_path) is None
+
+
+# -- the real curl binary against a loopback server (no external network) -------------------
+
+import http.server
+import shutil as _shutil
+import threading
+
+
+class _Origin(http.server.BaseHTTPRequestHandler):
+    """Challenges any client that sends Accept-Encoding (httpx does, bare curl does not), so
+    the Python attempt is refused and the real curl is let through."""
+    seen: list = []
+
+    def do_GET(self):
+        _Origin.seen.append((self.path, dict(self.headers)))
+        if self.headers.get("Accept-Encoding"):
+            self.send_response(403)
+            self.send_header("cf-mitigated", "challenge")
+            self.end_headers()
+        elif self.path == "/old":
+            self.send_response(301)
+            self.send_header("Location", "/new.pdf")
+            self.end_headers()
+        else:
+            body = b"%PDF-1.4\x00\xff\xfe" + bytes(range(256))
+            rng = self.headers.get("Range")
+            self.send_response(206 if rng else 200)
+            self.send_header("Content-Type", "application/pdf")
+            if rng:
+                body = body[2:6]
+                self.send_header("Content-Range", "bytes 2-5/270")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.mark.skipif(_shutil.which("curl") is None, reason="no curl binary")
+def test_the_real_curl_binary_follows_redirects_keeps_binary_and_sends_only_our_agent():
+    _Origin.seen.clear()
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Origin)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        with Fetcher(curl_on_challenge=True, min_interval=0, log=lambda m: None) as f:
+            got = f.get(base + "/old")
+            assert got.body == b"%PDF-1.4\x00\xff\xfe" + bytes(range(256))
+            assert got.url == base + "/new.pdf" and got.content_type == "application/pdf"
+            part = f.get_range(base + "/new.pdf", 2, 5)
+            assert part.status == 206 and part.body == b"DF-1"
+            assert f.get_response(base + "/new.pdf", (2, 5)).headers["content-range"] \
+                == "bytes 2-5/270"
+    finally:
+        srv.shutdown()
+    curl_reqs = [h for _, h in _Origin.seen if not h.get("Accept-Encoding")]
+    assert curl_reqs and all(h["User-Agent"] == f.user_agent for h in curl_reqs)
+    assert not any("Cookie" in h or "Referer" in h for h in curl_reqs)
