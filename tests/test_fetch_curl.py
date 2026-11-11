@@ -101,7 +101,7 @@ def test_a_challenged_host_is_retried_with_curl_and_the_same_honest_user_agent()
     [call] = curl.calls
     assert call[0] == "/usr/bin/curl" and call[1] == "-q"          # ~/.curlrc cannot inject
     assert call[call.index("-A") + 1] == f.user_agent
-    assert f.user_agent.startswith("OregonAI-CivicCorpus/")
+    assert f.user_agent.startswith("Mozilla/5.0 (compatible; OregonAI-CivicCorpus/")
     assert curl.header_values(call, "User-Agent") == []            # one identity, one place
     assert call[-1] == "https://h.example.gov/a"
 
@@ -349,7 +349,7 @@ def test_get_range_sends_a_range_header_over_python():
 
     def handler(req):
         seen.append(req.headers["Range"])
-        assert req.headers["User-Agent"].startswith("OregonAI-CivicCorpus/")
+        assert req.headers["User-Agent"].startswith("Mozilla/5.0 (compatible; OregonAI-CivicCorpus/")
         return httpx.Response(206, content=b"abc", headers={"Content-Type": "application/pdf"})
     f, _ = make(handler, FakeCurl(ok()), curl_on_challenge=False)
     got = f.get_range("https://h.example.gov/big.pdf", 10, 12)

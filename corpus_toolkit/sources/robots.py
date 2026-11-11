@@ -49,6 +49,7 @@ reason `corpus-detect-unsourced` reports rather than gates.
 """
 from __future__ import annotations
 
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -64,6 +65,23 @@ AI_AGENTS = (
 )
 
 FETCH_TIMEOUT_S = 15
+
+# The conventional crawler form (Googlebot, Bingbot): `Mozilla/5.0 (compatible; Name/1.2; +url)`.
+_COMPATIBLE = re.compile(r"Mozilla/\d[\d.]*\s+\(compatible;\s*([^/;\s)]+)")
+
+
+def product_token(user_agent: str) -> str:
+    """The name robots.txt directives are matched against, from a User-Agent HEADER.
+
+    `urllib.robotparser` takes the text before the first "/" of whatever it is given, so the
+    crawler form `Mozilla/5.0 (compatible; OregonAI-CivicCorpus/1.36.5; +...)` would be
+    matched as `Mozilla` -- rules written for a browser family, not for us (ADR-0019). For
+    that form this returns the product inside the parenthesis; any other string (a bare
+    token such as the drift detector's, or a caller's own) is returned unchanged, so it
+    matches exactly as it always did. Header = what the host sees; token = what we match.
+    """
+    m = _COMPATIBLE.match(user_agent or "")
+    return m.group(1) if m else user_agent
 
 
 @dataclass
@@ -167,7 +185,7 @@ def fetch_robots(url: str, user_agent: str, *, timeout: int = FETCH_TIMEOUT_S):
     parser.set_url(robots_url)
     parser.parse(raw.splitlines())
     try:
-        delay = parser.crawl_delay(user_agent)
+        delay = parser.crawl_delay(product_token(user_agent))
     except Exception:                                          # noqa: BLE001
         delay = None
     rec = RobotsRecord(host, robots_url, reachable=True, status=status, raw=raw,
@@ -189,7 +207,7 @@ def allowed(url: str, user_agent: str) -> bool | None:
     rec, parser = fetch_robots(url, user_agent)
     if parser is None:
         return True if (rec.reachable and rec.status == 404) else None
-    return parser.can_fetch(user_agent, url)
+    return parser.can_fetch(product_token(user_agent), url)
 
 
 def ai_position(url: str, user_agent: str) -> RobotsRecord:

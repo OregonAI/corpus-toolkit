@@ -153,3 +153,89 @@ class AllowedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- the crawler-form User-Agent and the robots product token (ADR-0019) ------------------
+
+import io
+
+COMPAT = "Mozilla/5.0 (compatible; OregonAI-CivicCorpus/1.36.5; +https://github.com/OregonAI/x)"
+
+ADDRESSED_TO_US = """\
+User-agent: *
+Allow: /
+
+User-agent: OregonAI-CivicCorpus
+Disallow: /private/
+Crawl-delay: 7
+"""
+
+ADDRESSED_TO_MOZILLA = """\
+User-agent: *
+Allow: /
+
+User-agent: Mozilla
+Disallow: /
+Crawl-delay: 9
+"""
+
+
+def _serve(text):
+    """Patch urlopen so a host serves `text` as robots.txt; return the headers it was sent."""
+    sent = []
+
+    class Resp(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def urlopen(req, timeout=None):
+        sent.append(req.get_header("User-agent"))
+        return Resp(text.encode())
+
+    return mock.patch.object(robots.urllib.request, "urlopen", urlopen), sent
+
+
+class ProductTokenTest(unittest.TestCase):
+    def test_the_crawler_form_yields_our_product_token_not_mozilla(self):
+        self.assertEqual(robots.product_token(COMPAT), "OregonAI-CivicCorpus")
+
+    def test_a_plain_string_is_passed_through_unchanged(self):
+        for ua in ("corpus-toolkit-change-detector", "Corpus/9 (+https://example.org)",
+                   "OregonAI-CivicCorpus/1 (+https://x)"):
+            self.assertEqual(robots.product_token(ua), ua)
+
+    def test_a_real_browser_string_is_not_rewritten(self):
+        ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+        self.assertEqual(robots.product_token(ua), ua)
+
+
+class CrawlerFormMatchingTest(unittest.TestCase):
+    def setUp(self):
+        robots.clear_cache()
+        self.addCleanup(robots.clear_cache)
+
+    def test_a_rule_addressed_to_our_token_applies_with_the_crawler_header(self):
+        patch, sent = _serve(ADDRESSED_TO_US)
+        with patch:
+            self.assertFalse(robots.allowed("https://h.gov/private/a", COMPAT))
+            self.assertTrue(robots.allowed("https://h.gov/public/a", COMPAT))
+            self.assertEqual(robots.ai_position("https://h.gov/", COMPAT).crawl_delay, 7.0)
+        self.assertEqual(sent, [COMPAT], "the full header is what the host sees")
+
+    def test_a_rule_addressed_to_mozilla_is_not_addressed_to_us(self):
+        patch, _ = _serve(ADDRESSED_TO_MOZILLA)
+        with patch:
+            self.assertTrue(robots.allowed("https://h.gov/a", COMPAT),
+                            "only '*' applies to us, and '*' allows")
+            self.assertIsNone(robots.ai_position("https://h.gov/", COMPAT).crawl_delay)
+
+    def test_a_blanket_star_rule_still_applies(self):
+        patch, _ = _serve(BLANKET_BLOCK)
+        with patch:
+            self.assertFalse(robots.allowed("https://h.gov/a", COMPAT))
+
+    def test_a_caller_supplied_plain_agent_matches_as_before(self):
+        patch, _ = _serve("User-agent: corpus-toolkit-change-detector\nDisallow: /\n")
+        with patch:
+            self.assertFalse(robots.allowed("https://h.gov/a", "corpus-toolkit-change-detector"))

@@ -5,9 +5,14 @@ contact with hostile hosts: 36 counties on a dozen unrelated vendor platforms. E
 below that reads like a war story is one, and each rule is there because its absence was
 measured, not imagined.
 
-THE IDENTITY THIS SENDS IS A DECISION, NOT A DEFAULT. The default User-Agent identifies
-the project and the corpus truthfully and links to the repository. It is not a browser
-string. A civic mirror that pretends to be a browser undercuts the reproduction policy the
+THE IDENTITY THIS SENDS IS A DECISION, NOT A DEFAULT. The default User-Agent is the
+conventional crawler form, `Mozilla/5.0 (compatible; OregonAI-CivicCorpus/<version>;
++https://github.com/OregonAI/<repo>)` (ADR-0019, amending ADR-0016): the `Mozilla/5.0`
+prefix is a protocol convention some firewalls require, and the parenthesis still names the
+project, the toolkit version and the repository. It is not a browser string: never
+`Chrome/`, `Safari/`, `AppleWebKit`, `Gecko`, `Firefox` or a platform token, and no browser
+header set. robots.txt is matched on the product token `OregonAI-CivicCorpus`
+(`robots.product_token`), not on the header, which would read as `Mozilla`. A civic mirror that pretends to be a browser undercuts the reproduction policy the
 platform rests on, so:
 
   - A host that answers 401/403/429 to an honest agent has refused us at the HTTP layer.
@@ -139,14 +144,20 @@ def toolkit_version() -> str:
 
 
 def default_user_agent(config=None) -> str:
-    """Honest, specific, linked: the project, this toolkit's version, and the corpus repo.
+    """The conventional crawler form, naming the project, this toolkit's version and the repo.
 
-    The corpus id doubles as the repository name across OregonAI, which is what makes the
-    link resolvable. With no config the link points at the toolkit itself.
+    `Mozilla/5.0 (compatible; OregonAI-CivicCorpus/<version>; +https://github.com/OregonAI/<repo>)`
+    is the shape Googlebot and Bingbot use (ADR-0019): colorado.gov's shared firewall refuses
+    any agent without the `Mozilla/5.0` prefix and passes this one, which still says who we
+    are. The corpus id doubles as the repository name across OregonAI, which is what makes the
+    link resolvable; with no config the link points at the toolkit itself. The purpose
+    ("public-records archival") is NOT in the header: the measured passing string did not
+    carry it, and the repository the link names says it. robots.txt is matched on
+    `robots.product_token(...)` of this, i.e. `OregonAI-CivicCorpus`, never on the header.
     """
     repo = getattr(config, "id", None) or "corpus-toolkit"
-    return (f"OregonAI-CivicCorpus/{toolkit_version()} "
-            f"(+https://github.com/OregonAI/{repo}; public-records archival)")
+    return (f"Mozilla/5.0 (compatible; OregonAI-CivicCorpus/{toolkit_version()}; "
+            f"+https://github.com/OregonAI/{repo})")
 
 
 def _retry_after(headers) -> float | None:
