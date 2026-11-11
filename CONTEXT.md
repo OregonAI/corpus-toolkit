@@ -109,6 +109,15 @@ Generated but NOT `--check`-gated: it records observations no local command can 
 _Avoid_: "drift ticket", "Source changed: issue" — a drift run files nothing since v1.34.0,
 and the 89 tickets it used to file were closed on 2026-09-03 with a pointer to this file.
 
+**Stub** — a document with `content_mode: stub`: an instrument known to exist whose text is
+not held, because it is not public or its official source refuses a fetch (corpus-toolkit#213,
+ADR-0017). It carries frontmatter, the disclaimer and a one-line `stub_reason`; no verbatim
+text and no snapshot. It answers `get_document` and `resolve_citation` ("exists, not public"),
+is never returned as a search passage, and `coverage` counts it apart from documents. A stub
+is a record of an absence of text, not of text: the provenance gate refuses one that holds any.
+_Avoid_: "placeholder", "empty document" — a stub is a stated fact about the instrument, and
+an empty document is a defect.
+
 ## Contracts
 
 **Corpus contract** — `docs/mcp-interface-contract.md`. Seven tools, the response conventions,

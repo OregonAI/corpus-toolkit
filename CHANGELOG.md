@@ -4,6 +4,40 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — stub documents and a `coverage` tool (corpus-toolkit#213)
+
+Some instruments are known to exist but are not public, or their official source refuses a
+fetch. A **stub** records that: `content_mode: stub`, frontmatter, the disclaimer and a
+one-line `stub_reason`, with no text and no snapshot. Before this there was no way to
+represent one (a `policy` with no snapshot failed the schema and the provenance gate).
+
+- **Schema.** `stub` is a new `content_mode`; it requires `stub_reason` and forbids
+  `source_sha256`, `snapshot_id` and `snapshot_policy`. For a stub only, `retrieved`,
+  `authority_level` and the external_reference `summary` rule are not applied. Every rule
+  for a non-stub document is unchanged.
+- **Provenance gate** (`corpus-verify-provenance`). A stub needs no snapshot, and is refused
+  if it holds text: a `## Full text` section, a `[VERBATIM]` block, or a body over 1000
+  characters. The exemption is keyed on `content_mode: stub` alone.
+- **Never a passage.** Excluded from keyword search, semantic candidates, `compare` and the
+  semantic build. `get_document` answers for it with `stub: true`, `stub_reason` and a
+  `note`; `resolve_citation` resolves it with `stub: true` and a note. `corpus_overview`
+  counts it under `content_mode.stub`. `health()` no longer treats a bodiless stub as an
+  empty-index fault. No index schema change; no rebuild.
+- **`coverage(jurisdiction?)`**, a new optional tool (registered when the backend implements
+  `coverage()`; name reserved): documents and stubs, with `stub_share`, per jurisdiction and
+  per tag, an explicit `in_corpus: false` zero for a jurisdiction not held, and documents with
+  no jurisdiction under `unspecified`. The release-gate smoke now requires and round-trips it.
+
+Backward compatible: no existing tool, parameter, response or validation result changes for a
+corpus with no stub; the eight live corpora gain only the `coverage` tool.
+`docs/mcp-interface-contract.md` documents the change (contract stays v1), as do
+`docs/provenance-schema-v1.md`, `docs/verification-loop.md` and CONTEXT.md ("Stub").
+
+**The representation is the owner's call.** A stub as a document with `content_mode: stub`
+(rather than a new `status`, or a seed-list-only record read by `coverage`) was decided
+provisionally during an unattended build; ADR-0017 records the reasoning and is marked
+awaiting the owner's confirmation. Also added the missing ADR-0016 row to the ADR index.
+
 ### Added — `compare` tool: one query per jurisdiction, results grouped (corpus-toolkit#212)
 
 For a corpus whose documents carry different jurisdictions (states-it-governance), a merged

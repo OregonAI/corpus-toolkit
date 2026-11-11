@@ -10,7 +10,7 @@ oregon-policy-repo server.
 ### `corpus_overview()`
 What this corpus contains and does not. Agents call this first. Fields:
 `corpus`, `archetype`, `authoritative_source`, `jurisdiction`, `disclaimer`,
-`documents_by_type`, `content_mode` (counts by verbatim/summary/mixed),
+`documents_by_type`, `content_mode` (counts by verbatim/summary/mixed/stub),
 `jurisdictions`, `commit`, `graph_edges`, `contract_version` — plus whatever the
 corpus's retrieval backend adds (an API corpus reports its live endpoints here).
 
@@ -28,6 +28,10 @@ Full-corpus search. Returns a ranked **list** of hits with `id`, `title`,
 `mode` is `hybrid` (default: BM25 + semantic fused by RRF), `keyword`
 (BM25 only) or `semantic`; hybrid/semantic degrade to keyword when the
 corpus configures no `semantic_search_module`. `limit` is capped at 40.
+- **A stub is never a hit** (corpus-toolkit#213, ADR-0017): a document with
+  `content_mode: stub` holds no text, so it is excluded from both rankers and from
+  `compare`. It is reached through `get_document` and `resolve_citation`, and counted by
+  `coverage`.
 - Document corpora: search over Markdown bodies + frontmatter.
 - API corpora: search over entity docs, cookbook, and (where feasible)
   proxied live search endpoints — results must be labeled `source: live`
@@ -182,12 +186,21 @@ Three further `part=` forms make large instruments navigable (v1.21.0):
   A 900 KB statute stops collapsing to a bare id: the hit says WHERE the match
   lives and how to page it in.
 
+**A stub answers too (corpus-toolkit#213, ADR-0017).** A document with
+`content_mode: stub` is an instrument known to exist whose text is not held. Its
+`get_document` response is the metadata a document has plus `stub: true`, `stub_reason`
+(the one line saying why) and a `note`; there is no text in `body`. The fields appear only
+on a stub, so every other response is unchanged. Do not read a stub's empty body as the
+instrument saying nothing.
+
 ### `resolve_citation(citation)`
 Map a citation string ("ORS 276A.300", "OAR 166-300-0015", "HB 2049",
 "Schedule 166-300") to in-corpus id(s), or a **remote resolution**
 `{corpus, id, url}` when the citation belongs to a sibling corpus per the
 org registry. Never guess: unresolvable → explicit `unresolved` with the
-schemes attempted.
+schemes attempted. A match that is a **stub** (`content_mode: stub`) resolves, because
+"exists, not public" is an answer, and carries `stub: true`, with a `note` saying it holds
+no quotable text (corpus-toolkit#213). The flag appears only on a stub.
 
 **A scheme's pattern may be a string or an already-compiled pattern, and a
 compiled one is used as it is.** A corpus registers its formats with
@@ -613,6 +626,32 @@ its registry commented out and `oregon-audits` declares none, so requiring one
 would leave this tool unregistered on two of the three corpora a cross-corpus
 agency profile has to ask.
 
+### `coverage(jurisdiction?)`
+
+What the corpus holds per jurisdiction and tag, with **stubs counted apart** from documents
+(corpus-toolkit#213, ADR-0017). It answers what a search cannot: "no provision found"
+versus "not in the corpus". A stub is an instrument known to exist whose text is not held
+(`content_mode: stub`), so it is neither a document nor absent.
+
+    {jurisdictions: {<jurisdiction>: {documents, stubs, total, stub_share, in_corpus,
+                                      tags: {<tag>: {documents, stubs}}}},
+     unspecified?: {documents, stubs, total, stub_share, tags},
+     totals: {documents, stubs, total},
+     corpus, archetype, authoritative_source, disclaimer, contract_version}
+
+`documents` counts every non-stub document and `stubs` the stubs; `stub_share` is
+`stubs / total`, `null` when `total` is 0. `tags` counts a document once under each tag it
+carries. Jurisdictions come from each document's own `jurisdiction`, falling back to the
+corpus's declared one, as `corpus_overview().jurisdictions` does; documents with no
+jurisdiction anywhere are reported under `unspecified`, never under an invented name.
+Passing `jurisdiction` reports only that one, and one the corpus does not carry is an
+explicit zero entry with `in_corpus: false`. A backend with no `coverage()` is refused with
+`error` rather than answered with an empty table, which would read as "nothing is held".
+
+**Optional, not core**, registered when the retrieval backend implements `coverage()` (the
+file backend does), on any archetype. The name is **reserved**. Additive, so the contract
+stays v1.
+
 ### `compare(query, jurisdictions, doc_type?, issuing_body?, tags?, limit_per_jurisdiction?, mode?)`
 
 One query run **separately** for each requested jurisdiction, the top passages returned
@@ -681,14 +720,15 @@ or not this corpus happens to serve it:
 
     search_corpus   get_document        resolve_citation   graph_neighbors
     corpus_overview authority_chain     issuing_body_profile
-    documents_by_agency compare
+    documents_by_agency compare         coverage
 
 `authority_chain` and `issuing_body_profile` are conditional on archetype;
 `issuing_body_profile` and `documents_by_agency` are conditional on the backend
 implementing `holdings_for` / `documents_for_slug`. `documents_by_agency` has no
 archetype condition — an `api` corpus registers it too. `compare` is conditional on
-the backend's `search` naming `jurisdiction`, also with no archetype condition. All
-four are reserved anyway. A corpus
+the backend's `search` naming `jurisdiction`, and `coverage` on the backend
+implementing `coverage()`, both with no archetype condition. All
+five are reserved anyway. A corpus
 that claimed a conditional name would start clean, serve corpus semantics under
 a core tool's name, and turn fatal the day the condition changed with no edit to
 its tools module.

@@ -17,6 +17,7 @@ in place. The stamping commit's PR is the review record.
 | `verbatim` | read the rendered `## Full text` against the live official source; confirm no drift the snapshot hash cannot see (the hash pins OUR rendering, not upstream) |
 | `summary`  | open the official link; confirm it is the claimed instrument, that metadata (term, dates, version) matches, and that the summary misstates nothing |
 | `mixed`    | both, per section |
+| `stub`     | open the official link; confirm the instrument still exists, and that it is still not public or still cannot be fetched; if the text has become available, ingest it and drop the stub |
 | dataset docs | re-fetch or re-derive the artifact; confirm the recorded hash still matches and stated figures reproduce |
 
 ## Cadence
