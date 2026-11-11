@@ -13,6 +13,7 @@ True for us in that case, which is exactly why the position has to be reported s
 Parsing is tested against real fixture text rather than over the network: the point is what
 we conclude from a given file, and a network test would assert on someone else's server.
 """
+import io
 import unittest
 from unittest import mock
 
@@ -149,6 +150,104 @@ class AllowedTest(unittest.TestCase):
         with self._with_body(VENDOR):
             rec = robots.ai_position("https://vendor.example/x", "corpus-toolkit")
         self.assertEqual(rec.crawl_delay, 5.0)
+
+# ---- the crawler-form User-Agent and the robots product token (ADR-0019) ------------------
+
+COMPAT = "Mozilla/5.0 (compatible; OregonAI-CivicCorpus/1.36.5; +https://github.com/OregonAI/x)"
+
+ADDRESSED_TO_US = """\
+User-agent: *
+Allow: /
+
+User-agent: OregonAI-CivicCorpus
+Disallow: /private/
+Crawl-delay: 7
+"""
+
+ADDRESSED_TO_MOZILLA = """\
+User-agent: *
+Allow: /
+
+User-agent: Mozilla
+Disallow: /
+Crawl-delay: 9
+"""
+
+
+def _serve(text):
+    """Patch urlopen so a host serves `text` as robots.txt; return the headers it was sent."""
+    sent = []
+
+    class Resp(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def urlopen(req, timeout=None):
+        sent.append(req.get_header("User-agent"))
+        return Resp(text.encode())
+
+    return mock.patch.object(robots.urllib.request, "urlopen", urlopen), sent
+
+
+class ProductTokenTest(unittest.TestCase):
+    def test_the_crawler_form_yields_our_product_token_not_mozilla(self):
+        self.assertEqual(robots.product_token(COMPAT), "OregonAI-CivicCorpus")
+
+    def test_a_plain_string_is_passed_through_unchanged(self):
+        for ua in ("corpus-toolkit-change-detector", "Corpus/9 (+https://example.org)",
+                   "OregonAI-CivicCorpus/1 (+https://x)"):
+            self.assertEqual(robots.product_token(ua), ua)
+
+    def test_the_detector_crawler_form_yields_its_token(self):
+        ua = "Mozilla/5.0 (compatible; corpus-toolkit-change-detector/1.36.5; +https://github.com/OregonAI/corpus-toolkit)"
+        self.assertEqual(robots.product_token(ua), "corpus-toolkit-change-detector")
+
+    def test_a_real_browser_string_is_not_rewritten(self):
+        ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+        self.assertEqual(robots.product_token(ua), ua)
+
+
+class CrawlerFormMatchingTest(unittest.TestCase):
+    def setUp(self):
+        robots.clear_cache()
+        self.addCleanup(robots.clear_cache)
+
+    def test_a_rule_addressed_to_our_token_applies_with_the_crawler_header(self):
+        patch, sent = _serve(ADDRESSED_TO_US)
+        with patch:
+            self.assertFalse(robots.allowed("https://h.gov/private/a", COMPAT))
+            self.assertTrue(robots.allowed("https://h.gov/public/a", COMPAT))
+            self.assertEqual(robots.ai_position("https://h.gov/", COMPAT).crawl_delay, 7.0)
+        self.assertEqual(sent, [COMPAT], "the full header is what the host sees")
+
+    def test_a_rule_addressed_to_mozilla_is_not_addressed_to_us(self):
+        patch, _ = _serve(ADDRESSED_TO_MOZILLA)
+        with patch:
+            self.assertTrue(robots.allowed("https://h.gov/a", COMPAT),
+                            "only '*' applies to us, and '*' allows")
+            self.assertIsNone(robots.ai_position("https://h.gov/", COMPAT).crawl_delay)
+
+    def test_a_blanket_star_rule_still_applies(self):
+        patch, _ = _serve(BLANKET_BLOCK)
+        with patch:
+            self.assertFalse(robots.allowed("https://h.gov/a", COMPAT))
+
+    def test_a_caller_supplied_plain_agent_matches_as_before(self):
+        patch, _ = _serve("User-agent: corpus-toolkit-change-detector\nDisallow: /\n")
+        with patch:
+            self.assertFalse(robots.allowed("https://h.gov/a", "corpus-toolkit-change-detector"))
+
+
+    def test_a_caller_crawler_form_agent_is_matched_as_it_always_was(self):
+        # Only OUR tokens are unwrapped; a caller's own Mozilla-compatible string keeps the
+        # matching it had before ADR-0019 (the text before the first "/", i.e. `Mozilla`).
+        ua = "Mozilla/5.0 (compatible; MyBot/1.0; +https://x)"
+        self.assertEqual(robots.product_token(ua), ua)
+        patch, _ = _serve(ADDRESSED_TO_MOZILLA)
+        with patch:
+            self.assertFalse(robots.allowed("https://h.gov/a", ua))
+            self.assertEqual(robots.ai_position("https://h.gov/", ua).crawl_delay, 9.0)
 
 
 if __name__ == "__main__":

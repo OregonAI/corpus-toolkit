@@ -121,7 +121,21 @@ from corpus_toolkit.repo import (ArchiveUnreadable, WatchedDocumentUnreadable,
                                  WatchedPathMissing, ZIP_MEMBER_FORMATS, content_hash)
 from corpus_toolkit.sources import drift_report, tls
 
-USER_AGENT = "corpus-toolkit-change-detector"
+# The header is the conventional crawler form (ADR-0019): colorado.gov's firewall refuses an
+# agent without the `Mozilla/5.0` prefix. Robots directives are NOT matched on the header but
+# on its product token, `corpus-toolkit-change-detector`, byte-for-byte what this constant was
+# before, so no host's robots outcome for the drift detector changes (`robots.product_token`
+# extracts it). The token is deliberately left unversioned inside robots matching.
+ROBOTS_TOKEN = "corpus-toolkit-change-detector"
+
+
+def _compatible_user_agent() -> str:
+    from corpus_toolkit.sources.fetch import toolkit_version
+    return (f"Mozilla/5.0 (compatible; {ROBOTS_TOKEN}/{toolkit_version()}; "
+            f"+https://github.com/OregonAI/corpus-toolkit)")
+
+
+USER_AGENT = _compatible_user_agent()
 
 # HTTP/2, AND WHY IT IS NOT A PERFORMANCE CHOICE (corpus-toolkit#162).
 #

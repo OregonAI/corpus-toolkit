@@ -101,7 +101,7 @@ def test_a_challenged_host_is_retried_with_curl_and_the_same_honest_user_agent()
     [call] = curl.calls
     assert call[0] == "/usr/bin/curl" and call[1] == "-q"          # ~/.curlrc cannot inject
     assert call[call.index("-A") + 1] == f.user_agent
-    assert f.user_agent.startswith("OregonAI-CivicCorpus/")
+    assert f.user_agent.startswith("Mozilla/5.0 (compatible; OregonAI-CivicCorpus/")
     assert curl.header_values(call, "User-Agent") == []            # one identity, one place
     assert call[-1] == "https://h.example.gov/a"
 
@@ -117,8 +117,11 @@ def test_no_browser_headers_no_cookies_no_impersonation_flags():
     curl = FakeCurl(ok())
     f, _ = make(challenged, curl)
     f.get("https://h.example.gov/a")
-    flat = " ".join(curl.calls[0]).lower()
-    for forbidden in ("mozilla", "chrome", "sec-ch", "sec-fetch", "--cookie", " -b ",
+    argv = list(curl.calls[0])
+    assert argv[argv.index("-A") + 1] == f.user_agent      # the crawler form (ADR-0019)
+    del argv[argv.index("-A") + 1]                         # the one place "Mozilla/5.0 (compatible;" may appear
+    flat = " ".join(argv).lower()
+    for forbidden in ("mozilla", "chrome", "safari", "applewebkit", "gecko", "x11", "sec-ch", "sec-fetch", "--cookie", " -b ",
                       "cookie:", "impersonate", "--insecure", " -k ", "referer"):
         assert forbidden not in flat, forbidden
     assert "--proto" in flat                                       # http(s) only
@@ -349,7 +352,7 @@ def test_get_range_sends_a_range_header_over_python():
 
     def handler(req):
         seen.append(req.headers["Range"])
-        assert req.headers["User-Agent"].startswith("OregonAI-CivicCorpus/")
+        assert req.headers["User-Agent"].startswith("Mozilla/5.0 (compatible; OregonAI-CivicCorpus/")
         return httpx.Response(206, content=b"abc", headers={"Content-Type": "application/pdf"})
     f, _ = make(handler, FakeCurl(ok()), curl_on_challenge=False)
     got = f.get_range("https://h.example.gov/big.pdf", 10, 12)

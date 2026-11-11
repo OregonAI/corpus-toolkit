@@ -61,6 +61,12 @@ gating. The same rule holds for the ingest fetcher (`corpus_toolkit.sources.fetc
 v1.36.0): it reports (`Fetcher.robots`, `Fetcher.allowed`) and enforces only when the
 corpus passes `enforce_robots=True`, which is that corpus's own recorded decision.
 
+Identity is the conventional crawler form, `Mozilla/5.0 (compatible; OregonAI-CivicCorpus/<version>;
++https://github.com/OregonAI/<repo>)` (ADR-0019): the prefix is what some firewalls (colorado.gov)
+require, the parenthesis still names us. Never a real browser's product tokens or header sets.
+robots.txt is matched on the product token (`robots.product_token`), not the header, which
+`urllib.robotparser` would read as `Mozilla`.
+
 Transport is a separate axis from identity. A host that challenges the Python client (403 +
 `cf-mitigated: challenge`) while answering system curl 200 under the same User-Agent can be
 fetched with `Fetcher(curl_on_challenge=True)` (ADR-0018, awaiting owner confirmation): opt-in,

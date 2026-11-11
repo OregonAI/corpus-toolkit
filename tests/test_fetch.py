@@ -33,20 +33,9 @@ def fetcher(handler, **kw):
     return f, clock
 
 
-def test_the_default_user_agent_is_honest_versioned_and_linked():
-    ua = fetch.default_user_agent()
-    assert re.fullmatch(r"OregonAI-CivicCorpus/\S+ \(\+https://github\.com/OregonAI/corpus-toolkit; "
-                        r"public-records archival\)", ua), ua
-    assert "Mozilla" not in ua
-
-    class Cfg:
-        id = "oregon-counties"
-    assert "OregonAI/oregon-counties;" in fetch.default_user_agent(Cfg())
-
-
 def test_get_returns_body_media_type_status_and_final_url():
     def handler(req):
-        assert req.headers["User-Agent"].startswith("OregonAI-CivicCorpus/")
+        assert req.headers["User-Agent"].startswith("Mozilla/5.0 (compatible; OregonAI-CivicCorpus/")
         return httpx.Response(200, content=b"%PDF-1.4 x",
                               headers={"Content-Type": "application/pdf; charset=binary"})
     f, _ = fetcher(handler)
@@ -181,3 +170,57 @@ def test_robots_is_reported_not_enforced_by_default(monkeypatch):
 def test_sniff_trusts_magic_bytes_before_anyone_s_say_so(body, declared, want):
     assert sniff(body, declared) == want
     assert fetch.UNSUPPORTED >= {"doc", "docx"}
+
+
+def test_the_default_user_agent_is_honest_versioned_and_linked():
+    ua = fetch.default_user_agent()
+    assert re.fullmatch(r"Mozilla/5\.0 \(compatible; OregonAI-CivicCorpus/\S+; "
+                        r"\+https://github\.com/OregonAI/corpus-toolkit\)", ua), ua
+    assert "public-records archival" not in ua      # see ADR-0019: the measured form, exactly
+    class Cfg:
+        id = "oregon-counties"
+    assert "+https://github.com/OregonAI/oregon-counties)" in fetch.default_user_agent(Cfg())
+    for token in ("Chrome/", "Safari/", "AppleWebKit", "Gecko", "Firefox", "X11", "Linux"):
+        assert token not in ua
+
+
+def _serve_robots(monkeypatch, text):
+    import io
+
+    class Resp(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    fetch.robots.clear_cache()
+    monkeypatch.setattr(fetch.robots.urllib.request, "urlopen",
+                        lambda req, timeout=None: Resp(text.encode()))
+    return fetch.robots.clear_cache
+
+
+def test_the_fetcher_matches_robots_on_its_product_token(monkeypatch):
+    f, _ = fetcher(lambda req: httpx.Response(200))
+    assert f.user_agent.startswith("Mozilla/5.0 (compatible; ")
+    assert robots_token_of(f) == "OregonAI-CivicCorpus"
+    url = "https://h.gov/a"
+    clear = _serve_robots(monkeypatch, "User-agent: OregonAI-CivicCorpus\nDisallow: /\n")
+    try:
+        assert f.allowed(url) is False
+        g, _ = fetcher(lambda req: httpx.Response(200), enforce_robots=True)
+        with pytest.raises(Refused):
+            g.get(url)
+        clear()
+        _serve_robots(monkeypatch, "User-agent: Mozilla\nDisallow: /\n")
+        assert f.allowed(url) is True
+    finally:
+        clear()
+
+
+def robots_token_of(f):
+    return fetch.robots.product_token(f.user_agent)
+
+
+def test_a_caller_supplied_user_agent_wins_and_keeps_its_robots_token():
+    f, _ = fetcher(lambda req: httpx.Response(200), user_agent="Corpus/9 (+https://example.org)")
+    assert f.user_agent == "Corpus/9 (+https://example.org)"
+    assert robots_token_of(f) == "Corpus/9 (+https://example.org)"

@@ -17,6 +17,7 @@ believe it was on HTTP/2, collect 403s from the hosts above, and report them as 
 failures forever. That is the same wrong diagnosis one layer down, and it would be
 invisible. The property is depended on, so it is checked rather than assumed.
 """
+import re
 import sys
 from unittest import mock
 
@@ -49,8 +50,17 @@ def test_the_user_agent_stays_honest():
          mock.patch("httpx.Client") as Client:
         changes._http_client()
     ua = Client.call_args.kwargs["headers"]["User-Agent"]
-    assert ua == "corpus-toolkit-change-detector"
-    assert "Mozilla" not in ua and "Chrome" not in ua
+    assert re.fullmatch(r"Mozilla/5\.0 \(compatible; corpus-toolkit-change-detector/\S+; "
+                        r"\+https://github\.com/OregonAI/corpus-toolkit\)", ua), ua
+    for token in ("Chrome/", "Safari/", "AppleWebKit", "Gecko", "Firefox", "X11", "Linux"):
+        assert token not in ua
+
+
+def test_the_detector_still_matches_robots_on_its_old_token():
+    """No corpus's robots outcome may change because the header did (ADR-0019): directives
+    are matched on `corpus-toolkit-change-detector`, exactly the string used before."""
+    from corpus_toolkit.sources import robots
+    assert robots.product_token(changes.USER_AGENT) == "corpus-toolkit-change-detector"
 
 
 def test_a_missing_h2_is_refused_rather_than_silently_downgraded():

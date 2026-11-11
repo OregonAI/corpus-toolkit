@@ -4,6 +4,30 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Changed — the default User-Agent is the conventional crawler form (ADR-0019)
+
+**Every corpus's outgoing User-Agent changes on the next release**, for the ingest Fetcher
+and the drift detector. A host that allow-listed or block-listed the old exact string will
+behave differently, and publishers' logs will show a new agent.
+
+- Fetcher default: `Mozilla/5.0 (compatible; OregonAI-CivicCorpus/<version>; +https://github.com/OregonAI/<repo>)`
+  (was `OregonAI-CivicCorpus/<version> (+https://github.com/OregonAI/<repo>; public-records archival)`).
+  Measured 2026-11-11: colorado.gov's shared firewall answers the old form 403 and this one
+  200. It names the project, version and repository and is not a browser string (no
+  `Chrome/`, `Safari/`, `AppleWebKit`, `Gecko`, platform tokens, no browser headers). A
+  caller-supplied `user_agent=` is unchanged.
+- Drift detector header: `Mozilla/5.0 (compatible; corpus-toolkit-change-detector/<version>; +https://github.com/OregonAI/corpus-toolkit)`
+  (was `corpus-toolkit-change-detector`).
+- robots.txt is matched on the product token, never the header: new `robots.product_token()`
+  (`OregonAI-CivicCorpus` / `corpus-toolkit-change-detector`; any other string, including a caller's own crawler-form agent, unchanged).
+  Directive matching for the detector is exactly as before; a host that refused the old
+  header on robots.txt itself may now return a real verdict instead of "no robots.txt".
+- `remote.USER_AGENT` (sibling-index fetch) is unchanged.
+- Corpora whose tests assert the old prefix (`ua.startswith("OregonAI-CivicCorpus/")`) must
+  match `OregonAI-CivicCorpus/` anywhere in the string, or the full crawler form. Known case:
+  `states-it-governance` `tests/test_ingest_california_statute.py` (pinned at v1.36.4); update
+  it in that repo's pin-bump PR.
+
 ### Added — opt-in curl transport for challenged hosts, and a public ranged get (ADR-0018, awaiting owner confirmation)
 
 `www.cdt.ca.gov` answers the ingest Fetcher (httpx, HTTP/2) 403 with `cf-mitigated: challenge`

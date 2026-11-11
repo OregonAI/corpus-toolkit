@@ -1,6 +1,6 @@
 # ADR-0016 — Ingest primitives are shared; ingest orchestration stays in the corpus
 
-**Status:** accepted · **Date:** 2026-09-04 · amended by [ADR-0018](0018-a-challenged-host-may-be-fetched-with-curl-under-the-same-user-agent.md) (an opt-in curl transport for challenged hosts, under the same User-Agent)
+**Status:** accepted · **Date:** 2026-09-04 · amended by [ADR-0018](0018-a-challenged-host-may-be-fetched-with-curl-under-the-same-user-agent.md) (an opt-in curl transport for challenged hosts, under the same User-Agent) · amended by [ADR-0019](0019-the-default-user-agent-is-the-conventional-crawler-form.md) (the User-Agent's form, and the robots product token)
 
 ## Context
 
