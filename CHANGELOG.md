@@ -4,6 +4,29 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — `search_corpus` filters on `jurisdiction` and `tags` (corpus-toolkit#211)
+
+`search_corpus` filtered on `doc_type` and `issuing_body` only; `tags` were searchable text,
+not a filter, and there was no jurisdiction filter. Two optional parameters are added:
+`jurisdiction` (exact match on a document's own jurisdiction, else the corpus's declared
+one, the same value `corpus_overview` counts) and `tags` (a list; the document must carry
+every tag, each matched as a whole tag, so `air` does not match `air-quality`). They are
+applied to the keyword SQL and to each semantic candidate before fusion, so they hold in
+`hybrid`, `keyword` and `semantic` mode and when the semantic artifact is absent. When a
+filter is set the semantic ranker is asked for 200 candidates instead of 40, because a
+selective filter applied afterwards would otherwise leave an empty answer. A filtered search
+with no matches returns one `no_hits` record carrying `filters`, as the `issuing_body` filter
+does.
+
+A custom retrieval backend whose `search` does not name `jurisdiction`/`tags` is never handed
+them (`**kwargs` does not count); a filtered search against it returns one `no_hits` record
+with `filters_unsupported` rather than an unfiltered answer read as a filtered one.
+
+Backward compatible: with neither parameter the call, the hit shape and the ranking are
+unchanged. The FTS index gains a `doc_tags` table under the same `SCHEMA_VERSION` 5 that
+#210 already moved (unreleased), so no further rebuild. `docs/mcp-interface-contract.md`
+documents the parameters; the contract stays v1.
+
 ### Added — `corpus_overview` reports the jurisdictions the documents carry (corpus-toolkit#210)
 
 `corpus.yml` declares one `jurisdiction`, but a document may carry its own in frontmatter

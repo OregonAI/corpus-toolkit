@@ -22,7 +22,7 @@ jurisdiction on the document or in the config are not filed under an invented na
 are counted in `jurisdiction_unspecified`, present only when non-zero. Additive, so the
 contract stays v1; a custom retrieval backend that does not report it simply omits it.
 
-### `search_corpus(query, doc_type?, issuing_body?, limit?, mode?)`
+### `search_corpus(query, doc_type?, issuing_body?, limit?, mode?, jurisdiction?, tags?)`
 Full-corpus search. Returns a ranked **list** of hits with `id`, `title`,
 `citation`, `doc_type`, `issuing_body`, `path`, `snippet`.
 `mode` is `hybrid` (default: BM25 + semantic fused by RRF), `keyword`
@@ -32,6 +32,17 @@ corpus configures no `semantic_search_module`. `limit` is capped at 40.
 - API corpora: search over entity docs, cookbook, and (where feasible)
   proxied live search endpoints — results must be labeled `source: live`
   vs `source: docs`.
+
+**`jurisdiction` and `tags` are optional filters** (corpus-toolkit#211). `jurisdiction`
+is an exact match on the document's own `jurisdiction`, or the corpus's declared one when the
+document carries none. `tags` is a list; a document must carry EVERY tag listed, each matched
+as a whole tag (`air` does not match `air-quality`). Both apply to the keyword and the semantic
+ranking before they are fused, and so hold in every `mode` and when the semantic artifact is
+absent. A filtered search with no matches returns one `no_hits` record (no `id`/`path`/
+`snippet`) with `filters` naming what was searched for. A custom backend whose `search` does
+not name the keywords is not asked; it gets a `no_hits` record with `filters_unsupported`
+rather than an unfiltered answer. With neither parameter, behaviour is unchanged. Additive;
+the contract stays v1.
 
 **`issuing_body` takes EITHER of the two things a body is called, and the
 response says which one matched** (toolkit >= this release, corpus-toolkit#131).

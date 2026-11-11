@@ -769,7 +769,8 @@ class CorpusFramework:
 
     def search_corpus(self, query: str, doc_type: str | None = None,
                       issuing_body: str | None = None, limit: int = 10,
-                      mode: str = "hybrid") -> list[dict]:
+                      mode: str = "hybrid", jurisdiction: str | None = None,
+                      tags: list[str] | None = None) -> list[dict]:
         """mode: 'hybrid' (default) fuses BM25 keyword + a registered
         semantic_search_module via RRF; 'keyword' is FTS5/BM25 only;
         'semantic' is vector-only. Hybrid/semantic silently degrade to
@@ -800,25 +801,103 @@ class CorpusFramework:
             two different findings -- a real body holding nothing here, and a string that
             is nobody's frontmatter value -- arrived identical.
 
-        UNFILTERED SEARCH IS BYTE-IDENTICAL. The blast radius is the parameter under
-        repair: pass no `issuing_body` and the hit shape is exactly what it was.
+        `jurisdiction` AND `tags` (corpus-toolkit#211) filter on a document's own
+        `jurisdiction` (else the corpus's declared one) and on its frontmatter tags -- every
+        listed tag must be on the document. The backend applies them to the keyword and the
+        semantic ranking alike, before the two are fused. A backend whose `search` does not
+        NAME them cannot filter, and is not asked: it would answer unfiltered, and that
+        would be read as the filtered answer. The reply is one `no_hits` record carrying
+        `filters_unsupported` instead.
+
+        UNFILTERED SEARCH IS BYTE-IDENTICAL. The blast radius is the parameters under
+        repair: pass no `issuing_body`, `jurisdiction` or `tags` and the hit shape is
+        exactly what it was.
         """
+        extra: dict = {}
+        filters: dict = {}
+        jur = str(jurisdiction or "").strip()
+        if jur:
+            filters["jurisdiction"] = jur
+        if isinstance(tags, str):
+            tags = [tags]
+        tag_list = [t for t in (str(x).strip() for x in (tags or [])) if t]
+        if tag_list:
+            filters["tags"] = tag_list
+        if filters:
+            unsupported = [k for k in filters if not self._backend_takes(k)]
+            if unsupported:
+                return [self._filters_unsupported(query, filters, unsupported)]
+            extra = dict(filters)
         value = str(issuing_body or "").strip()
         if not value:
-            return self.backend.search(query, doc_type=doc_type, issuing_body=None,
-                                       limit=limit, mode=mode)
+            hits = self.backend.search(query, doc_type=doc_type, issuing_body=None,
+                                       limit=limit, mode=mode, **extra)
+            if not hits and filters:
+                return [self._no_filtered_hits(query, doc_type, filters)]
+            return hits
         filt = self._issuing_body_filter(value)
         if filt["matched"] == "registry_slug":
             hits = self.backend.search(query, doc_type=doc_type, issuing_body=None,
-                                       issuing_body_slug=value, limit=limit, mode=mode)
+                                       issuing_body_slug=value, limit=limit, mode=mode,
+                                       **extra)
         else:
             hits = self.backend.search(query, doc_type=doc_type, issuing_body=value,
-                                       limit=limit, mode=mode)
+                                       limit=limit, mode=mode, **extra)
         if not hits:
-            return [self._no_issuing_body_hits(query, doc_type, filt)]
+            rec = self._no_issuing_body_hits(query, doc_type, filt)
+            if filters:
+                rec["filters"] = filters
+            return [rec]
         for hit in hits:
             hit["issuing_body_filter"] = dict(filt)
         return hits
+
+    def _no_filtered_hits(self, query: str, doc_type: str | None, filters: dict) -> dict:
+        """The one record a jurisdiction/tag-filtered search with no matches answers with.
+        Same reasoning as `_no_issuing_body_hits`: not a hit (no id/path/snippet), and it
+        says what was searched for, because an empty list cannot."""
+        also = f" and doc_type={doc_type!r}" if doc_type else ""
+        return {
+            "no_hits": True,
+            "query": query,
+            "filters": dict(filters),
+            "note": (f"no document matched {query!r} with "
+                     f"{self._describe_filters(filters)}{also}. This is what was searched "
+                     f"for, not a statement that this corpus holds nothing for it."),
+        }
+
+    @staticmethod
+    def _describe_filters(filters: dict) -> str:
+        parts = []
+        if "jurisdiction" in filters:
+            parts.append(f"jurisdiction={filters['jurisdiction']!r}")
+        if "tags" in filters:
+            parts.append(f"tags={filters['tags']!r} (all required)")
+        return " and ".join(parts)
+
+    def _filters_unsupported(self, query: str, filters: dict, unsupported: list) -> dict:
+        return {
+            "no_hits": True,
+            "query": query,
+            "filters": dict(filters),
+            "filters_unsupported": list(unsupported),
+            "note": (f"the retrieval backend {self.backend.name!r} cannot filter by "
+                     f"{', '.join(unsupported)} (its search() does not take "
+                     f"{'it' if len(unsupported) == 1 else 'them'}), so the filter was "
+                     f"NOT applied and no search was run. This is not a statement that "
+                     f"nothing matches."),
+        }
+
+    def _backend_takes(self, name: str) -> bool:
+        """Does this backend's `search` NAME the keyword `name`? Same rule, and the same
+        reason, as `_backend_takes_slug_filter`: `**kwargs` does not count."""
+        fn = getattr(self.backend, "search", None)
+        try:
+            param = inspect.signature(fn).parameters.get(name)
+        except (TypeError, ValueError):
+            return False
+        return param is not None and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 
     # What each `matched` value actually filtered on, in the words a caller can act on.
     _FILTERED_COLUMN = {

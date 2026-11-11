@@ -156,9 +156,13 @@ def build_server(config):
 
     @mcp.tool()
     def search_corpus(query: str, doc_type: str = "", issuing_body: str = "",
-                      limit: int = 10, mode: str = "hybrid") -> list[dict]:
+                      limit: int = 10, mode: str = "hybrid", jurisdiction: str = "",
+                      tags: list[str] | None = None) -> list[dict]:
         """Search the corpus. Returns ranked matches with snippets, never whole
-        documents. Optional filters: doc_type, issuing_body. mode: 'hybrid'
+        documents. Optional filters: doc_type, issuing_body, jurisdiction, tags.
+        `jurisdiction` matches a document's own jurisdiction (else the corpus's
+        declared one) exactly; `tags` keeps only documents carrying EVERY tag
+        listed. Both apply to keyword and semantic results alike. mode: 'hybrid'
         (default, keyword+semantic when this corpus has semantic search
         configured), 'keyword' (BM25 only), 'semantic' (vector only, falls
         back to keyword if unavailable).
@@ -172,7 +176,8 @@ def build_server(config):
         with no matches returns one `no_hits` record saying what was searched
         for — never a bare empty list, which cannot tell "this body has nothing
         here" from "you passed the other kind of string"."""
-        return fw.search_corpus(query, doc_type or None, issuing_body or None, limit, mode)
+        return fw.search_corpus(query, doc_type or None, issuing_body or None, limit, mode,
+                                jurisdiction or None, tags or None)
 
     @mcp.tool()
     def get_document(doc_id: str, part: str = "auto") -> ResponseEnvelope:

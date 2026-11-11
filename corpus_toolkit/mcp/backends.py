@@ -85,6 +85,9 @@ BIG_DOC_BYTES = 50 * 1024
 # 5: a new `jurisdiction` column (corpus-toolkit#210), so `corpus_overview` can report the
 # jurisdictions the documents actually carry. Purely additive, but a reader of the new column
 # against an index without it raises, so the version moves: one rebuild, no changed values.
+# The same unreleased version also adds the `doc_tags` table (corpus-toolkit#211): one row per
+# (document, tag), so `search_corpus(tags=...)` matches a WHOLE tag rather than a word in the
+# FTS `tags` column, where a word match would let `air-quality` satisfy a filter on `air`.
 SCHEMA_VERSION = 5
 
 # What FTS5's own tokenizer would treat as a word, near enough for locating matches. Kept
@@ -106,6 +109,10 @@ KW_ID, KW_TITLE, KW_CITATION, KW_DOCTYPE, KW_ISSUER, KW_PATH, KW_BM25 = range(7)
 # position and NOTHING ELSE. Named separately so a reader of the semantic branch cannot
 # mistake one row shape for the other.
 META_SLUG = 6
+META_JURISDICTION = 7
+# How many candidates the semantic ranker is asked for when a jurisdiction or tag filter
+# will thin them afterwards (corpus-toolkit#211).
+SEMANTIC_FILTER_POOL = 200
 
 # Column offsets into the tuple _doc_row() returns -- a DIFFERENT and wider projection than
 # the one above, in a different order, and the only one `get()` reads. Twelve positional
@@ -236,6 +243,13 @@ class RetrievalBackend(Protocol):
                issuing_body: str | None = None, limit: int = 10,
                mode: str = "hybrid") -> list[dict]:
         """Ranked hits: {id, title, citation, doc_type, issuing_body, path, snippet}.
+
+        A backend MAY also accept keyword-only `jurisdiction: str | None = None` and
+        `tags: list[str] | None = None` (corpus-toolkit#211), under the same rules as
+        `issuing_body_slug` below: detected from the signature, `**kwargs` does not count,
+        and a backend that does not name them is never asked -- a filtered search against
+        it answers with one `no_hits` record carrying `filters_unsupported`. They must hold
+        on every ranker the backend fuses, not only the keyword one.
 
         `issuing_body` filters on the FREE-TEXT frontmatter field, which is what it has
         always meant and what it still means.
@@ -555,6 +569,8 @@ class FileBackend:
             source_url TEXT, retrieved TEXT, effective_date TEXT, content_mode TEXT,
             content_exception TEXT, size INTEGER, body_chars INTEGER,
             jurisdiction TEXT)""")
+        con.execute("CREATE TABLE doc_tags (doc_rowid INTEGER, tag TEXT)")
+        con.execute("CREATE INDEX doc_tags_tag ON doc_tags (tag, doc_rowid)")
         # content='': tokenize but do not store the text. See CONTENTLESS FTS in the module
         # docstring -- in particular, columnsize=0 is omitted deliberately.
         con.execute("""CREATE VIRTUAL TABLE fts USING fts5(
@@ -585,6 +601,8 @@ class FileBackend:
             # these two tables on rowid, because a contentless fts cannot be read back to
             # join on `id`. Letting FTS5 assign its own would happen to line up today and
             # break the first time an insert is skipped or reordered.
+            con.executemany("INSERT INTO doc_tags VALUES (?, ?)", [
+                (cur.lastrowid, t) for t in self._tag_list(fm.get("tags"))])
             con.execute("INSERT INTO fts(rowid, id, citation, title, tags, glance, body) "
                         "VALUES (?,?,?,?,?,?,?)", (
                             cur.lastrowid, fm["id"], fm.get("citation", ""), fm["title"],
@@ -602,6 +620,14 @@ class FileBackend:
                       self._db_path.with_name(self._db_path.name + "-shm")):
             stray.unlink(missing_ok=True)
         return sqlite3.connect(self._db_path)
+
+    @staticmethod
+    def _tag_list(value) -> list[str]:
+        """A document's tags as clean strings. Frontmatter `tags` is a list; anything else
+        (a bare string, a null) is tolerated rather than raised on, as the FTS column was."""
+        if isinstance(value, str):
+            value = [value]
+        return sorted({str(t).strip() for t in (value or []) if str(t).strip()})
 
     def _searchable_body(self, body: str, doc_type: str) -> str:
         """Text that feeds the FTS `body` column.
@@ -631,7 +657,14 @@ class FileBackend:
     def _terms(query: str) -> list[str]:
         return _WORD.findall(query)
 
-    def _fts_rows(self, con, query, doc_type, issuing_body, limit, issuing_body_slug=None):
+    @staticmethod
+    def _clean_tags(tags) -> list[str]:
+        if isinstance(tags, str):
+            tags = [tags]
+        return [t for t in (str(x).strip() for x in (tags or [])) if t]
+
+    def _fts_rows(self, con, query, doc_type, issuing_body, limit, issuing_body_slug=None,
+                  jurisdiction=None, tags=None):
         terms = self._terms(query)
         if not terms:
             return {}, []
@@ -649,6 +682,11 @@ class FileBackend:
             sql += " AND d.issuing_body = ?"; sql_args.append(issuing_body)
         if issuing_body_slug:
             sql += " AND d.issuing_body_slug = ?"; sql_args.append(issuing_body_slug)
+        if jurisdiction:
+            sql += " AND d.jurisdiction = ?"; sql_args.append(jurisdiction)
+        for tag in tags or ():
+            sql += " AND d.rowid IN (SELECT doc_rowid FROM doc_tags WHERE tag = ?)"
+            sql_args.append(tag)
         sql += " ORDER BY bm25(fts) LIMIT ?"
         sql_args.append(max(1, min(int(limit), 40)))
         rows = {r[KW_ID]: r for r in con.execute(sql, sql_args).fetchall()}
@@ -690,8 +728,17 @@ class FileBackend:
         the moment a corpus configures semantic search.
         """
         return con.execute(
-            "SELECT id, title, citation, doc_type, issuing_body, path, issuing_body_slug "
-            "FROM docs WHERE id = ?", (doc_id,)).fetchone()
+            "SELECT id, title, citation, doc_type, issuing_body, path, issuing_body_slug, "
+            "jurisdiction FROM docs WHERE id = ?", (doc_id,)).fetchone()
+
+    @staticmethod
+    def _has_tags(con, doc_id, tags) -> bool:
+        if not tags:
+            return True
+        have = {r[0] for r in con.execute(
+            "SELECT t.tag FROM doc_tags t JOIN docs d ON d.rowid = t.doc_rowid "
+            "WHERE d.id = ?", (doc_id,))}
+        return all(t in have for t in tags)
 
     def _doc_row(self, doc_id: str):
         con = self.ensure_index()
@@ -711,18 +758,31 @@ class FileBackend:
 
     def search(self, query: str, *, doc_type: str | None = None,
                issuing_body: str | None = None, limit: int = 10,
-               mode: str = "hybrid", issuing_body_slug: str | None = None) -> list[dict]:
+               mode: str = "hybrid", issuing_body_slug: str | None = None,
+               jurisdiction: str | None = None,
+               tags: list[str] | None = None) -> list[dict]:
         """Ranked hits. `issuing_body` filters the free-text frontmatter column;
         `issuing_body_slug` filters `docs.issuing_body_slug`, the RESOLVED registry slug
         (corpus-toolkit#131). Both are exact matches, and the framework passes at most one
         -- deciding which is a corpus-level question, because only the registry says what
-        a slug is."""
+        a slug is.
+
+        `jurisdiction` (exact match on the document's own jurisdiction, else the corpus's
+        declared one) and `tags` (every listed tag must be on the document, matched whole)
+        are corpus-toolkit#211. They are applied to the keyword SQL and to each semantic
+        candidate, so they hold in every mode and when the semantic artifact is absent."""
         con = self.ensure_index()
+        tags = self._clean_tags(tags)
+        jurisdiction = jurisdiction or None
         n = max(1, min(int(limit), 40))
         use_sem = mode in ("hybrid", "semantic") and self._semantic_available()
         pool = max(n * 4, 40) if use_sem else n
+        if use_sem and (jurisdiction or tags):
+            # A selective filter applied AFTER the semantic ranker answers can empty the
+            # list when the ranker's top slice is all another jurisdiction's.
+            pool = max(pool, SEMANTIC_FILTER_POOL)
         rows, kw_order = self._fts_rows(con, query, doc_type, issuing_body, pool,
-                                        issuing_body_slug)
+                                        issuing_body_slug, jurisdiction, tags)
         sem_chunks: dict = {}
 
         if not use_sem:
@@ -737,14 +797,16 @@ class FileBackend:
                 if callable(rank_chunks) else {}
             sem_order = (list(sem_chunks) if sem_chunks
                          else list(self._semantic.rank(query, pool) or []))
-            if doc_type or issuing_body or issuing_body_slug:
+            if doc_type or issuing_body or issuing_body_slug or jurisdiction or tags:
                 keep = []
                 for d in sem_order:
                     mr = self._doc_meta_row(con, d)
                     if mr and (not doc_type or mr[KW_DOCTYPE] == doc_type) and \
                             (not issuing_body or mr[KW_ISSUER] == issuing_body) and \
                             (not issuing_body_slug
-                             or mr[META_SLUG] == issuing_body_slug):
+                             or mr[META_SLUG] == issuing_body_slug) and \
+                            (not jurisdiction or mr[META_JURISDICTION] == jurisdiction) and \
+                            self._has_tags(con, d, tags):
                         keep.append(d)
                 sem_order = keep
             final = sem_order[:n] if mode == "semantic" else self._rrf([kw_order, sem_order])[:n]
