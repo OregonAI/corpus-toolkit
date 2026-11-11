@@ -1251,7 +1251,9 @@ snapshot and frontmatter code with:
 
 Three things change for a script that switches:
 
-- **The User-Agent becomes honest.** A `Mozilla/5.0 (...)` string goes away. If a host then
+- **The User-Agent becomes honest.** A browser-imitating or private `Mozilla/5.0 (...)` string
+  is replaced by the toolkit's crawler-form identity (ADR-0019), which names the project,
+  version and repo. If a host then
   refuses, `Fetcher.get` raises `Refused`; record the source as unavailable, do not spoof.
   Overriding the agent (`Fetcher(config, user_agent=...)`) is allowed only with the reason
   recorded in the source manifest.
