@@ -4,6 +4,22 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — `corpus_overview` reports the jurisdictions the documents carry (corpus-toolkit#210)
+
+`corpus.yml` declares one `jurisdiction`, but a document may carry its own in frontmatter
+(a corpus such as states-it-governance holds several states' instruments) and nothing read
+it. `corpus_overview` now adds `jurisdictions`: `{jurisdiction: document count}`, largest
+first, each document counted under its own `jurisdiction` or, absent that, the corpus's
+declared one. Documents with neither are counted in `jurisdiction_unspecified` (present only
+when non-zero) rather than filed under an invented name. The existing `jurisdiction` field is
+unchanged, and so is every other field.
+
+Backward compatible: single-jurisdiction corpora gain one additive field
+(`{"<declared>": N}`) and nothing else. The FTS index `SCHEMA_VERSION` moves 4 to 5 for the
+new `jurisdiction` column, so each deployed index rebuilds once on first start (the same cost
+as the 3 to 4 bump); no indexed value changes. `docs/mcp-interface-contract.md` documents the
+new field; the contract stays v1. The server description still names the declared value only.
+
 ### Added — a `LICENSE` file: MIT
 
 The repository is public and had no license file, so nobody outside it had

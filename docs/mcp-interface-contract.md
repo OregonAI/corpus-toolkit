@@ -11,8 +11,16 @@ oregon-policy-repo server.
 What this corpus contains and does not. Agents call this first. Fields:
 `corpus`, `archetype`, `authoritative_source`, `jurisdiction`, `disclaimer`,
 `documents_by_type`, `content_mode` (counts by verbatim/summary/mixed),
-`commit`, `graph_edges`, `contract_version` — plus whatever the corpus's
-retrieval backend adds (an API corpus reports its live endpoints here).
+`jurisdictions`, `commit`, `graph_edges`, `contract_version` — plus whatever the
+corpus's retrieval backend adds (an API corpus reports its live endpoints here).
+
+`jurisdiction` is the one value `corpus.yml` declares. `jurisdictions` is what the
+documents actually carry: `{jurisdiction: document count}`, largest first, read from each
+document's own `jurisdiction` frontmatter and falling back to the declared value when a
+document has none. A single-jurisdiction corpus reports one entry. Documents with no
+jurisdiction on the document or in the config are not filed under an invented name: they
+are counted in `jurisdiction_unspecified`, present only when non-zero. Additive, so the
+contract stays v1; a custom retrieval backend that does not report it simply omits it.
 
 ### `search_corpus(query, doc_type?, issuing_body?, limit?, mode?)`
 Full-corpus search. Returns a ranked **list** of hits with `id`, `title`,

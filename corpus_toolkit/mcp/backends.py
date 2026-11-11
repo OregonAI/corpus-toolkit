@@ -81,7 +81,11 @@ BIG_DOC_BYTES = 50 * 1024
 # index built by older code is not wrong-shaped but wrong-valued, and would keep attributing
 # those documents to a body the corpus says they do not belong to. A corpus that declares no
 # sentinels indexes identically to 3 — the bump costs it one rebuild and changes nothing.
-SCHEMA_VERSION = 4
+#
+# 5: a new `jurisdiction` column (corpus-toolkit#210), so `corpus_overview` can report the
+# jurisdictions the documents actually carry. Purely additive, but a reader of the new column
+# against an index without it raises, so the version moves: one rebuild, no changed values.
+SCHEMA_VERSION = 5
 
 # What FTS5's own tokenizer would treat as a word, near enough for locating matches. Kept
 # identical to the pattern the query side uses so a term that can MATCH can also be found
@@ -549,7 +553,8 @@ class FileBackend:
             id TEXT PRIMARY KEY, path TEXT, doc_type TEXT, issuing_body TEXT,
             issuing_body_slug TEXT, citation TEXT, title TEXT, status TEXT,
             source_url TEXT, retrieved TEXT, effective_date TEXT, content_mode TEXT,
-            content_exception TEXT, size INTEGER, body_chars INTEGER)""")
+            content_exception TEXT, size INTEGER, body_chars INTEGER,
+            jurisdiction TEXT)""")
         # content='': tokenize but do not store the text. See CONTENTLESS FTS in the module
         # docstring -- in particular, columnsize=0 is omitted deliberately.
         con.execute("""CREATE VIRTUAL TABLE fts USING fts5(
@@ -561,7 +566,7 @@ class FileBackend:
             glance = self._extract_section(body, "At a glance") or ""
             ft = self._searchable_body(body, fm.get("doc_type", ""))
             rel = p.relative_to(self.config.root)
-            cur = con.execute("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            cur = con.execute("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 fm["id"], str(rel), fm["doc_type"],
                 # The RESOLVED registry slug: the corpus's declared frontmatter field
                 # where it has one, else the path-derived scope slug. Empty means this
@@ -572,7 +577,10 @@ class FileBackend:
                 fm.get("citation", ""), fm["title"],
                 fm.get("status", ""), fm.get("source_url", ""), str(fm.get("retrieved", "")),
                 str(fm.get("effective_date") or ""), fm.get("content_mode", ""),
-                fm.get("content_exception") or "", p.stat().st_size, len(ft)))
+                fm.get("content_exception") or "", p.stat().st_size, len(ft),
+                # The document's own value, else the corpus's declared one, else "" (not
+                # stated anywhere). A non-string is stringified rather than dropped.
+                str(fm.get("jurisdiction") or self.config.jurisdiction or "")))
             # EXPLICIT rowid, matching the row just written to `docs`. Every query joins
             # these two tables on rowid, because a contentless fts cannot be read back to
             # join on `id`. Letting FTS5 assign its own would happen to line up today and
@@ -852,9 +860,22 @@ class FileBackend:
             "SELECT doc_type, COUNT(*) FROM docs GROUP BY doc_type ORDER BY 2 DESC"))
         by_mode = dict(con.execute(
             "SELECT content_mode, COUNT(*) FROM docs GROUP BY content_mode ORDER BY 2 DESC"))
+        # WHAT THE DOCUMENTS CARRY, NOT WHAT corpus.yml DECLARES (corpus-toolkit#210). The
+        # declared `jurisdiction` is still reported by the framework, untouched. Documents
+        # with no jurisdiction anywhere are counted apart rather than filed under "" or an
+        # invented name: not stated is not a jurisdiction.
+        by_jur = dict(con.execute(
+            "SELECT jurisdiction, COUNT(*) FROM docs WHERE jurisdiction != '' "
+            "GROUP BY jurisdiction ORDER BY 2 DESC, 1"))
+        unspecified = con.execute(
+            "SELECT COUNT(*) FROM docs WHERE jurisdiction = ''").fetchone()[0]
         head = subprocess.run(["git", "log", "-1", "--format=%h %cs"], cwd=self.config.root,
                               capture_output=True, text=True).stdout.strip()
-        return {"documents_by_type": by_type, "content_mode": by_mode, "commit": head}
+        out = {"documents_by_type": by_type, "content_mode": by_mode, "commit": head,
+               "jurisdictions": by_jur}
+        if unspecified:
+            out["jurisdiction_unspecified"] = unspecified
+        return out
 
     def holdings_for(self, slug: str, con=None) -> dict:
         """Counts for one slug, plus how much of the corpus this count could see.
