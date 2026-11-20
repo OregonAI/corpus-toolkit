@@ -71,6 +71,11 @@ before fetching anything.
   order. STABLE SINCE ITS INTRODUCTION and pinned by test: a corpus repo may keep reading
   it positionally (executive-regulatory-frameworks' bulletin report does). It only ever
   answers "what changed", never "what happened to everything else" (corpus-toolkit#160).
+  It carries NO limit marker and its four columns cannot: on a `--limit` run it lists only
+  the CHECKED sources that changed, it is rewritten whole each invocation, and a source
+  absent from it may simply not have been checked. A reader that treats absence as "held
+  still" must read `source-outcomes.json`'s `limit` block first (corpus-toolkit#204).
+  `access-failures.json` likewise describes the checked sources only.
 * `source-outcomes.json`, at the corpus root (corpus-toolkit#160) — THIS RUN's observation
   of every in-scope source: one of six outcomes (`changed`, `unchanged`, `no_baseline`,
   `fetch_failed`, `unreadable_json`, `watch_path_missing`), plus the per-group breakdown
@@ -88,6 +93,23 @@ before fetching anything.
   is rendered from it and from `access-failures.json` by `corpus_toolkit.sources.drift_report`
   and can be re-rendered without a fetch (`corpus-drift-report`). It is not `--check`-gated
   in CI: it records observations, which no local command can reproduce.
+
+BOUNDING A RUN: `--limit N` (corpus-toolkit#204). Every run records a per-source
+`last_checked_at` in `drift-state.json` (the date of the last run that fetched it; absent =
+the record's `observed_at`, which files from before the field read as). `--limit N` checks at most N
+of the selected sources: never-checked first, then the oldest `last_checked_at`, ties by group
+then id, so repeated runs rotate through all of them. A source it does not check is HELD, the
+rule groups outside `--group` already follow: no outcome, in no total, its state record and
+access-failure streak neither advanced nor cleared, not pruned. A run it actually bounded says
+so in every report -- the log (`LIMITED RUN: checked N of M ... oldest last-checked left
+unchecked: <date>`), a `::warning` annotation, a `limit` block in `source-outcomes.json` and in
+`drift-state.json`'s `last_run`, and DRIFT.md -- and is never a full green run. The `limit`
+block holds counts, the oldest date, and the GROUPS it cut (`unchecked_groups`), never source
+ids: a group it cut gets no whole-group finding (ADR 0010) from its checked sample. A
+record without `last_checked_at` ranks on its `observed_at`, the same date by construction.
+Rotation needs `drift-state.json` COMMITTED between runs; a job that never commits it picks
+the same N sources every time. `--check-robots`
+is not narrowed by it; `--record-baseline` applies to the sources checked only.
 
 Exit codes: 0 on a run that could do its job — drift is a signal, not an error. 1 when a
 fetch fails under `--strict`; when failures are systemic (>20% of fetches); when the scope
@@ -812,14 +834,17 @@ inventing a key that a consumer would then read as a real count of zero for the 
 
 
 def _source_outcomes_report(outcomes: list[SourceOutcome], n_total: int,
-                            group_filter: list[str] | None, mode: str | None = None) -> dict:
+                            group_filter: list[str] | None, mode: str | None = None,
+                            limit: dict | None = None) -> dict:
     """The JSON payload `source-outcomes.json` writes (corpus-toolkit#160).
 
     Three things a consumer of `changed-sources.tsv` alone cannot get, together in one
     place:
 
     * `sources` — every in-scope source with its outcome, so "was this compared" is a
-      lookup rather than an inference from absence. `changed-sources.tsv` only ever lists
+      lookup rather than an inference from absence. On a `--limit` run, `sources` holds the
+      sources CHECKED only (the held ones are absent, and the `limit` block carries counts
+      and groups, not ids), so there absence means "not checked" and not "not in scope". `changed-sources.tsv` only ever lists
       what changed; a source that was fetched and held still, one whose fetch failed, and
       one this run never reached are all equally absent from it.
     * `groups` and `totals` — BOTH counted off `outcomes`, in one pass, so the artifact
@@ -872,7 +897,7 @@ def _source_outcomes_report(outcomes: list[SourceOutcome], n_total: int,
         g = groups.setdefault(o.group, {"checked": 0, **{n: 0 for n in OUTCOMES}})
         g["checked"] += 1
         g[o.outcome] += 1
-    return {
+    report = {
         "schema_version": 1,
         "mode": mode,
         "group_filter": list(group_filter) if group_filter else None,
@@ -882,6 +907,12 @@ def _source_outcomes_report(outcomes: list[SourceOutcome], n_total: int,
         "sources": [{"group": o.group, "id": o.id, "url": o.url, "outcome": o.outcome,
                      "had_baseline": o.had_baseline} for o in outcomes],
     }
+    if limit:
+        # ADDITIVE, and present ONLY on a run `--limit` actually bounded (corpus-toolkit#204):
+        # `totals` and `sources` then describe the sources CHECKED, and this block is what
+        # says there were others. Absent = every selected source was checked.
+        report["limit"] = limit
+    return report
 
 
 def _was_compared(old: str) -> bool:
@@ -1006,6 +1037,65 @@ class RunVerdict(NamedTuple):
         return out
 
 
+def _positive_int(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an integer")
+    if n < 1:
+        raise argparse.ArgumentTypeError(
+            f"{n} is not a positive integer; omit --limit to check every source")
+    return n
+
+
+def _select_for_limit(manifest_sources: list, prior: dict, limit: int | None):
+    """Which of `manifest_sources` a `--limit N` run checks (corpus-toolkit#204).
+
+    Returns `(to_check, unchecked)`, `to_check` in MANIFEST order so every per-run artifact
+    keeps the order it always had. Ranking: never-checked first (no `drift-state.json`
+    record), then the oldest `last_checked_at`, which for a record written before v1.38
+    (no such field) is its `observed_at`: the same date by construction, so a corpus's first
+    limited run rotates by the age the state file already records. Ties by group then source id then manifest position,
+    so the same state always picks the same sources and a rotation reaches every source.
+    No limit, or a limit that covers everything, selects everything.
+    """
+    if limit is None or len(manifest_sources) <= limit:
+        return list(manifest_sources), []
+
+    def rank(item):
+        idx, s = item
+        gname = s.get("_group", "manifest")
+        rec = prior.get((gname, s["id"]))
+        last = (rec.last_checked_at or rec.observed_at) if rec else None
+        return (last is not None, last or "", gname, str(s["id"]), idx)
+
+    ordered = sorted(enumerate(manifest_sources), key=rank)
+    picked = {i for i, _ in ordered[:limit]}
+    to_check = [s for i, s in enumerate(manifest_sources) if i in picked]
+    unchecked = [s for i, s in ordered[limit:]]
+    return to_check, unchecked
+
+
+def _limit_report(limit: int, checked: int, unchecked: list, prior: dict) -> dict:
+    """The `limit` block every report of a limited run carries. `oldest_unchecked_last_checked`
+    is null when any unchecked source was NEVER checked, which is older than any date; the
+    count says how many."""
+    dates = []
+    never = 0
+    for s in unchecked:
+        rec = prior.get((s.get("_group", "manifest"), s["id"]))
+        if rec and (rec.last_checked_at or rec.observed_at):
+            dates.append(rec.last_checked_at or rec.observed_at)
+        else:
+            never += 1
+    return {"requested": limit, "checked": checked, "enumerated": checked + len(unchecked),
+            "unchecked": len(unchecked), "unchecked_never_checked": never,
+            # Groups the limit cut: their checked sources are a sample, so no whole-group
+            # finding (ADR 0010) is drawn from them, here or in DRIFT.md.
+            "unchecked_groups": sorted({s.get("_group", "manifest") for s in unchecked}),
+            "oldest_unchecked_last_checked": None if never else min(dates)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True, help="path to _meta/corpus.yml")
@@ -1025,6 +1115,13 @@ def main():
                          "failing the whole run is how ERF's drift detection ended "
                          "up retired with 813 sources frozen. Systemic failure "
                          "(>20%% of fetches) still exits 1 either way.")
+    ap.add_argument("--limit", type=_positive_int, metavar="N", default=None,
+                    help="check at most N sources this run, across the selected groups: "
+                         "never-checked first, then the oldest `last_checked_at` in "
+                         "drift-state.json, ties by group then id (corpus-toolkit#204). "
+                         "Sources not checked keep their state untouched and the run says "
+                         "it was limited in DRIFT.md, source-outcomes.json and the log. "
+                         "Without it every selected source is checked, as before.")
     ap.add_argument("--record-baseline", nargs="?", const="seed", default=None,
                     choices=("seed", "refresh"), metavar="seed|refresh",
                     help="`seed` (the bare form) is what every run already does since "
@@ -1052,6 +1149,11 @@ def main():
               f"missing intermediate is supplied, verification is NOT relaxed)")
 
     if args.check_robots:
+        if args.limit is not None:
+            # The robots report fetches only robots.txt, once per host, and the question it
+            # answers is about the host, not about this run's budget.
+            print(f"NOTE: --limit does not narrow --check-robots: every selected host is "
+                  f"reported ({args.limit} applies to source fetches only).")
         return _report_robots(config, args.group)
 
     patterns = config.volatile_patterns
@@ -1092,7 +1194,18 @@ def main():
                        for g in config_mod.load_source_manifest_groups(config)}
     checked_groups = declared_groups & set(args.group) if args.group else declared_groups
     validate_watch_declarations(manifest_sources)
-    for s in manifest_sources:
+    # `--limit` (corpus-toolkit#204). `enumerated` is every source of the selected groups, the
+    # set the PRUNING rules need: a source this run did not check is still in the manifest,
+    # so it is held, not retired. `in_scope` below stays the sources actually CHECKED, which
+    # is what every count, outcome and baseline write is about.
+    prior_state = drift_report.load_drift_state(config.root)
+    enumerated = {(s.get("_group", "manifest"), s["id"]) for s in manifest_sources}
+    manifest_sources_all = manifest_sources
+    manifest_sources, unchecked_sources = _select_for_limit(
+        manifest_sources_all, prior_state, args.limit)
+    limit_info = (_limit_report(args.limit, len(manifest_sources), unchecked_sources,
+                                prior_state) if unchecked_sources else None)
+    for s in manifest_sources_all:
         # A `watch:` block on a source whose body a watch list cannot read. `content_hash`
         # takes the watch branch BEFORE the format branch, so `json.loads` met the markup
         # and every run reported `WATCH BODY UNREADABLE ... a fact about the response` --
@@ -1268,7 +1381,8 @@ def main():
     (config.root / "source-outcomes.json").write_text(
         json.dumps(_source_outcomes_report(
             outcomes, n_total, args.group,
-            mode=f"record-baseline:{args.record_baseline}" if args.record_baseline else None),
+            mode=f"record-baseline:{args.record_baseline}" if args.record_baseline else None,
+            limit=limit_info),
                    indent=2, sort_keys=True) + "\n")
 
     # ACCESS-FAILURE STATE (corpus-toolkit#166), written unconditionally right beside
@@ -1278,7 +1392,7 @@ def main():
     # outside that was never touched this run and its existing entries must be HELD, not
     # cleared (see `_update_access_failures`).
     prior_access_state = _load_access_failures(config)
-    access_state = _update_access_failures(prior_access_state, outcomes, in_scope,
+    access_state = _update_access_failures(prior_access_state, outcomes, enumerated,
                                            checked_groups, _utcnow_date(), declared_groups)
     _write_access_failures(config, access_state)
 
@@ -1335,6 +1449,12 @@ def main():
     print(f"\n{len(drifted)} changed, {len(failed)} fetch failure(s), {uncompared}"
           f"{n_unseeded} with no recorded baseline, of {n_total} checked.")
     _print_group_breakdown(per_group)
+    if limit_info:
+        # NOT a clean full run, and said where the totals line is read (corpus-toolkit#204).
+        print(f"LIMITED RUN: {drift_report.describe_limit(limit_info)}. The totals above are for the "
+              f"sources checked; the others keep their last recorded state.")
+        _annotate("Drift run limited by --limit",
+                  f"{drift_report.describe_limit(limit_info)}. This was not a full run.")
     if recorded is not None:
         print(f"{recorded['written']} baseline(s) written ({len(seeded_keys)} seeded, "
               f"{len(accepted_keys)} accepted), {recorded['already_current']} already "
@@ -1366,6 +1486,9 @@ def main():
               f"run: recorded what upstream served, compared nothing. They compare from the "
               f"next run on (ADR 0015): {shown_seeded}.", file=sys.stderr)
     findings = _group_drift_findings(changed, per_group)
+    if limit_info:
+        cut = set(limit_info["unchecked_groups"])
+        findings = [f for f in findings if f.group not in cut]
     if findings:
         print(f"{len(findings)} group(s) where EVERY compared source changed: "
               + ", ".join(f"{f.group} ({len(f.ids)} of {f.compared})" for f in findings)
@@ -1491,8 +1614,8 @@ def main():
     # groups it did — the rules `access-failures.json` already follows — then rendered.
     today = _utcnow_date()
     state = drift_report.update_drift_state(
-        drift_report.load_drift_state(config.root), outcomes, changed,
-        seeded=seeded_keys, accepted=accepted_keys, in_scope=in_scope,
+        prior_state, outcomes, changed,
+        seeded=seeded_keys, accepted=accepted_keys, in_scope=enumerated,
         checked_groups=checked_groups, declared_groups=declared_groups, today=today)
     last_run = {
         "date": today.isoformat(),
@@ -1501,6 +1624,7 @@ def main():
         "group_filter": list(args.group) if args.group else None,
         "groups_in_scope": sorted(per_group),
         "red_reasons": verdict.reasons(),
+        **({"limit": limit_info} if limit_info else {}),
         "totals": {"total": n_total, "changed": len(drifted),
                    "unchanged": sum(1 for o in outcomes if o.outcome == "unchanged"),
                    "seeded": len(seeded_keys), "accepted": len(accepted_keys),

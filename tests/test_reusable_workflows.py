@@ -176,3 +176,29 @@ def test_the_drift_pr_lookup_asks_for_an_open_pr_not_a_branch_name():
     assert 'gh pr view "$BRANCH"' not in run
     assert 'gh pr list --head "$BRANCH" --state open' in run
 
+
+
+def _detect_step_script():
+    d = _load("detect-upstream-changes")
+    step = next(s for s in d["jobs"]["detect"]["steps"] if s.get("id") == "detect")
+    return d, step
+
+
+def test_the_drift_workflow_takes_an_optional_limit_input_and_passes_it_through():
+    """corpus-toolkit#204: `limit` is public surface every corpus can call. Empty (the
+    default) must leave the command line exactly as it was; a number becomes `--limit N`."""
+    import os
+    import subprocess
+    d, step = _detect_step_script()
+    spec = d["on"]["workflow_call"]["inputs"]["limit"]
+    assert spec.get("default", "") == "" and spec.get("required", False) is False
+    assert spec["type"] == "string"
+    assert step["env"]["LIMIT"] == "${{ inputs.limit }}"
+    # Run the step's own script with the CLI replaced by a function that prints its argv.
+    script = step["run"].replace("corpus-detect-changes", "echo ARGV")
+    for groups, limit, want in [("", "", "ARGV --config _meta/corpus.yml"),
+                                ("", " 2000 ", "ARGV --config _meta/corpus.yml --limit 2000"),
+                                ("oar\n", "50", "ARGV --config _meta/corpus.yml --group oar --limit 50")]:
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True,
+                             env={**os.environ, "GROUPS": groups, "LIMIT": limit}).stdout.strip()
+        assert out == want

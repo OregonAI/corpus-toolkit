@@ -107,6 +107,8 @@ manifest records and since when, the groups whose every compared source changed,
 access-failure streaks, what the run seeded. Rolling by construction — a changed source
 stays listed until re-ingested or its baseline accepted with `--record-baseline=refresh`.
 Generated but NOT `--check`-gated: it records observations no local command can reproduce.
+`drift-state.json` records each source's `last_checked_at`; `corpus-detect-changes --limit N`
+(corpus-toolkit#204) checks the N least recently checked and marks itself LIMITED in every report.
 _Avoid_: "drift ticket", "Source changed: issue" — a drift run files nothing since v1.34.0,
 and the 89 tickets it used to file were closed on 2026-09-03 with a pointer to this file.
 

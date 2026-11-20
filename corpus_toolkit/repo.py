@@ -444,7 +444,7 @@ def _watched_digest(raw: bytes, watch) -> str:
 # "zip": a member that is itself a `.zip` is not recursed into -- it hashes as html over
 # the inner archive's raw bytes, like any other extension outside this set -- whereas a URL
 # can legitimately end `.zip` and `_format_for` adds that itself.
-ZIP_MEMBER_FORMATS = frozenset({"pdf", "xls", "xlsx", "docx", "xml"})
+ZIP_MEMBER_FORMATS = frozenset({"pdf", "xls", "xlsx", "docx", "pptx", "xml"})
 
 
 def _format_for_member_name(name: str) -> str:
@@ -560,7 +560,7 @@ def content_hash(raw: bytes, fmt: str,
         raw = normalize_volatile(raw, volatile_patterns)
         text = html_to_text(raw)
     else:
-        # binary formats with no text extractor (xls/xlsx/docx): raw-byte hash
+        # binary formats with no text extractor (xls/xlsx/docx/pptx): raw-byte hash
         return hashlib.sha256(raw).hexdigest()
     norm = normalize_ws(text)
     if len(norm) >= 200:

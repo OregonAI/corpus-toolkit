@@ -1302,3 +1302,77 @@ differently again: they fall back to being hashed as `format: html`, matching th
 every other unrecognised extension already gets, rather than raising. Nothing to do unless
 your corpus reads `source-outcomes.json`'s outcome vocabulary directly — it now has a
 seventh value.
+
+
+### Unreleased — `corpus-detect-changes --limit N` and a `last_checked_at` field (corpus-toolkit#204)
+
+Nothing is required: without `--limit` every output is unchanged except that each record in
+`drift-state.json` gains `last_checked_at`, so the first run after you move your pin makes a
+one-line diff per source in that file. A corpus that adopts `--limit` (or the reusable
+workflow's new `limit` input) should know:
+
+- **`changed-sources.tsv` and `access-failures.json` carry no limit signal.** On a limited run
+  they describe the checked sources only, and a source absent from the tsv may simply not have
+  been checked. A corpus that reads the tsv (executive-regulatory-frameworks' bulletin report)
+  must also read `source-outcomes.json`'s `limit` block (`unchecked`, `unchecked_groups`) before
+  treating absence as "held still".
+- **Rotation only happens where `drift-state.json` is committed between runs.** A job that
+  never commits it picks the same N sources every run.
+- The `limit` block holds counts and group names, never source ids; a group it cut gets no
+  whole-group finding and DRIFT.md lists it as not assessed.
+
+### Unreleased — `.pptx` joins the format vocabulary, and `sniff()` returns `xlsx` and `pptx` (corpus-toolkit#220)
+
+Nothing to do for a corpus with no `.pptx` source. Measured 2026-11-19 across the 11 corpus
+checkouts: none has one today. A source whose `url` ends `.pptx`, or a zip member named `*.pptx`,
+with no declared `format:` used to fall through to `html` and be hashed through the HTML
+extractor; it is now `pptx` and is hashed as raw bytes, like `.xlsx` and `.docx`
+(`repo.ZIP_MEMBER_FORMATS` gains `pptx`, `fetch.UNSUPPORTED` gains it too). Such a source
+re-baselines once: the next `corpus-detect-changes` run reports it changed, and the new value
+is the true hash of the file. If a corpus ever adds one before it moves its pin, clear its
+`sha256` to `""` and let the run reseed it (ADR 0015).
+
+`fetch.sniff()` now returns `xlsx` and `pptx` as well as `docx` for an OOXML package (it reads
+the zip's part names, `word/`, `xl/`, `ppt/`), where it returned `docx` for all three. A corpus
+that branches on `sniff()`'s result and handled only `docx` will now see two more values; all
+three are in `UNSUPPORTED`, so a corpus that refuses `UNSUPPORTED` formats at ingest needs no
+change.
+
+### Unreleased — `corpus_toolkit.docx_to_text` replaces the copied `src/ingest_docx.py`; its text differs for 8 of the 52 Word files measured (corpus-toolkit#219)
+
+Nothing is required of a corpus that reads no Word files. A corpus that carries its own copy of
+the sibling reader (`states-government-it` and `states-career-technical-education` at 63fe68a's
+`src/ingest_docx.py`) can switch: `from corpus_toolkit.docx_to_text import docx_to_text` takes
+the same bytes and returns the same text, with `DocxReaderError` (a `ValueError`) in place of
+the bare `ValueError`s and an optional `min_words=` in place of the corpus's `MIN_PDF_WORDS`
+import. `same_words` keeps its name and behavior. `render_pandoc_ast` keeps its name and signature but
+**not** its output: it renders pandoc's document metadata (title, subtitle, author, date,
+abstract) ahead of the body, where the sibling ignored `meta`, and it raises `DocxReaderError`
+for any other metadata key (e.g. `keywords`) instead of ignoring it. A corpus that calls
+`render_pandoc_ast` directly on a tree with metadata (`states-government-it`'s
+`tests/test_ingest_docx.py` does) will see the difference. The reader needs
+**pandoc >= 3.11 on PATH**: install the release `.deb` (checksum-pinned in this repo's
+`.github/workflows/tests.yml`), not Ubuntu 24.04's 3.1.3. A corpus's own CI that runs
+`--check` over Word files already carries that step.
+
+**Adopting it re-derives some documents.** Measured by running both readers over every Word
+file in the two corpora's snapshots and in cte-oregon's (52 files; 44 are character-for-character
+the same text):
+
+| difference | files whose text changes |
+|---|---|
+| a Title-style paragraph is now read (it was dropped) | `ut-dts-1000-0003`, `ut-dts-1000-0019`, `ut-dts-2000-0014`, `ut-dts-4000-0008`, `ut-dts-5000-0002`, `or-eis-ai-attachment-a` (states-government-it; the six of 38 the issue counted). The last one's title is a two-line text box: both lines now read, in order |
+| text boxes are kept, once, after the paragraph that holds them | cte-oregon `or-perkins-plan` (6 box texts added: Figure 2's caption and five photo credits), `or-wbl-handbook` (the title and the six-point model, which is drawn six times), `or-eis-ai-attachment-a` |
+| a shape no longer cuts a word in two paragraphs | cte-oregon `or-perkins-plan` (`2024 – 202` / `8` becomes `2024 – 2028`) |
+
+`or-secondary-cte-application-guide` and `nc-it-procurement-manual` hold text boxes with no text
+and read the same. The changed documents differ from the old text by added lines only, except the
+Oregon plan's cover line and one photo credit that was already read: it sat before its
+paragraph and now follows it, because the box is always placed after the paragraph it is
+anchored in. `--check` in a corpus that compares committed text to re-derived text
+word for word will fail on exactly these files until they are re-derived; nothing else moves.
+Re-derive them, and review the added text against the source file, which is the point of the
+change.
+
+`docx_blocks(raw)` is new: use it to cut a document on headings. The default text does not
+mark headings.

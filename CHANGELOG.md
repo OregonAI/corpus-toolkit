@@ -2,6 +2,117 @@
 
 Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pins.
 
+## Unreleased
+
+### Added — `corpus-detect-changes --limit N`, a run that can be bounded (corpus-toolkit#204)
+
+A drift run re-fetched every selected source or none, so a corpus too large for one job (or one
+politeness budget) had no way to spread itself over several. `--limit N` checks at most N sources
+across the selected groups, **least recently checked first**.
+
+- **`last_checked_at` in `drift-state.json`**: a new field on every source record, the ISO date of
+  the last run that fetched it (compared it, or failed to). Additive; a file written before this
+  field loads fine and ranks on each record's `observed_at` (the same date by construction), so the
+  first limited run after a corpus moves its pin rotates by the age its state already records. Every run records it, with or without `--limit`.
+- **Order**: never-checked first (no record), then the oldest `last_checked_at`, ties
+  by group then source id. The same state picks the same sources. Repeated runs rotate through
+  all of them only if each run's `drift-state.json` is committed (or merged) before the next run
+  starts, because the rotation reads it: a run whose state is discarded leaves the next run
+  choosing the same sources again. Without `--limit` every output is unchanged except for the new field.
+- **Sources not checked are untouched**: no outcome, not in any total or group tally, not counted
+  unchanged or failed, their `drift-state.json` record and any `access-failures.json` streak held
+  exactly (neither advanced nor cleared), not pruned as retired, and an unseeded one stays
+  unseeded. `source-outcomes.json`'s `totals` and `sources` describe the sources checked.
+- **A limited run says so in every report it can**, only when the limit actually left sources
+  unchecked (a limit that covers everything is an ordinary run): a `LIMITED RUN: checked 2 of 4
+  ... oldest last-checked left unchecked: <date>` line beside the totals, a `::warning`
+  annotation under Actions, a `limit` block in `source-outcomes.json` and in `drift-state.json`'s
+  `last_run` (`requested`, `checked`, `enumerated`, `unchecked`, `unchecked_never_checked`,
+  `oldest_unchecked_last_checked`, null when any were never checked, and `unchecked_groups`), and a
+  **LIMITED RUN** line in DRIFT.md's "Last run" whose verdict no longer reads as a full green
+  run. `corpus-drift-report` re-renders it from the state. The block carries counts and groups,
+  not source ids.
+- **Two files carry no limit signal: `changed-sources.tsv` and `access-failures.json`.** Both
+  describe the CHECKED sources only, and the tsv's fixed four columns cannot hold a marker. A
+  corpus that reads the tsv alone (executive-regulatory-frameworks' bulletin report does) and
+  adopts `--limit` would report every unchecked source as compared and held still; it must read
+  `source-outcomes.json`'s `limit` block. `sources` in that file is likewise the checked sources
+  only on a limited run.
+- **A group the limit cut gets no whole-group finding (ADR 0010).** Its checked sources are a
+  sample, so the console line is not printed and DRIFT.md lists the group under "not assessed"
+  (`limit.unchecked_groups`) instead of in the table.
+- **Rotation needs `drift-state.json` committed between runs.** A job that never commits it
+  (ERF's bulletin report) would pick the same N sources every time.
+- **`--check-robots` ignores `--limit`** (it reports hosts, not fetches) and prints a note saying
+  so. **`--record-baseline` combines with it**: seeding and `refresh` apply to the sources
+  checked, and only those, exactly as `--group` already scopes them.
+- `--limit` must be a positive integer; `0`, negatives and non-integers exit 2.
+- **`detect-upstream-changes.yml` gains an optional `limit` input** that passes `--limit`; empty
+  (the default) is today's behaviour, so no caller changes.
+
+### Added — `corpus_toolkit.docx_to_text`, a shared Word (.docx) reader (corpus-toolkit#219)
+
+The toolkit had no reader for Word files; `states-government-it` wrote one
+(`src/ingest_docx.py` at 63fe68a) and `states-career-technical-education` copied it. It is now a
+shared module beside `html_to_text`, with the same layout as the sibling's: pandoc's JSON syntax
+tree rendered here, one line per paragraph, heading, list item and table row (cells joined by
+` | `), a blank line between blocks, footnotes after the body.
+
+- `docx_to_text(raw, min_words=30) -> str`, the body text of a Word file; `docx_blocks(raw) ->
+  list[Block]`, the same reading with its structure kept: `Block(kind, text, level)` with `kind`
+  one of `title`, `heading` (with `level`, 1 for Heading 1), `paragraph`, `list_item`,
+  `table_row`, `code`, `note`. A consumer cuts on headings from the blocks. **The default text
+  carries no `#` markers**: the toolkit chunks documents on `### ` headings and a marker the reader
+  invented would mis-chunk them. Also `render_pandoc_ast`, `same_words`, `prepare`,
+  `pandoc_version`, `PANDOC_MIN_VERSION`, and `DocxReaderError` (a `ValueError`, as the sibling
+  raised).
+- **Needs pandoc >= 3.11 on PATH.** An older or missing pandoc raises `DocxReaderError` naming the
+  requirement; Ubuntu 24.04's 3.1.3 drops text from some Word files (the sibling's CI measured a
+  cover page). The reader is not called by anything in the toolkit yet, so installing pandoc is
+  only required where a corpus calls it. `.github/workflows/tests.yml` installs the checksum-pinned
+  pandoc 3.11 release, and the reader's tests fail (not skip) when `CI` is set and pandoc is
+  missing.
+- **Default text differs from the sibling reader in three ways, all fixes from #219's list; for every
+  other Word file it is the same text** (a test runs both readers, the sibling frozen in
+  `tests/docx_sibling_reference.py`, over real files). Corpora that adopt the reader re-derive
+  these documents; see MIGRATION.md for the files measured:
+  1. A `Title`-style (also `Subtitle`, `Author`, `Date`, `Abstract`) paragraph is read where it
+     stands instead of being moved into metadata and dropped. pandoc also keeps only the last of
+     several Title paragraphs, so a two-line title lost its first line.
+  2. Text boxes are kept: every paragraph of every text box, once, right after the paragraph that
+     holds the box (pandoc dropped every box inside a group shape, where captions and photo
+     credits live).
+  3. A floating shape between two runs of a word no longer cuts the word in two paragraphs
+     ("2024 – 202" / "8" on the Oregon plan's cover).
+
+  The fourth defect, flattened heading levels, is fixed in `docx_blocks` and changes no text.
+- The Fetcher and `content_hash` do not call it. `Fetcher` fetches and sniffs, it does not extract
+  text, and `content_hash` hashes a `docx`'s raw bytes: routing that through the reader would
+  re-baseline every `docx` source and make the drift run need pandoc. `fetch.UNSUPPORTED` still
+  names `docx`; corpora that read Word files subtract it, as `states-government-it` does.
+
+### Fixed — `sniff` tells xlsx and pptx from docx (corpus-toolkit#220)
+
+`sources.fetch.sniff` returned `docx` for any ZIP carrying `word/` or `[Content_Types]` in its
+first 4000 bytes, and every OOXML file has the latter, so a workbook or a deck was reported as
+Word. It now reads the package's part names: `word/` is `docx`, `xl/` is `xlsx`, `ppt/` is
+`pptx`; a ZIP naming none of them falls through to the declared format (a `[Content_Types]`
+ZIP alone is no longer `docx`).
+
+- `sniff` still never raises: a package whose zip directory `zipfile` refuses with something other
+  than `BadZipFile` (`NotImplementedError` for an unsupported 'version needed', `UnicodeDecodeError`
+  for a UTF-8-flagged name that is not UTF-8) falls back to the head scan, as a truncated one does.
+  `docx_to_text` likewise raises `DocxReaderError`, not `NotImplementedError`, for such a file.
+- `fetch.UNSUPPORTED` gains `pptx`. Corpora that refuse `UNSUPPORTED` formats at ingest
+  (states-government-it, states-career-technical-education, oregon-counties) now refuse a
+  deck with their existing "not a format this corpus can read" error instead of handing it to
+  an extractor. Those two state corpora allow `docx` and refuse `xlsx`; a workbook that used
+  to be sniffed `docx` is now refused as `xlsx`.
+- `repo.ZIP_MEMBER_FORMATS` (and so the drift detector's URL vocabulary) gains `pptx`: a
+  `.pptx` url or zip member hashes its raw bytes like `.xlsx`/`.docx`, instead of being run
+  through the HTML extractor. A source whose url ends `.pptx` and declares no `format:` may
+  see its baseline re-hash once.
+
 ## v1.37.1 — 2026-11-11
 
 ### Fixed — the corpora manifest matches the org again, so `propagate-pin` can run

@@ -172,6 +172,56 @@ def test_sniff_trusts_magic_bytes_before_anyone_s_say_so(body, declared, want):
     assert fetch.UNSUPPORTED >= {"doc", "docx"}
 
 
+def _ooxml(*parts: str, padding: int = 0) -> bytes:
+    """A minimal but real OOXML package: `[Content_Types].xml` first (as Office writes it),
+    then the named parts."""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types>' + "x" * padding + "</Types>")
+        zf.writestr("_rels/.rels", '<?xml version="1.0"?><Relationships/>')
+        for name in parts:
+            zf.writestr(name, "<x/>")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("parts, declared, want", [
+    (("word/document.xml",), "pdf", "docx"),
+    (("xl/workbook.xml", "xl/worksheets/sheet1.xml"), "pdf", "xlsx"),
+    (("ppt/presentation.xml", "ppt/slides/slide1.xml"), "pdf", "pptx"),
+    ((), "pdf", "pdf"),            # no OOXML part: the declared format, never "docx"
+    ((), None, "html"),
+])
+def test_sniff_tells_ooxml_kinds_apart_by_part_name(parts, declared, want):
+    assert sniff(_ooxml(*parts), declared) == want
+
+
+def test_sniff_reads_part_names_past_the_first_4000_bytes():
+    """A long `[Content_Types].xml` pushes the part names out of a prefix scan, so the
+    zip's own directory is what has to be read."""
+    assert sniff(_ooxml("xl/workbook.xml", padding=6000), "pdf") == "xlsx"
+
+
+def test_sniff_real_pandoc_documents(tmp_path):
+    import os
+    import shutil
+    import subprocess
+    # Same rule as the docx reader tests: skip only on a developer machine (CI unset); in CI a
+    # missing pandoc makes subprocess.run raise, so the gate cannot pass without reading real files.
+    if not shutil.which("pandoc") and not os.environ.get("CI"):
+        pytest.skip("pandoc not installed")
+    for ext in ("docx", "pptx"):
+        out = tmp_path / f"t.{ext}"
+        subprocess.run(["pandoc", "-f", "markdown", "-o", str(out)],
+                       input=b"# Title\n\nbody\n", check=True)
+        assert sniff(out.read_bytes(), "pdf") == ext
+
+
+def test_every_office_format_sniff_can_return_is_unsupported_where_text_is_extracted():
+    assert fetch.UNSUPPORTED >= {"doc", "docx", "xls", "xlsx", "pptx"}
+
+
 def test_the_default_user_agent_is_honest_versioned_and_linked():
     ua = fetch.default_user_agent()
     assert re.fullmatch(r"Mozilla/5\.0 \(compatible; OregonAI-CivicCorpus/\S+; "
@@ -224,3 +274,75 @@ def test_a_caller_supplied_user_agent_wins_and_keeps_its_robots_token():
     f, _ = fetcher(lambda req: httpx.Response(200), user_agent="Corpus/9 (+https://example.org)")
     assert f.user_agent == "Corpus/9 (+https://example.org)"
     assert robots_token_of(f) == "Corpus/9 (+https://example.org)"
+
+
+def _corrupt_directory(body: bytes, how: str) -> bytes:
+    """A real package whose central directory the zipfile module refuses with something other
+    than BadZipFile (corpus-toolkit#220 review)."""
+    i = body.rindex(b"PK\x01\x02")
+    b = bytearray(body)
+    if how == "version":              # 'version needed' = 9.7 -> NotImplementedError
+        b[i + 6] = 97
+    else:                             # UTF-8 flag set on a name that is not UTF-8
+        b[i + 9] |= 0x08
+        b[i + 46] = 0xFF
+    return bytes(b)
+
+
+@pytest.mark.parametrize("how", ["version", "utf8"])
+@pytest.mark.parametrize("parts, want", [
+    (("word/document.xml",), "docx"),
+    (("xl/workbook.xml", "xl/worksheets/sheet1.xml"), "xlsx"),
+    (("ppt/presentation.xml",), "pptx"),
+])
+def test_sniff_never_raises_on_a_damaged_zip_directory(parts, want, how):
+    """sniff only ever answered; a corrupt download must still be sniffed from its head."""
+    body = _corrupt_directory(_ooxml(*parts, padding=0), how)
+    import io, zipfile
+    with pytest.raises(Exception):    # the fixture really is one zipfile refuses
+        zipfile.ZipFile(io.BytesIO(body)).namelist()
+    assert sniff(body, "pdf") == want
+
+
+def _minimal_xlsx() -> bytes:
+    """A valid SpreadsheetML package: one sheet with one cell, built with stdlib zipfile."""
+    import io
+    import zipfile
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    parts = {
+        "[Content_Types].xml": (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '</Types>'),
+        "_rels/.rels": (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+        "xl/workbook.xml": (
+            f'<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="{ns}" xmlns:r="{rel}">'
+            '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>'),
+        "xl/_rels/workbook.xml.rels": (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'),
+        "xl/worksheets/sheet1.xml": (
+            f'<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{ns}"><sheetData>'
+            '<row r="1"><c r="A1" t="inlineStr"><is><t>IRC Approved List</t></is></c></row>'
+            '</sheetData></worksheet>'),
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, text in parts.items():
+            zf.writestr(name, text)
+    return buf.getvalue()
+
+
+def test_sniff_a_real_minimal_xlsx_is_xlsx_even_when_damaged_at_the_tail():
+    body = _minimal_xlsx()
+    assert sniff(body, "pdf") == "xlsx"
+    assert sniff(body[:-10], "pdf") == "xlsx"     # truncated: head scan finds xl/
