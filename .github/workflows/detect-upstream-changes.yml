@@ -44,6 +44,15 @@ on:
           drift-state.json).
         type: string
         default: ""
+      limit:
+        description: >-
+          Check at most this many sources this run (`--limit N`, corpus-toolkit#204): the
+          never-checked first, then the least recently checked, across the selected groups.
+          Empty (the default) = every selected source, as before. Sources not reached keep
+          their state, and DRIFT.md, source-outcomes.json and a `::warning` annotation say the
+          run was limited and how old the oldest unchecked source is. A positive integer.
+        type: string
+        default: ""
     secrets:
       DRIFT_BOT_TOKEN:
         description: >-
@@ -90,6 +99,7 @@ jobs:
         id: detect
         env:
           GROUPS: ${{ inputs.groups }}
+          LIMIT: ${{ inputs.limit }}
         run: |
           set -euo pipefail
           args=()
@@ -97,6 +107,8 @@ jobs:
             g="${g//[[:space:]]/}"
             [ -n "$g" ] && args+=(--group "$g")
           done <<< "$GROUPS"
+          LIMIT="${LIMIT//[[:space:]]/}"
+          [ -n "$LIMIT" ] && args+=(--limit "$LIMIT")
           corpus-detect-changes --config _meta/corpus.yml "${args[@]}"
       # `if: always()` so STATUS.md still regenerates on a red drift step. The freshness
       # report is independent of whether the drift run could compare anything.

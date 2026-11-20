@@ -75,6 +75,12 @@ class DriftRecord(NamedTuple):
     new: str                  # observed hash ("" when the fetch did not complete)
     seeded_at: str | None
     accepted_at: str | None
+    # ISO date of the last run that FETCHED this source (compared it, or failed to). Equal
+    # to `observed_at` for every record a run replaces; a source a `--limit` run did not
+    # reach is HELD, so this is the date it has waited since, and what `--limit` ranks on
+    # (corpus-toolkit#204). None = never checked, which is also what a state file written
+    # before this field existed reads as.
+    last_checked_at: str | None = None
 
 
 def _key(rec) -> tuple[str, str]:
@@ -98,7 +104,8 @@ def load_drift_state(root: Path) -> dict[tuple[str, str], DriftRecord]:
             rec = DriftRecord(r["group"], r["id"], r.get("url", ""), r["outcome"],
                               bool(r.get("had_baseline")), r["observed_at"],
                               r.get("first_changed_at"), r.get("old", ""), r.get("new", ""),
-                              r.get("seeded_at"), r.get("accepted_at"))
+                              r.get("seeded_at"), r.get("accepted_at"),
+                              r.get("last_checked_at"))
             out[_key(rec)] = rec
         return out
     except (OSError, ValueError, KeyError, TypeError) as e:
@@ -146,7 +153,7 @@ def update_drift_state(prior: dict[tuple[str, str], DriftRecord], outcomes, chan
         rec = DriftRecord(o.group, o.id, o.url, o.outcome, o.had_baseline, today_s,
                           first_changed, old, new,
                           today_s if k in seeded else (prev.seeded_at if prev else None),
-                          today_s if k in accepted else None)
+                          today_s if k in accepted else None, today_s)
         if k in accepted:
             # The operator accepted the observed value as the new baseline: from the
             # state's point of view the source now agrees with its manifest.
@@ -186,6 +193,14 @@ def _toolkit_version() -> str:
 
 
 # ------------------------------------------------------------------ rendering
+
+def _describe_limit(limit: dict) -> str:
+    oldest = (f"{limit['unchecked_never_checked']} never checked"
+              if limit["unchecked_never_checked"] else limit["oldest_unchecked_last_checked"])
+    return (f"checked {limit['checked']} of {limit['enumerated']} selected source(s) "
+            f"(`--limit {limit['requested']}`); {limit['unchecked']} not checked this run, "
+            f"oldest last-checked left unchecked: {oldest}")
+
 
 def _table(header: list[str], rows: list[list[str]]) -> list[str]:
     if not rows:
@@ -239,7 +254,8 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
     else:
         red = lr.get("red_reasons") or []
         verdict = ("**RED** — the run could not do its job: " + "; ".join(red)) if red \
-            else "green — the run compared what it set out to compare"
+            else ("green for the sources it checked — but it was a LIMITED run, not a full one"
+                  if lr.get("limit") else "green — the run compared what it set out to compare")
         scope = ", ".join(lr.get("groups_in_scope") or []) or "(nothing in scope)"
         asked = lr.get("group_filter")
         t = lr.get("totals") or {}
@@ -247,6 +263,9 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
                               + t.get("archive_unreadable", 0))
         lines += [
             f"- **Date**: {run_date} · **toolkit**: {lr.get('toolkit_version', 'unknown')}",
+            *([f"- **LIMITED RUN**: {_describe_limit(lr['limit'])}. This was not a full "
+               f"run: the sources it did not check are shown below as last recorded, "
+               f"not as observed today."] if lr.get("limit") else []),
             f"- **Verdict**: {verdict}",
             f"- **Scope**: {scope}" + (f" (asked for: {', '.join(asked)})" if asked else ""),
             f"- **This run**: {t.get('total', 0)} in scope · {t.get('changed', 0)} changed · "

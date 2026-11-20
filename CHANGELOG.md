@@ -4,6 +4,37 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — `corpus-detect-changes --limit N`, a run that can be bounded (corpus-toolkit#204)
+
+A drift run re-fetched every selected source or none, so a corpus too large for one job (or one
+politeness budget) had no way to spread itself over several. `--limit N` checks at most N sources
+across the selected groups, **least recently checked first**.
+
+- **`last_checked_at` in `drift-state.json`**: a new field on every source record, the ISO date of
+  the last run that fetched it (compared it, or failed to). Additive; a file written before this
+  field loads fine and reads as never checked. Every run records it, with or without `--limit`.
+- **Order**: never-checked first (no record, or no field), then the oldest `last_checked_at`, ties
+  by group then source id. The same state picks the same sources, and repeated runs rotate through
+  all of them. Without `--limit` every output is unchanged except for the new field.
+- **Sources not checked are untouched**: no outcome, not in any total or group tally, not counted
+  unchanged or failed, their `drift-state.json` record and any `access-failures.json` streak held
+  exactly (neither advanced nor cleared), not pruned as retired, and an unseeded one stays
+  unseeded. `source-outcomes.json`'s `totals` and `sources` describe the sources checked.
+- **A limited run says so everywhere it writes** (only when the limit actually left sources
+  unchecked; a limit that covers everything is an ordinary run): a `LIMITED RUN: checked 2 of 4 ...
+  oldest last-checked left unchecked: <date>` line beside the totals, a `::warning` annotation under
+  Actions, a `limit` block in `source-outcomes.json` and in `drift-state.json`'s `last_run`
+  (`requested`, `checked`, `enumerated`, `unchecked`, `unchecked_never_checked`,
+  `oldest_unchecked_last_checked`, null when any were never checked), and a **LIMITED RUN** line in
+  DRIFT.md's "Last run" whose verdict no longer reads as a full green run. `corpus-drift-report`
+  re-renders it from the state.
+- **`--check-robots` ignores `--limit`** (it reports hosts, not fetches) and prints a note saying
+  so. **`--record-baseline` combines with it**: seeding and `refresh` apply to the sources
+  checked, and only those, exactly as `--group` already scopes them.
+- `--limit` must be a positive integer; `0`, negatives and non-integers exit 2.
+- **`detect-upstream-changes.yml` gains an optional `limit` input** that passes `--limit`; empty
+  (the default) is today's behaviour, so no caller changes.
+
 ### Added — `corpus_toolkit.docx_to_text`, a shared Word (.docx) reader (corpus-toolkit#219)
 
 The toolkit had no reader for Word files; `states-government-it` wrote one
