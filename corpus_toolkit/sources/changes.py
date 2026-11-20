@@ -71,6 +71,11 @@ before fetching anything.
   order. STABLE SINCE ITS INTRODUCTION and pinned by test: a corpus repo may keep reading
   it positionally (executive-regulatory-frameworks' bulletin report does). It only ever
   answers "what changed", never "what happened to everything else" (corpus-toolkit#160).
+  It carries NO limit marker and its four columns cannot: on a `--limit` run it lists only
+  the CHECKED sources that changed, it is rewritten whole each invocation, and a source
+  absent from it may simply not have been checked. A reader that treats absence as "held
+  still" must read `source-outcomes.json`'s `limit` block first (corpus-toolkit#204).
+  `access-failures.json` likewise describes the checked sources only.
 * `source-outcomes.json`, at the corpus root (corpus-toolkit#160) — THIS RUN's observation
   of every in-scope source: one of six outcomes (`changed`, `unchanged`, `no_baseline`,
   `fetch_failed`, `unreadable_json`, `watch_path_missing`), plus the per-group breakdown
@@ -91,14 +96,19 @@ before fetching anything.
 
 BOUNDING A RUN: `--limit N` (corpus-toolkit#204). Every run records a per-source
 `last_checked_at` in `drift-state.json` (the date of the last run that fetched it; absent =
-never checked, which is what files from before the field read as). `--limit N` checks at most N
+the record's `observed_at`, which files from before the field read as). `--limit N` checks at most N
 of the selected sources: never-checked first, then the oldest `last_checked_at`, ties by group
 then id, so repeated runs rotate through all of them. A source it does not check is HELD, the
 rule groups outside `--group` already follow: no outcome, in no total, its state record and
 access-failure streak neither advanced nor cleared, not pruned. A run it actually bounded says
 so in every report -- the log (`LIMITED RUN: checked N of M ... oldest last-checked left
 unchecked: <date>`), a `::warning` annotation, a `limit` block in `source-outcomes.json` and in
-`drift-state.json`'s `last_run`, and DRIFT.md -- and is never a full green run. `--check-robots`
+`drift-state.json`'s `last_run`, and DRIFT.md -- and is never a full green run. The `limit`
+block holds counts, the oldest date, and the GROUPS it cut (`unchecked_groups`), never source
+ids: a group it cut gets no whole-group finding (ADR 0010) from its checked sample. A
+record without `last_checked_at` ranks on its `observed_at`, the same date by construction.
+Rotation needs `drift-state.json` COMMITTED between runs; a job that never commits it picks
+the same N sources every time. `--check-robots`
 is not narrowed by it; `--record-baseline` applies to the sources checked only.
 
 Exit codes: 0 on a run that could do its job — drift is a signal, not an error. 1 when a
@@ -832,7 +842,9 @@ def _source_outcomes_report(outcomes: list[SourceOutcome], n_total: int,
     place:
 
     * `sources` — every in-scope source with its outcome, so "was this compared" is a
-      lookup rather than an inference from absence. `changed-sources.tsv` only ever lists
+      lookup rather than an inference from absence. On a `--limit` run, `sources` holds the
+      sources CHECKED only (the held ones are absent, and the `limit` block carries counts
+      and groups, not ids), so there absence means "not checked" and not "not in scope". `changed-sources.tsv` only ever lists
       what changed; a source that was fetched and held still, one whose fetch failed, and
       one this run never reached are all equally absent from it.
     * `groups` and `totals` — BOTH counted off `outcomes`, in one pass, so the artifact
@@ -1041,8 +1053,9 @@ def _select_for_limit(manifest_sources: list, prior: dict, limit: int | None):
 
     Returns `(to_check, unchecked)`, `to_check` in MANIFEST order so every per-run artifact
     keeps the order it always had. Ranking: never-checked first (no `drift-state.json`
-    record, or one without `last_checked_at` -- every file written before v1.38 is that),
-    then the oldest `last_checked_at`, ties by group then source id then manifest position,
+    record), then the oldest `last_checked_at`, which for a record written before v1.38
+    (no such field) is its `observed_at`: the same date by construction, so a corpus's first
+    limited run rotates by the age the state file already records. Ties by group then source id then manifest position,
     so the same state always picks the same sources and a rotation reaches every source.
     No limit, or a limit that covers everything, selects everything.
     """
@@ -1053,7 +1066,7 @@ def _select_for_limit(manifest_sources: list, prior: dict, limit: int | None):
         idx, s = item
         gname = s.get("_group", "manifest")
         rec = prior.get((gname, s["id"]))
-        last = rec.last_checked_at if rec else None
+        last = (rec.last_checked_at or rec.observed_at) if rec else None
         return (last is not None, last or "", gname, str(s["id"]), idx)
 
     ordered = sorted(enumerate(manifest_sources), key=rank)
@@ -1071,12 +1084,15 @@ def _limit_report(limit: int, checked: int, unchecked: list, prior: dict) -> dic
     never = 0
     for s in unchecked:
         rec = prior.get((s.get("_group", "manifest"), s["id"]))
-        if rec and rec.last_checked_at:
-            dates.append(rec.last_checked_at)
+        if rec and (rec.last_checked_at or rec.observed_at):
+            dates.append(rec.last_checked_at or rec.observed_at)
         else:
             never += 1
     return {"requested": limit, "checked": checked, "enumerated": checked + len(unchecked),
             "unchecked": len(unchecked), "unchecked_never_checked": never,
+            # Groups the limit cut: their checked sources are a sample, so no whole-group
+            # finding (ADR 0010) is drawn from them, here or in DRIFT.md.
+            "unchecked_groups": sorted({s.get("_group", "manifest") for s in unchecked}),
             "oldest_unchecked_last_checked": None if never else min(dates)}
 
 
@@ -1478,6 +1494,9 @@ def main():
               f"run: recorded what upstream served, compared nothing. They compare from the "
               f"next run on (ADR 0015): {shown_seeded}.", file=sys.stderr)
     findings = _group_drift_findings(changed, per_group)
+    if limit_info:
+        cut = set(limit_info["unchecked_groups"])
+        findings = [f for f in findings if f.group not in cut]
     if findings:
         print(f"{len(findings)} group(s) where EVERY compared source changed: "
               + ", ".join(f"{f.group} ({len(f.ids)} of {f.compared})" for f in findings)

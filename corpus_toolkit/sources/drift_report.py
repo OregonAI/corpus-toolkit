@@ -78,8 +78,8 @@ class DriftRecord(NamedTuple):
     # ISO date of the last run that FETCHED this source (compared it, or failed to). Equal
     # to `observed_at` for every record a run replaces; a source a `--limit` run did not
     # reach is HELD, so this is the date it has waited since, and what `--limit` ranks on
-    # (corpus-toolkit#204). None = never checked, which is also what a state file written
-    # before this field existed reads as.
+    # (corpus-toolkit#204). None = a state file written before this field existed, which
+    # ranks on `observed_at` (the same date by construction).
     last_checked_at: str | None = None
 
 
@@ -295,8 +295,10 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
                                           "fetch_failed": 0, "no_baseline": 0, "other": 0})
         g["total"] += 1
         g[r.outcome if r.outcome in g else "other"] += 1
+    # A group a `--limit` run cut is not assessed: its observations are a sample of it.
+    cut = set((lr.get("limit") or {}).get("unchecked_groups") or [])
     together = [(g, c) for g, c in sorted(by_group.items())
-                if c["changed"] > 1 and c["unchanged"] == 0]
+                if c["changed"] > 1 and c["unchanged"] == 0 and g not in cut]
     lines += [
         f"## Groups whose every compared source changed ({len(together)})",
         "",
@@ -309,6 +311,9 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
     lines += _table(["group", "changed of compared", "in group"],
                     [[g, f"{c['changed']} of {c['changed'] + c['unchanged']}", c["total"]]
                      for g, c in together])
+    if cut:
+        lines += ["Groups **not assessed** because the last run's `--limit` left some of their "
+                  "sources unchecked: " + ", ".join(f"`{g}`" for g in sorted(cut)) + ".", ""]
 
     esc_keys = {(e.group, e.id) for e in escalations}
     acc_rows = []

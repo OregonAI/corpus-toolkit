@@ -81,7 +81,7 @@ class RecordsLastCheckedTest(_Limit):
         for i in range(3):
             self.assertEqual(self.rec(("g", f"g-{i}"))["last_checked_at"], "2026-11-19")
 
-    def test_a_state_file_without_the_field_loads_and_reads_as_never_checked(self):
+    def test_a_state_file_without_the_field_loads_and_ranks_on_observed_at(self):
         self.group("g", 2, baseline="current")
         self.write_state({("g", "g-0"): "2026-01-01", ("g", "g-1"): "2026-01-01"},
                          drop_field=True)
@@ -216,7 +216,8 @@ class LimitedRunSaysSoTest(_Limit):
         outs = json.loads((self.root / "source-outcomes.json").read_text())
         self.assertEqual(outs["limit"], {
             "requested": 2, "checked": 2, "enumerated": 4, "unchecked": 2,
-            "unchecked_never_checked": 0, "oldest_unchecked_last_checked": "2026-11-10"})
+            "unchecked_never_checked": 0, "oldest_unchecked_last_checked": "2026-11-10",
+            "unchecked_groups": ["g"]})
 
     def test_drift_state_last_run_records_the_limit(self):
         self.run_cli("--limit", "2")
@@ -293,3 +294,61 @@ class LimitValidationAndInterplayTest(_Limit):
         code, _, err = self.run_cli("--group", "nosuch", "--limit", "5")
         self.assertEqual(code, 1)
         self.assertIn("NOTHING WAS CHECKED", err)
+
+
+class LimitDoesNotAssertWholeGroupDriftFromASampleTest(_Limit):
+    """A group the limit cut is not a group that "changed together" (ADR 0010): the checked
+    sources are a sample, and the unchecked ones are evidence this run did not gather."""
+
+    def test_a_cut_group_whose_checked_sources_all_changed_is_not_a_finding(self):
+        self.group("g", 6, baseline="stale")
+        _, out, err = self.run_cli("--limit", "2")
+        self.assertNotIn("EVERY compared source changed", out + err)
+        md = (self.root / "DRIFT.md").read_text()
+        self.assertIn("## Groups whose every compared source changed (0)", md)
+        self.assertNotIn("| g | 2 of 2 | 2 |", md)
+        self.assertIn("not assessed", md)          # says why, naming the group
+        self.assertIn("`g`", md.split("not assessed", 1)[1])
+
+    def test_the_console_and_drift_md_agree_after_a_full_run_then_a_limited_one(self):
+        self.group("g", 6, baseline="current")
+        self.run_on(date(2026, 11, 1))
+        for i in range(6):
+            self.bodies[f"https://example.gov/g/{i}"] = _body(i + 100)
+        _, out, err = self.run_on(date(2026, 11, 19), "--limit", "2")
+        self.assertNotIn("EVERY compared source changed", out + err)
+        self.assertIn("(0)", (self.root / "DRIFT.md").read_text())
+
+    def test_a_group_the_limit_did_not_cut_is_still_a_finding(self):
+        self.group("g", 2, baseline="stale")
+        self.group("h", 3, baseline="current")
+        _, out, err = self.run_cli("--limit", "2")
+        self.assertIn("g (2 of 2)", out + err)
+        self.assertIn("| g | 2 of 2 | 2 |", (self.root / "DRIFT.md").read_text())
+
+    def test_the_limit_block_names_the_groups_it_cut(self):
+        self.group("g", 6, baseline="current")
+        self.group("h", 1, baseline="current")
+        self.run_cli("--limit", "6")
+        outs = json.loads((self.root / "source-outcomes.json").read_text())
+        self.assertEqual(outs["limit"]["unchecked_groups"], ["h"])
+
+
+class LimitRanksOnObservedAtWhenTheFieldIsAbsentTest(_Limit):
+    """No corpus has `last_checked_at` yet, but every record has `observed_at`, which is
+    the same date by construction (corpus-toolkit#204 review)."""
+
+    def test_old_records_rank_by_observed_at_not_as_a_tie_of_never_checked(self):
+        self.group("g", 3, baseline="current")
+        (self.root / "drift-state.json").write_text(json.dumps(
+            {"schema_version": 1, "generated_by": "t", "last_run": {}, "sources": [
+                {"group": "g", "id": f"g-{i}", "url": f"https://example.gov/g/{i}",
+                 "outcome": "unchanged", "had_baseline": True, "observed_at": d,
+                 "first_changed_at": None, "old": "x", "new": "x",
+                 "seeded_at": None, "accepted_at": None}
+                for i, d in ((0, "2026-11-10"), (1, "2026-11-01"), (2, "2026-11-05"))]}))
+        self.run_cli("--limit", "1")
+        self.assertEqual(self.checked_ids(), ["g-1"])
+        outs = json.loads((self.root / "source-outcomes.json").read_text())
+        self.assertEqual(outs["limit"]["unchecked_never_checked"], 0)
+        self.assertEqual(outs["limit"]["oldest_unchecked_last_checked"], "2026-11-05")

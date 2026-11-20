@@ -12,22 +12,35 @@ across the selected groups, **least recently checked first**.
 
 - **`last_checked_at` in `drift-state.json`**: a new field on every source record, the ISO date of
   the last run that fetched it (compared it, or failed to). Additive; a file written before this
-  field loads fine and reads as never checked. Every run records it, with or without `--limit`.
-- **Order**: never-checked first (no record, or no field), then the oldest `last_checked_at`, ties
+  field loads fine and ranks on each record's `observed_at` (the same date by construction), so the
+  first limited run after a corpus moves its pin rotates by the age its state already records. Every run records it, with or without `--limit`.
+- **Order**: never-checked first (no record), then the oldest `last_checked_at`, ties
   by group then source id. The same state picks the same sources, and repeated runs rotate through
   all of them. Without `--limit` every output is unchanged except for the new field.
 - **Sources not checked are untouched**: no outcome, not in any total or group tally, not counted
   unchanged or failed, their `drift-state.json` record and any `access-failures.json` streak held
   exactly (neither advanced nor cleared), not pruned as retired, and an unseeded one stays
   unseeded. `source-outcomes.json`'s `totals` and `sources` describe the sources checked.
-- **A limited run says so everywhere it writes** (only when the limit actually left sources
-  unchecked; a limit that covers everything is an ordinary run): a `LIMITED RUN: checked 2 of 4 ...
-  oldest last-checked left unchecked: <date>` line beside the totals, a `::warning` annotation under
-  Actions, a `limit` block in `source-outcomes.json` and in `drift-state.json`'s `last_run`
-  (`requested`, `checked`, `enumerated`, `unchecked`, `unchecked_never_checked`,
-  `oldest_unchecked_last_checked`, null when any were never checked), and a **LIMITED RUN** line in
-  DRIFT.md's "Last run" whose verdict no longer reads as a full green run. `corpus-drift-report`
-  re-renders it from the state.
+- **A limited run says so in every report it can**, only when the limit actually left sources
+  unchecked (a limit that covers everything is an ordinary run): a `LIMITED RUN: checked 2 of 4
+  ... oldest last-checked left unchecked: <date>` line beside the totals, a `::warning`
+  annotation under Actions, a `limit` block in `source-outcomes.json` and in `drift-state.json`'s
+  `last_run` (`requested`, `checked`, `enumerated`, `unchecked`, `unchecked_never_checked`,
+  `oldest_unchecked_last_checked`, null when any were never checked, and `unchecked_groups`), and a
+  **LIMITED RUN** line in DRIFT.md's "Last run" whose verdict no longer reads as a full green
+  run. `corpus-drift-report` re-renders it from the state. The block carries counts and groups,
+  not source ids.
+- **Two files carry no limit signal: `changed-sources.tsv` and `access-failures.json`.** Both
+  describe the CHECKED sources only, and the tsv's fixed four columns cannot hold a marker. A
+  corpus that reads the tsv alone (executive-regulatory-frameworks' bulletin report does) and
+  adopts `--limit` would report every unchecked source as compared and held still; it must read
+  `source-outcomes.json`'s `limit` block. `sources` in that file is likewise the checked sources
+  only on a limited run.
+- **A group the limit cut gets no whole-group finding (ADR 0010).** Its checked sources are a
+  sample, so the console line is not printed and DRIFT.md lists the group under "not assessed"
+  (`limit.unchecked_groups`) instead of in the table.
+- **Rotation needs `drift-state.json` committed between runs.** A job that never commits it
+  (ERF's bulletin report) would pick the same N sources every time.
 - **`--check-robots` ignores `--limit`** (it reports hosts, not fetches) and prints a note saying
   so. **`--record-baseline` combines with it**: seeding and `refresh` apply to the sources
   checked, and only those, exactly as `--group` already scopes them.
@@ -84,6 +97,10 @@ Word. It now reads the package's part names: `word/` is `docx`, `xl/` is `xlsx`,
 `pptx`; a ZIP naming none of them falls through to the declared format (a `[Content_Types]`
 ZIP alone is no longer `docx`).
 
+- `sniff` still never raises: a package whose zip directory `zipfile` refuses with something other
+  than `BadZipFile` (`NotImplementedError` for an unsupported 'version needed', `UnicodeDecodeError`
+  for a UTF-8-flagged name that is not UTF-8) falls back to the head scan, as a truncated one does.
+  `docx_to_text` likewise raises `DocxReaderError`, not `NotImplementedError`, for such a file.
 - `fetch.UNSUPPORTED` gains `pptx`. Corpora that refuse `UNSUPPORTED` formats at ingest
   (states-government-it, states-career-technical-education, oregon-counties) now refuse a
   deck with their existing "not a format this corpus can read" error instead of handing it to
@@ -97,10 +114,6 @@ ZIP alone is no longer `docx`).
 ## v1.37.1 — 2026-11-11
 
 ### Fixed — the corpora manifest matches the org again, so `propagate-pin` can run
-- `sniff` still never raises: a package whose zip directory `zipfile` refuses with something other
-  than `BadZipFile` (`NotImplementedError` for an unsupported 'version needed', `UnicodeDecodeError`
-  for a UTF-8-flagged name that is not UTF-8) falls back to the head scan, as a truncated one does.
-  `docx_to_text` likewise raises `DocxReaderError`, not `NotImplementedError`, for such a file.
 
 `propagate-pin`'s preflight failed after v1.37.0 because two repositories existed in the org
 and were missing from `corpora.yml` (ADR-0008): `SessionGateway` and `hearing-transcripts`.

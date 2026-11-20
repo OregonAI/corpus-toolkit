@@ -1304,6 +1304,23 @@ your corpus reads `source-outcomes.json`'s outcome vocabulary directly — it no
 seventh value.
 
 
+### Unreleased — `corpus-detect-changes --limit N` and a `last_checked_at` field (corpus-toolkit#204)
+
+Nothing is required: without `--limit` every output is unchanged except that each record in
+`drift-state.json` gains `last_checked_at`, so the first run after you move your pin makes a
+one-line diff per source in that file. A corpus that adopts `--limit` (or the reusable
+workflow's new `limit` input) should know:
+
+- **`changed-sources.tsv` and `access-failures.json` carry no limit signal.** On a limited run
+  they describe the checked sources only, and a source absent from the tsv may simply not have
+  been checked. A corpus that reads the tsv (executive-regulatory-frameworks' bulletin report)
+  must also read `source-outcomes.json`'s `limit` block (`unchecked`, `unchecked_groups`) before
+  treating absence as "held still".
+- **Rotation only happens where `drift-state.json` is committed between runs.** A job that
+  never commits it picks the same N sources every run.
+- The `limit` block holds counts and group names, never source ids; a group it cut gets no
+  whole-group finding and DRIFT.md lists it as not assessed.
+
 ### Unreleased — `corpus_toolkit.docx_to_text` replaces the copied `src/ingest_docx.py`; its text differs for 8 of the 52 Word files measured (corpus-toolkit#219)
 
 Nothing is required of a corpus that reads no Word files. A corpus that carries its own copy of
