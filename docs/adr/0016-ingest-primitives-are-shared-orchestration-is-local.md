@@ -1,6 +1,6 @@
 # ADR-0016 — Ingest primitives are shared; ingest orchestration stays in the corpus
 
-**Status:** accepted · **Date:** 2026-09-04 · amended by [ADR-0018](0018-a-challenged-host-may-be-fetched-with-curl-under-the-same-user-agent.md) (an opt-in curl transport for challenged hosts, under the same User-Agent) · amended by [ADR-0019](0019-the-default-user-agent-is-the-conventional-crawler-form.md) (the User-Agent's form, and the robots product token)
+**Status:** accepted · **Date:** 2026-09-04 · amended by [ADR-0018](0018-a-challenged-host-may-be-fetched-with-curl-under-the-same-user-agent.md) (an opt-in curl transport for challenged hosts, under the same User-Agent) · amended by [ADR-0019](0019-the-default-user-agent-is-the-conventional-crawler-form.md) (the User-Agent's form, and the robots product token) · amended by [ADR-0020](0020-a-format-extractor-several-corpora-need-is-shared.md) (a reader for a file format several corpora need is shared)
 
 ## Context
 
@@ -45,7 +45,8 @@ but we will still grow." Payback is therefore per new ingest, not per line migra
 
 **Local, in the corpus:** what to fetch (source manifests, discovery, profiles), how to turn
 bytes into text (PDF cleanup, page furniture, HTML slicing), what the body says, which
-relationships hold, and any decision to enforce robots.txt or to override the User-Agent —
+relationships hold (a reader for a whole file format moves to the toolkit once a second corpus
+needs it: ADR-0020), and any decision to enforce robots.txt or to override the User-Agent —
 the last two recorded in the source manifest so they are reviewable.
 
 **Adoption is on touch.** corpus-template ships an example ingester built on the shared
