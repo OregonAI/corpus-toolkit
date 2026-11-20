@@ -2,7 +2,16 @@
 
 Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pins.
 
-## Unreleased
+## v1.38.0 — 2026-11-19
+
+### Changed — the corpora manifest lists `states-career-technical-education`
+
+The repository joined the org on 2026-11-19, and propagate-pin's preflight fails on any org
+repository missing from `corpora.yml` (ADR-0008), as v1.37.0 did. It is entered as a live
+corpus that pins the toolkit and is **private** during its pilot. A private repo cannot be a
+canary leg, so `ci_track` is false until it goes public, although it calls the reusable
+workflows. **`CORPUS_PIN_TOKEN` must have write access to it** or the preflight fails on that
+repo (`scripts/provision-pin-token.sh`). CONTEXT.md now says ten live corpora.
 
 ### Added — `corpus-detect-changes --limit N`, a run that can be bounded (corpus-toolkit#204)
 

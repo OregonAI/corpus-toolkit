@@ -23,7 +23,7 @@
 #   ci_track     calls the toolkit's reusable workflows; a canary target when live + public
 #   toolkit_pin  pins the toolkit in requirements*.txt; a propagate-pin target when live
 repos:
-  # ---- corpus tier: nine live, one retired -------------------------------------------
+  # ---- corpus tier: ten live, one retired --------------------------------------------
   - name: executive-regulatory-frameworks
     tier: corpus
     visibility: public
@@ -80,6 +80,18 @@ repos:
     visibility: public
     status: live
     ci_track: true
+    toolkit_pin: true
+  # Cross-state corpus of career and technical education policy, including Perkins V state
+  # plans: corpus 1 of the postsecondary roadmap (OregonAI/.github#4). Created 2026-11-19,
+  # PRIVATE during its pilot (Oregon, Washington, Wisconsin, Minnesota). It calls the reusable
+  # workflows, but `ci_track` is false because a private repo cannot be a canary leg (the
+  # validator refuses it); set it true when the repo goes public. It pins the toolkit, so
+  # CORPUS_PIN_TOKEN must have write access to it.
+  - name: states-career-technical-education
+    tier: corpus
+    visibility: private
+    status: live
+    ci_track: false
     toolkit_pin: true
   # Folded into executive-regulatory-frameworks on 2026-08-01; the route serves a tombstone.
   - name: oregon-records-retention
