@@ -54,7 +54,9 @@ across the selected groups, **least recently checked first**.
 
 The toolkit had no reader for Word files; `states-government-it` wrote one
 (`src/ingest_docx.py` at 63fe68a) and `states-career-technical-education` copied it. It is now a
-shared module beside `html_to_text`, with the same layout as the sibling's: pandoc's JSON syntax
+shared module beside `html_to_text` ([ADR-0020](docs/adr/0020-a-format-extractor-several-corpora-need-is-shared.md),
+amending ADR-0016: a reader for a file format moves to the toolkit once a second corpus needs it),
+with the same layout as the sibling's: pandoc's JSON syntax
 tree rendered here, one line per paragraph, heading, list item and table row (cells joined by
 ` | `), a blank line between blocks, footnotes after the body.
 
