@@ -97,6 +97,10 @@ ZIP alone is no longer `docx`).
 ## v1.37.1 — 2026-11-11
 
 ### Fixed — the corpora manifest matches the org again, so `propagate-pin` can run
+- `sniff` still never raises: a package whose zip directory `zipfile` refuses with something other
+  than `BadZipFile` (`NotImplementedError` for an unsupported 'version needed', `UnicodeDecodeError`
+  for a UTF-8-flagged name that is not UTF-8) falls back to the head scan, as a truncated one does.
+  `docx_to_text` likewise raises `DocxReaderError`, not `NotImplementedError`, for such a file.
 
 `propagate-pin`'s preflight failed after v1.37.0 because two repositories existed in the org
 and were missing from `corpora.yml` (ADR-0008): `SessionGateway` and `hearing-transcripts`.

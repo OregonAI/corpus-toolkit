@@ -179,12 +179,14 @@ def _ooxml_kind(body: bytes) -> str | None:
 
     Names come from the zip directory, which sits at the END of the file, so a long
     `[Content_Types].xml` cannot push them out of view. A body that is not a readable zip
-    (a truncated download) falls back to looking for the names in the first 4000 bytes.
+    (a truncated or damaged download) falls back to looking for the names in the first 4000 bytes.
     """
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as zf:
             names = zf.namelist()
-    except zipfile.BadZipFile:
+    except (zipfile.BadZipFile, NotImplementedError, ValueError, OSError, EOFError):
+        # NotImplementedError: an unsupported 'version needed'; UnicodeDecodeError (a
+        # ValueError): a UTF-8-flagged name that is not UTF-8. sniff never raises.
         head = body[:4000]
         for prefix, kind in _OOXML_PARTS:
             if prefix.encode() in head:

@@ -1311,7 +1311,12 @@ the sibling reader (`states-government-it` and `states-career-technical-educatio
 `src/ingest_docx.py`) can switch: `from corpus_toolkit.docx_to_text import docx_to_text` takes
 the same bytes and returns the same text, with `DocxReaderError` (a `ValueError`) in place of
 the bare `ValueError`s and an optional `min_words=` in place of the corpus's `MIN_PDF_WORDS`
-import. `render_pandoc_ast` and `same_words` keep their names and behavior. The reader needs
+import. `same_words` keeps its name and behavior. `render_pandoc_ast` keeps its name and signature but
+**not** its output: it renders pandoc's document metadata (title, subtitle, author, date,
+abstract) ahead of the body, where the sibling ignored `meta`, and it raises `DocxReaderError`
+for any other metadata key (e.g. `keywords`) instead of ignoring it. A corpus that calls
+`render_pandoc_ast` directly on a tree with metadata (`states-government-it`'s
+`tests/test_ingest_docx.py` does) will see the difference. The reader needs
 **pandoc >= 3.11 on PATH**: install the release `.deb` (checksum-pinned in this repo's
 `.github/workflows/tests.yml`), not Ubuntu 24.04's 3.1.3. A corpus's own CI that runs
 `--check` over Word files already carries that step.

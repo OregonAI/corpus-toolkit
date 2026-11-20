@@ -271,3 +271,75 @@ def test_a_caller_supplied_user_agent_wins_and_keeps_its_robots_token():
     f, _ = fetcher(lambda req: httpx.Response(200), user_agent="Corpus/9 (+https://example.org)")
     assert f.user_agent == "Corpus/9 (+https://example.org)"
     assert robots_token_of(f) == "Corpus/9 (+https://example.org)"
+
+
+def _corrupt_directory(body: bytes, how: str) -> bytes:
+    """A real package whose central directory the zipfile module refuses with something other
+    than BadZipFile (corpus-toolkit#220 review)."""
+    i = body.rindex(b"PK\x01\x02")
+    b = bytearray(body)
+    if how == "version":              # 'version needed' = 9.7 -> NotImplementedError
+        b[i + 6] = 97
+    else:                             # UTF-8 flag set on a name that is not UTF-8
+        b[i + 9] |= 0x08
+        b[i + 46] = 0xFF
+    return bytes(b)
+
+
+@pytest.mark.parametrize("how", ["version", "utf8"])
+@pytest.mark.parametrize("parts, want", [
+    (("word/document.xml",), "docx"),
+    (("xl/workbook.xml", "xl/worksheets/sheet1.xml"), "xlsx"),
+    (("ppt/presentation.xml",), "pptx"),
+])
+def test_sniff_never_raises_on_a_damaged_zip_directory(parts, want, how):
+    """sniff only ever answered; a corrupt download must still be sniffed from its head."""
+    body = _corrupt_directory(_ooxml(*parts, padding=0), how)
+    import io, zipfile
+    with pytest.raises(Exception):    # the fixture really is one zipfile refuses
+        zipfile.ZipFile(io.BytesIO(body)).namelist()
+    assert sniff(body, "pdf") == want
+
+
+def _minimal_xlsx() -> bytes:
+    """A valid SpreadsheetML package: one sheet with one cell, built with stdlib zipfile."""
+    import io
+    import zipfile
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    parts = {
+        "[Content_Types].xml": (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '</Types>'),
+        "_rels/.rels": (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+        "xl/workbook.xml": (
+            f'<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="{ns}" xmlns:r="{rel}">'
+            '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>'),
+        "xl/_rels/workbook.xml.rels": (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'),
+        "xl/worksheets/sheet1.xml": (
+            f'<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{ns}"><sheetData>'
+            '<row r="1"><c r="A1" t="inlineStr"><is><t>IRC Approved List</t></is></c></row>'
+            '</sheetData></worksheet>'),
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, text in parts.items():
+            zf.writestr(name, text)
+    return buf.getvalue()
+
+
+def test_sniff_a_real_minimal_xlsx_is_xlsx_even_when_damaged_at_the_tail():
+    body = _minimal_xlsx()
+    assert sniff(body, "pdf") == "xlsx"
+    assert sniff(body[:-10], "pdf") == "xlsx"     # truncated: head scan finds xl/

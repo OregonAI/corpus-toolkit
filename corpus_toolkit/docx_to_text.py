@@ -383,8 +383,8 @@ def prepare(raw: bytes) -> bytes:
                     zout.writestr(item, lifted if item.filename == "word/document.xml"
                                   else zin.read(item.filename))
             return out.getvalue()
-    except (zipfile.BadZipFile, KeyError, ExpatError):
-        return raw
+    except (zipfile.BadZipFile, KeyError, ExpatError, NotImplementedError, ValueError, OSError, EOFError):
+        return raw  # pandoc refuses what is not a Word file, by name (DocxReaderError)
 
 
 PANDOC_MIN_VERSION = (3, 11)

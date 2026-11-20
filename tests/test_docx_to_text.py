@@ -290,3 +290,17 @@ def test_a_title_style_defined_under_another_id_is_found_by_its_name():
 def test_a_package_with_no_text_box_and_no_front_matter_reaches_pandoc_untouched():
     pkg = _docx(_p("plain") + _p("Heading", "Heading1"), STYLES)
     assert dt.prepare(pkg) is pkg
+
+
+def test_docx_to_text_refuses_a_damaged_zip_directory_with_docx_reader_error():
+    """zipfile raises NotImplementedError (a RuntimeError) on an unsupported 'version needed';
+    the ValueError contract must hold (corpus-toolkit#219 review)."""
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", "<x/>")
+    b = bytearray(buf.getvalue())
+    b[b.rindex(b"PK\x01\x02") + 6] = 97
+    with pytest.raises(dt.DocxReaderError):
+        dt.docx_to_text(bytes(b))
