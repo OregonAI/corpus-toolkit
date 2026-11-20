@@ -1302,3 +1302,38 @@ differently again: they fall back to being hashed as `format: html`, matching th
 every other unrecognised extension already gets, rather than raising. Nothing to do unless
 your corpus reads `source-outcomes.json`'s outcome vocabulary directly — it now has a
 seventh value.
+
+
+### Unreleased — `corpus_toolkit.docx_to_text` replaces the copied `src/ingest_docx.py`; its text differs for 8 of the 52 Word files measured (corpus-toolkit#219)
+
+Nothing is required of a corpus that reads no Word files. A corpus that carries its own copy of
+the sibling reader (`states-government-it` and `states-career-technical-education` at 63fe68a's
+`src/ingest_docx.py`) can switch: `from corpus_toolkit.docx_to_text import docx_to_text` takes
+the same bytes and returns the same text, with `DocxReaderError` (a `ValueError`) in place of
+the bare `ValueError`s and an optional `min_words=` in place of the corpus's `MIN_PDF_WORDS`
+import. `render_pandoc_ast` and `same_words` keep their names and behavior. The reader needs
+**pandoc >= 3.11 on PATH**: install the release `.deb` (checksum-pinned in this repo's
+`.github/workflows/tests.yml`), not Ubuntu 24.04's 3.1.3. A corpus's own CI that runs
+`--check` over Word files already carries that step.
+
+**Adopting it re-derives some documents.** Measured by running both readers over every Word
+file in the two corpora's snapshots and in cte-oregon's (52 files; 44 are character-for-character
+the same text):
+
+| difference | files whose text changes |
+|---|---|
+| a Title-style paragraph is now read (it was dropped) | `ut-dts-1000-0003`, `ut-dts-1000-0019`, `ut-dts-2000-0014`, `ut-dts-4000-0008`, `ut-dts-5000-0002`, `or-eis-ai-attachment-a` (states-government-it; the six of 38 the issue counted). The last one's title is a two-line text box: both lines now read, in order |
+| text boxes are kept, once, after the paragraph that holds them | cte-oregon `or-perkins-plan` (6 box texts added: Figure 2's caption and five photo credits), `or-wbl-handbook` (the title and the six-point model, which is drawn six times), `or-eis-ai-attachment-a` |
+| a shape no longer cuts a word in two paragraphs | cte-oregon `or-perkins-plan` (`2024 – 202` / `8` becomes `2024 – 2028`) |
+
+`or-secondary-cte-application-guide` and `nc-it-procurement-manual` hold text boxes with no text
+and read the same. The changed documents differ from the old text by added lines only, except the
+Oregon plan's cover line and one photo credit that was already read: it sat before its
+paragraph and now follows it, because the box is always placed after the paragraph it is
+anchored in. `--check` in a corpus that compares committed text to re-derived text
+word for word will fail on exactly these files until they are re-derived; nothing else moves.
+Re-derive them, and review the added text against the source file, which is the point of the
+change.
+
+`docx_blocks(raw)` is new: use it to cut a document on headings. The default text does not
+mark headings.

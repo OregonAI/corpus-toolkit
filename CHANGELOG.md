@@ -4,6 +4,47 @@ Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pi
 
 ## Unreleased
 
+### Added — `corpus_toolkit.docx_to_text`, a shared Word (.docx) reader (corpus-toolkit#219)
+
+The toolkit had no reader for Word files; `states-government-it` wrote one
+(`src/ingest_docx.py` at 63fe68a) and `states-career-technical-education` copied it. It is now a
+shared module beside `html_to_text`, with the same layout as the sibling's: pandoc's JSON syntax
+tree rendered here, one line per paragraph, heading, list item and table row (cells joined by
+` | `), a blank line between blocks, footnotes after the body.
+
+- `docx_to_text(raw, min_words=30) -> str`, the body text of a Word file; `docx_blocks(raw) ->
+  list[Block]`, the same reading with its structure kept: `Block(kind, text, level)` with `kind`
+  one of `title`, `heading` (with `level`, 1 for Heading 1), `paragraph`, `list_item`,
+  `table_row`, `code`, `note`. A consumer cuts on headings from the blocks. **The default text
+  carries no `#` markers**: the toolkit chunks documents on `### ` headings and a marker the reader
+  invented would mis-chunk them. Also `render_pandoc_ast`, `same_words`, `prepare`,
+  `pandoc_version`, `PANDOC_MIN_VERSION`, and `DocxReaderError` (a `ValueError`, as the sibling
+  raised).
+- **Needs pandoc >= 3.11 on PATH.** An older or missing pandoc raises `DocxReaderError` naming the
+  requirement; Ubuntu 24.04's 3.1.3 drops text from some Word files (the sibling's CI measured a
+  cover page). The reader is not called by anything in the toolkit yet, so installing pandoc is
+  only required where a corpus calls it. `.github/workflows/tests.yml` installs the checksum-pinned
+  pandoc 3.11 release, and the reader's tests fail (not skip) when `CI` is set and pandoc is
+  missing.
+- **Default text differs from the sibling reader in three ways, all fixes from #219's list; for every
+  other Word file it is the same text** (a test runs both readers, the sibling frozen in
+  `tests/docx_sibling_reference.py`, over real files). Corpora that adopt the reader re-derive
+  these documents; see MIGRATION.md for the files measured:
+  1. A `Title`-style (also `Subtitle`, `Author`, `Date`, `Abstract`) paragraph is read where it
+     stands instead of being moved into metadata and dropped. pandoc also keeps only the last of
+     several Title paragraphs, so a two-line title lost its first line.
+  2. Text boxes are kept: every paragraph of every text box, once, right after the paragraph that
+     holds the box (pandoc dropped every box inside a group shape, where captions and photo
+     credits live).
+  3. A floating shape between two runs of a word no longer cuts the word in two paragraphs
+     ("2024 – 202" / "8" on the Oregon plan's cover).
+
+  The fourth defect, flattened heading levels, is fixed in `docx_blocks` and changes no text.
+- The Fetcher and `content_hash` do not call it. `Fetcher` fetches and sniffs, it does not extract
+  text, and `content_hash` hashes a `docx`'s raw bytes: routing that through the reader would
+  re-baseline every `docx` source and make the drift run need pandoc. `fetch.UNSUPPORTED` still
+  names `docx`; corpora that read Word files subtract it, as `states-government-it` does.
+
 ### Fixed — `sniff` tells xlsx and pptx from docx (corpus-toolkit#220)
 
 `sources.fetch.sniff` returned `docx` for any ZIP carrying `word/` or `[Content_Types]` in its
