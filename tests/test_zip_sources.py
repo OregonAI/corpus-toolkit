@@ -128,3 +128,12 @@ def test_format_for_infers_zip_from_the_url_same_as_pdf_or_xml_does():
     OLRC's `.../xml_usc20@119-103.zip` was never a `zip` source in the detector's eyes at
     all -- it was hashed as an (unrecognisable) html page."""
     assert _format_for("https://uscode.house.gov/.../xml_usc20@119-103.zip", None) == "zip"
+
+
+def test_a_pptx_is_a_binary_format_by_name_never_text_extracted_as_html():
+    """corpus-toolkit#220: `sniff` now returns `pptx`, so the name vocabularies must know it.
+    A `.pptx` (member or url) used to fall to `html` and run the HTML extractor over zip
+    bytes; like xlsx/docx it hashes its raw bytes."""
+    deck = b"PK\x03\x04" + bytes(range(256)) * 4          # >200 chars of non-text
+    assert _format_for("https://example.gov/deck.pptx", None) == "pptx"
+    assert content_hash(_zip_of(("deck.pptx", deck)), "zip") == hashlib.sha256(deck).hexdigest()

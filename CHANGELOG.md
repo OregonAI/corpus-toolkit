@@ -2,6 +2,26 @@
 
 Release notes for `corpus-toolkit`, the shared platform every OregonAI corpus pins.
 
+## Unreleased
+
+### Fixed — `sniff` tells xlsx and pptx from docx (corpus-toolkit#220)
+
+`sources.fetch.sniff` returned `docx` for any ZIP carrying `word/` or `[Content_Types]` in its
+first 4000 bytes, and every OOXML file has the latter, so a workbook or a deck was reported as
+Word. It now reads the package's part names: `word/` is `docx`, `xl/` is `xlsx`, `ppt/` is
+`pptx`; a ZIP naming none of them falls through to the declared format (a `[Content_Types]`
+ZIP alone is no longer `docx`).
+
+- `fetch.UNSUPPORTED` gains `pptx`. Corpora that refuse `UNSUPPORTED` formats at ingest
+  (states-government-it, states-career-technical-education, oregon-counties) now refuse a
+  deck with their existing "not a format this corpus can read" error instead of handing it to
+  an extractor. Those two state corpora allow `docx` and refuse `xlsx`; a workbook that used
+  to be sniffed `docx` is now refused as `xlsx`.
+- `repo.ZIP_MEMBER_FORMATS` (and so the drift detector's URL vocabulary) gains `pptx`: a
+  `.pptx` url or zip member hashes its raw bytes like `.xlsx`/`.docx`, instead of being run
+  through the HTML extractor. A source whose url ends `.pptx` and declares no `format:` may
+  see its baseline re-hash once.
+
 ## v1.37.1 — 2026-11-11
 
 ### Fixed — the corpora manifest matches the org again, so `propagate-pin` can run

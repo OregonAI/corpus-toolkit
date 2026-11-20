@@ -63,6 +63,7 @@ INGEST.
 """
 from __future__ import annotations
 
+import io
 import os
 import pathlib
 import shutil
@@ -71,6 +72,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import zipfile
 from typing import Callable, NamedTuple
 
 import httpx
@@ -90,7 +92,7 @@ BACKOFF = (5.0, 15.0, 45.0)
 # Formats the platform has no extractor for. Reported by name rather than attempted, so the
 # log says "we cannot read this" instead of raising a parser error that reads like a corrupt
 # download. These are overwhelmingly application forms rather than law.
-UNSUPPORTED = frozenset({"doc", "docx", "xls", "xlsx"})
+UNSUPPORTED = frozenset({"doc", "docx", "xls", "xlsx", "pptx"})
 
 
 class FetchError(RuntimeError):
@@ -169,6 +171,31 @@ def _retry_after(headers) -> float | None:
         return None
 
 
+_OOXML_PARTS = (("word/", "docx"), ("xl/", "xlsx"), ("ppt/", "pptx"))
+
+
+def _ooxml_kind(body: bytes) -> str | None:
+    """docx/xlsx/pptx from the package's part names, or None when it names none of them.
+
+    Names come from the zip directory, which sits at the END of the file, so a long
+    `[Content_Types].xml` cannot push them out of view. A body that is not a readable zip
+    (a truncated download) falls back to looking for the names in the first 4000 bytes.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(body)) as zf:
+            names = zf.namelist()
+    except zipfile.BadZipFile:
+        head = body[:4000]
+        for prefix, kind in _OOXML_PARTS:
+            if prefix.encode() in head:
+                return kind
+        return None
+    for prefix, kind in _OOXML_PARTS:
+        if any(n.startswith(prefix) for n in names):
+            return kind
+    return None
+
+
 def sniff(body: bytes, declared: str | None = None) -> str:
     """Format from MAGIC BYTES, never from the URL suffix or the server's say-so.
 
@@ -185,16 +212,19 @@ def sniff(body: bytes, declared: str | None = None) -> str:
         return "json"
     if head[:5].lower() == b"<?xml":
         return "xml"
-    # Office documents. `\xd0\xcf\x11\xe0` is the OLE compound-file header (.doc/.xls);
-    # a ZIP magic with `word/` or `[Content_Types]` inside is OOXML (.docx/.xlsx). Detected
-    # rather than left to the declared format because a .doc handed to the PDF extractor
-    # raises `PdfStreamError: Stream has ended unexpectedly`, which reads like a corrupt
-    # download rather than a file we simply cannot parse.
+    # Office documents. `\xd0\xcf\x11\xe0` is the OLE compound-file header (.doc/.xls); a ZIP
+    # magic is OOXML when it holds a `word/`, `xl/` or `ppt/` part (.docx/.xlsx/.pptx,
+    # corpus-toolkit#220: every OOXML kind carries `[Content_Types].xml`, so that name
+    # sniffed a workbook or a deck as Word). Detected rather than left to the declared
+    # format because a .doc handed to the PDF extractor raises `PdfStreamError: Stream has
+    # ended unexpectedly`, which reads like a corrupt download rather than a file we
+    # simply cannot parse.
     if body.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
         return "doc"
-    if body.startswith(b"PK\x03\x04") and (b"word/" in body[:4000]
-                                            or b"[Content_Types]" in body[:4000]):
-        return "docx"
+    if body.startswith(b"PK\x03\x04"):
+        kind = _ooxml_kind(body)
+        if kind:
+            return kind
     if b"<html" in head.lower() or b"<!doctype html" in head.lower():
         return "html"
     # The declared format is the LAST resort, not the first.

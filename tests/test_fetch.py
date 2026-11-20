@@ -172,6 +172,53 @@ def test_sniff_trusts_magic_bytes_before_anyone_s_say_so(body, declared, want):
     assert fetch.UNSUPPORTED >= {"doc", "docx"}
 
 
+def _ooxml(*parts: str, padding: int = 0) -> bytes:
+    """A minimal but real OOXML package: `[Content_Types].xml` first (as Office writes it),
+    then the named parts."""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types>' + "x" * padding + "</Types>")
+        zf.writestr("_rels/.rels", '<?xml version="1.0"?><Relationships/>')
+        for name in parts:
+            zf.writestr(name, "<x/>")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("parts, declared, want", [
+    (("word/document.xml",), "pdf", "docx"),
+    (("xl/workbook.xml", "xl/worksheets/sheet1.xml"), "pdf", "xlsx"),
+    (("ppt/presentation.xml", "ppt/slides/slide1.xml"), "pdf", "pptx"),
+    ((), "pdf", "pdf"),            # no OOXML part: the declared format, never "docx"
+    ((), None, "html"),
+])
+def test_sniff_tells_ooxml_kinds_apart_by_part_name(parts, declared, want):
+    assert sniff(_ooxml(*parts), declared) == want
+
+
+def test_sniff_reads_part_names_past_the_first_4000_bytes():
+    """A long `[Content_Types].xml` pushes the part names out of a prefix scan, so the
+    zip's own directory is what has to be read."""
+    assert sniff(_ooxml("xl/workbook.xml", padding=6000), "pdf") == "xlsx"
+
+
+def test_sniff_real_pandoc_documents(tmp_path):
+    import shutil
+    import subprocess
+    if not shutil.which("pandoc"):
+        pytest.skip("pandoc not installed")
+    for ext in ("docx", "pptx"):
+        out = tmp_path / f"t.{ext}"
+        subprocess.run(["pandoc", "-f", "markdown", "-o", str(out)],
+                       input=b"# Title\n\nbody\n", check=True)
+        assert sniff(out.read_bytes(), "pdf") == ext
+
+
+def test_every_office_format_sniff_can_return_is_unsupported_where_text_is_extracted():
+    assert fetch.UNSUPPORTED >= {"doc", "docx", "xls", "xlsx", "pptx"}
+
+
 def test_the_default_user_agent_is_honest_versioned_and_linked():
     ua = fetch.default_user_agent()
     assert re.fullmatch(r"Mozilla/5\.0 \(compatible; OregonAI-CivicCorpus/\S+; "
