@@ -31,7 +31,8 @@ large-scale ingestion).
 - **Human approves/prunes the manifest via PR before any ingestion.**
 
   > `recheck:` is ADVISORY. The toolkit carries it through and never interprets it:
-  > `corpus-detect-changes` checks every source on every run, and the cadence that
+  > `corpus-detect-changes` checks every selected source on every run (unless you pass
+  > `--limit N`, which checks the N least recently checked), and the cadence that
   > actually applies is the cron in the calling workflow. Write it to record intent,
   > not to configure behaviour — and set the cron to match. `corpus-detect-changes`
   > prints a NOTE when it sees the key.

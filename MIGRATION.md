@@ -1321,6 +1321,23 @@ workflow's new `limit` input) should know:
 - The `limit` block holds counts and group names, never source ids; a group it cut gets no
   whole-group finding and DRIFT.md lists it as not assessed.
 
+### Unreleased — `.pptx` joins the format vocabulary, and `sniff()` returns `xlsx` and `pptx` (corpus-toolkit#220)
+
+Nothing to do for a corpus with no `.pptx` source. Measured 2026-11-19 across the 11 corpus
+checkouts: none has one today. A source whose `url` ends `.pptx`, or a zip member named `*.pptx`,
+with no declared `format:` used to fall through to `html` and be hashed through the HTML
+extractor; it is now `pptx` and is hashed as raw bytes, like `.xlsx` and `.docx`
+(`repo.ZIP_MEMBER_FORMATS` gains `pptx`, `fetch.UNSUPPORTED` gains it too). Such a source
+re-baselines once: the next `corpus-detect-changes` run reports it changed, and the new value
+is the true hash of the file. If a corpus ever adds one before it moves its pin, clear its
+`sha256` to `""` and let the run reseed it (ADR 0015).
+
+`fetch.sniff()` now returns `xlsx` and `pptx` as well as `docx` for an OOXML package (it reads
+the zip's part names, `word/`, `xl/`, `ppt/`), where it returned `docx` for all three. A corpus
+that branches on `sniff()`'s result and handled only `docx` will now see two more values; all
+three are in `UNSUPPORTED`, so a corpus that refuses `UNSUPPORTED` formats at ingest needs no
+change.
+
 ### Unreleased — `corpus_toolkit.docx_to_text` replaces the copied `src/ingest_docx.py`; its text differs for 8 of the 52 Word files measured (corpus-toolkit#219)
 
 Nothing is required of a corpus that reads no Word files. A corpus that carries its own copy of

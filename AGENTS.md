@@ -47,7 +47,7 @@ Single-context — `CONTEXT.md` and `docs/adr/` at the repo root. See
 ## Fetching: the toolkit does not enforce robots.txt
 
 Say this plainly because the opposite is the natural assumption. `corpus-detect-changes`
-re-fetches every source in the manifest on every scheduled run, and **nothing blocks a
+re-fetches every selected source in the manifest on every scheduled run (all of them unless the run passes `--limit N`), and **nothing blocks a
 fetch on robots.txt**. There is a checker, and it reports:
 
 ```bash

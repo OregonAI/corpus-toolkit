@@ -15,8 +15,10 @@ across the selected groups, **least recently checked first**.
   field loads fine and ranks on each record's `observed_at` (the same date by construction), so the
   first limited run after a corpus moves its pin rotates by the age its state already records. Every run records it, with or without `--limit`.
 - **Order**: never-checked first (no record), then the oldest `last_checked_at`, ties
-  by group then source id. The same state picks the same sources, and repeated runs rotate through
-  all of them. Without `--limit` every output is unchanged except for the new field.
+  by group then source id. The same state picks the same sources. Repeated runs rotate through
+  all of them only if each run's `drift-state.json` is committed (or merged) before the next run
+  starts, because the rotation reads it: a run whose state is discarded leaves the next run
+  choosing the same sources again. Without `--limit` every output is unchanged except for the new field.
 - **Sources not checked are untouched**: no outcome, not in any total or group tally, not counted
   unchanged or failed, their `drift-state.json` record and any `access-failures.json` streak held
   exactly (neither advanced nor cleared), not pruned as retired, and an unseeded one stays
