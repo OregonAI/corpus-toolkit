@@ -10,10 +10,11 @@ need a glossary entry.
 
 ## Tiers
 
-**Corpus tier** — the repos that publish civic content. Nine live: `executive-regulatory-frameworks`,
+**Corpus tier** — the repos that publish civic content. Ten live: `executive-regulatory-frameworks`,
 `oregon-legislature`, `oregon-budget`, `oregon-audits`, `oregon-kpm`, `oregon-counties`,
-`oregon-collective-bargaining`, `federal-reference`, `states-government-it` (the one
-multi-jurisdiction corpus; not yet in `corpus-gateway`'s registry, which holds the other eight). Each instantiates one skeleton from
+`oregon-collective-bargaining`, `federal-reference`, and the two multi-jurisdiction corpora
+`states-government-it` and `states-career-technical-education` (private during its pilot, so not a
+canary target). Neither of the two is in `corpus-gateway`'s registry yet; it holds the other eight. Each instantiates one skeleton from
 `corpus-template`, pins a `corpus-toolkit` tag, and serves the seven-tool contract in
 `docs/mcp-interface-contract.md`. One corpus is one repo — see [ADR-0001](docs/adr/0001-one-corpus-one-repo.md).
 

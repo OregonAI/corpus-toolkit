@@ -18,22 +18,26 @@ def test_the_shipped_manifest_validates():
     assert len(repos) >= 10
 
 
-def test_nine_live_corpora_as_context_md_says():
-    """CONTEXT.md: 'Nine live' since states-government-it joined on 2026-11-11.
-    corpus-gateway's registry holds the other eight until that corpus passes its pilot test.
-    This is the count that has been written wrong more than once, so the manifest states it
-    and this test pins it."""
+def test_ten_live_corpora_as_context_md_says():
+    """CONTEXT.md: 'Ten live' since states-career-technical-education joined on 2026-11-19
+    (states-government-it made it nine on 2026-11-11). corpus-gateway's registry holds the
+    other eight until those two pass their pilot tests. This is the count that has been
+    written wrong more than once, so the manifest states it and this test pins it."""
     live = corpora.live_corpora(corpora.load_manifest())
-    assert len(live) == 9
-    assert "states-government-it" in live
+    assert len(live) == 10
+    assert {"states-government-it", "states-career-technical-education"} <= set(live)
 
 
 def test_canary_targets_are_live_public_corpora_on_the_ci_track():
     repos = corpora.load_manifest()
     by = {r["name"]: r for r in repos}
     targets = corpora.canary_targets(repos)
-    assert set(targets) == set(corpora.live_corpora(repos)), \
-        "every live corpus is public and on the CI track today, so the canary covers all nine"
+    public_live = {r["name"] for r in repos
+                   if r["name"] in corpora.live_corpora(repos) and r["visibility"] == "public"}
+    assert set(targets) == public_live, \
+        "every live PUBLIC corpus is on the CI track today, so the canary covers all nine of them"
+    assert "states-career-technical-education" not in targets, \
+        "private during its pilot: the public release gate cannot clone it"
     for name in targets:
         r = by[name]
         assert r["visibility"] == "public" and r["status"] == "live" and r["ci_track"]
@@ -44,6 +48,8 @@ def test_canary_targets_are_live_public_corpora_on_the_ci_track():
 def test_pin_targets_include_the_consumer_tier_and_the_template():
     targets = set(corpora.pin_targets(corpora.load_manifest()))
     assert {"corpus-gateway", "corpus-chat", "oregon-stories", "corpus-template"} <= targets
+    assert "states-career-technical-education" in targets, \
+        "a private live corpus still pins the toolkit, so propagate-pin must reach it"
     assert "corpus-toolkit" not in targets and "oregon-records-retention" not in targets
 
 
