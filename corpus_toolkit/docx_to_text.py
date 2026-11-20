@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from xml.dom import minidom
 from xml.parsers.expat import ExpatError
 
-MIN_WORDS = 30   # below this a Word file has no text worth a document (the PDF path's threshold)
+MIN_WORDS = 30   # default for `docx_to_text`: a file with fewer words is refused as having no text
 
 _BULLET = "\u2022 "
 
@@ -158,8 +158,8 @@ class _Pandoc:
                 self.emit("table_row", lines[-1:])
         return lines
 
-    # Word styles pandoc moves out of the body into document metadata, in reading order. The
-    # sibling reader never looked at the metadata, so a Title-style first paragraph was dropped.
+    # Word styles pandoc moves out of the body into document metadata, in reading order. A
+    # reader that renders only the body would drop a Title-style first paragraph.
     FRONT_MATTER = ("title", "subtitle", "author", "date", "abstract")
 
     def front_matter(self, meta: dict) -> list[list[str]]:
@@ -315,8 +315,8 @@ def _lift(parent, extras) -> None:
 # ---- front-matter styles ------------------------------------------------------------------------
 #
 # pandoc moves a paragraph styled Title, Subtitle, Author, Date or Abstract out of the body into
-# document metadata, keeps only the LAST of several Title paragraphs, and the sibling reader never
-# read the metadata. Each such paragraph is restyled to Normal in place, with a marker run at its
+# document metadata, keeps only the LAST of several Title paragraphs, so a reader that renders only the body
+# loses them. Each such paragraph is restyled to Normal in place, with a marker run at its
 # start (private-use characters around the style name, which survive pandoc as text; an empty
 # bookmark does not, pandoc drops it) that the renderer strips and reads back as the block's kind,
 # so the paragraph is read where it stands, every one of them (a two-line title in a text box lost
@@ -428,8 +428,8 @@ def docx_to_text(raw: bytes, min_words: int = MIN_WORDS) -> str:
     """The body text of a Word file, through pandoc's docx reader with tracked changes accepted
     (what the document reads as). Running headers and footers and pictures are not text here (the
     conversion notes say so). Raises DocxReaderError (a ValueError) for bytes that are not a Word
-    file, a pandoc below 3.11, or a file with fewer than `min_words` words, so the entry can be
-    made a stub."""
+    file, a pandoc below 3.11, or a file with fewer than `min_words` words, so the caller can
+    treat it as having no extractable text."""
     text = _render(_tree(raw))[0]
     if len(text.split()) < min_words:
         raise DocxReaderError(f"Word file has no text (fewer than {min_words} words): make the entry a stub")
@@ -445,6 +445,7 @@ def docx_blocks(raw: bytes) -> list[Block]:
 
 
 def same_words(a: str, b: str) -> bool:
-    """The same words in the same order, whatever the line breaks and spacing. How `--check`
-    compares a Word file's committed text with what the installed pandoc makes of it."""
+    """The same words in the same order, whatever the line breaks and spacing. For a caller that
+    compares text it stored earlier with what the installed pandoc makes of the file now, so a
+    change of line layout alone is not a difference."""
     return a.split() == b.split()

@@ -1,7 +1,12 @@
 """Seams: corpus_toolkit.docx_to_text.docx_to_text / docx_blocks (corpus-toolkit#219).
 
 The fixtures in tests/fixtures/docx/ are real Word files, copied byte for byte from the corpora that
-hold them (states-government-it `_meta/snapshots/`, cte-oregon `_meta/snapshots/`). The sibling
+hold them (states-government-it `_meta/snapshots/`, cte-oregon `_meta/snapshots/`), except
+`or-perkins-plan-cover-and-text-boxes.docx`, which is derived from a 5 MB cte-oregon file by keeping
+only the paragraphs under test (see tests/fixtures/docx/README.md). Defect 4 (a shape between two
+runs of one word splits the word) is tested only on that derived fixture: no byte-copied fixture has
+a shape inside a word. `or-eis-ai-attachment-a.docx` does split "A" + "rtificia" + "l" across runs,
+but with no shape between them, so it tests the joining of split runs inside a text box, not defect 4. The sibling
 reader this module replaces is frozen in tests/docx_sibling_reference.py; the default text must be
 its text for every file the four defects in #219 do not touch.
 

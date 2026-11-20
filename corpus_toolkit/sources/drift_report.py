@@ -194,11 +194,19 @@ def _toolkit_version() -> str:
 
 # ------------------------------------------------------------------ rendering
 
-def _describe_limit(limit: dict) -> str:
+def describe_limit(limit: dict, *, markdown: bool = False) -> str:
+    """One-line description of a `--limit` run's `limit` block (from `_limit_report`).
+
+    The single formatter for the console, the GitHub step summary, and (with
+    `markdown=True`, which backticks the flag) DRIFT.md.
+    """
+    flag = f"--limit {limit['requested']}"
+    if markdown:
+        flag = f"`{flag}`"
     oldest = (f"{limit['unchecked_never_checked']} never checked"
               if limit["unchecked_never_checked"] else limit["oldest_unchecked_last_checked"])
     return (f"checked {limit['checked']} of {limit['enumerated']} selected source(s) "
-            f"(`--limit {limit['requested']}`); {limit['unchecked']} not checked this run, "
+            f"({flag}); {limit['unchecked']} not checked this run, "
             f"oldest last-checked left unchecked: {oldest}")
 
 
@@ -263,7 +271,7 @@ def render_drift_md(state: dict[tuple[str, str], DriftRecord], access: dict,
                               + t.get("archive_unreadable", 0))
         lines += [
             f"- **Date**: {run_date} · **toolkit**: {lr.get('toolkit_version', 'unknown')}",
-            *([f"- **LIMITED RUN**: {_describe_limit(lr['limit'])}. This was not a full "
+            *([f"- **LIMITED RUN**: {describe_limit(lr['limit'], markdown=True)}. This was not a full "
                f"run: the sources it did not check are shown below as last recorded, "
                f"not as observed today."] if lr.get("limit") else []),
             f"- **Verdict**: {verdict}",

@@ -1096,14 +1096,6 @@ def _limit_report(limit: int, checked: int, unchecked: list, prior: dict) -> dic
             "oldest_unchecked_last_checked": None if never else min(dates)}
 
 
-def describe_limit(limit: dict) -> str:
-    oldest = (f"{limit['unchecked_never_checked']} never checked"
-              if limit["unchecked_never_checked"] else limit["oldest_unchecked_last_checked"])
-    return (f"checked {limit['checked']} of {limit['enumerated']} selected source(s) "
-            f"(--limit {limit['requested']}); {limit['unchecked']} not checked this run, "
-            f"oldest last-checked left unchecked: {oldest}")
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True, help="path to _meta/corpus.yml")
@@ -1459,10 +1451,10 @@ def main():
     _print_group_breakdown(per_group)
     if limit_info:
         # NOT a clean full run, and said where the totals line is read (corpus-toolkit#204).
-        print(f"LIMITED RUN: {describe_limit(limit_info)}. The totals above are for the "
+        print(f"LIMITED RUN: {drift_report.describe_limit(limit_info)}. The totals above are for the "
               f"sources checked; the others keep their last recorded state.")
         _annotate("Drift run limited by --limit",
-                  f"{describe_limit(limit_info)}. This was not a full run.")
+                  f"{drift_report.describe_limit(limit_info)}. This was not a full run.")
     if recorded is not None:
         print(f"{recorded['written']} baseline(s) written ({len(seeded_keys)} seeded, "
               f"{len(accepted_keys)} accepted), {recorded['already_current']} already "

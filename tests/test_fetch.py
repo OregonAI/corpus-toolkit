@@ -204,9 +204,12 @@ def test_sniff_reads_part_names_past_the_first_4000_bytes():
 
 
 def test_sniff_real_pandoc_documents(tmp_path):
+    import os
     import shutil
     import subprocess
-    if not shutil.which("pandoc"):
+    # Same rule as the docx reader tests: skip only on a developer machine (CI unset); in CI a
+    # missing pandoc makes subprocess.run raise, so the gate cannot pass without reading real files.
+    if not shutil.which("pandoc") and not os.environ.get("CI"):
         pytest.skip("pandoc not installed")
     for ext in ("docx", "pptx"):
         out = tmp_path / f"t.{ext}"

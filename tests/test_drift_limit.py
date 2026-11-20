@@ -117,13 +117,13 @@ class SelectionOrderTest(_Limit):
         self.run_cli("--limit", "1")
         self.assertEqual(self.checked_ids(), ["g-1"])
 
-    def test_selection_is_deterministic(self):
+    def test_with_no_state_the_first_sources_in_manifest_order_are_checked(self):
         self.group("g", 5, baseline="current")
         self.run_cli("--limit", "2")
         first = self.checked_ids()
         self.assertEqual(first, ["g-0", "g-1"])
 
-    def test_rotates_until_everything_has_been_checked(self):
+    def test_three_limited_runs_each_take_the_oldest_and_together_cover_every_source(self):
         self.group("g", 5, baseline="current")
         seen = []
         for day in (10, 11, 12):
@@ -131,6 +131,7 @@ class SelectionOrderTest(_Limit):
             seen.append(self.checked_ids())  # manifest order within a run
         # day 12: g-4 was never checked; g-0 is the oldest of the rest (tie by id)
         self.assertEqual(seen, [["g-0", "g-1"], ["g-2", "g-3"], ["g-0", "g-4"]])
+        self.assertEqual({i for run in seen for i in run}, {f"g-{n}" for n in range(5)})
 
     def test_limit_applies_across_the_selected_groups_only(self):
         self.group("a", 2, baseline="current")
