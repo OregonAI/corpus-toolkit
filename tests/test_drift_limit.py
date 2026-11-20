@@ -8,6 +8,7 @@ not failed, access-failure streaks neither advanced nor cleared, not pruned as r
 and a limited run says so in every report it writes.
 """
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -29,7 +30,7 @@ TODAY = date(2026, 11, 19)
 
 
 class _Limit(_DriftRun):
-    def run_on(self, day, *argv, env=None):
+    def run_on(self, day, *argv, env=None, unset=()):
         args = ["corpus-detect-changes", "--config",
                 str(self.root / "_meta" / "corpus.yml"), *argv]
         out, err = io.StringIO(), io.StringIO()
@@ -38,6 +39,11 @@ class _Limit(_DriftRun):
              mock.patch.object(changes, "_utcnow_date", lambda: day), \
              mock.patch.dict("os.environ", env or {}), \
              redirect_stdout(out), redirect_stderr(err):
+            # `unset` removes variables for this run only; patch.dict restores them on exit.
+            # The runner's own environment (GitHub Actions sets GITHUB_ACTIONS) must not
+            # decide what a test sees.
+            for name in unset:
+                os.environ.pop(name, None)
             try:
                 changes.main()
                 code = 0
@@ -242,8 +248,8 @@ class LimitedRunSaysSoTest(_Limit):
         self.assertIn("LIMITED", (self.root / "DRIFT.md").read_text())
 
     def test_actions_warning_annotation(self):
-        _, out, _ = self.run_cli("--limit", "2")
-        self.assertNotIn("::warning", out)
+        _, out, _ = self.run_on(TODAY, "--limit", "2", unset=("GITHUB_ACTIONS",))
+        self.assertNotIn("::warning", out, "outside Actions the annotation must not print")
         _, out, _ = self.run_on(TODAY, "--limit", "2", env={"GITHUB_ACTIONS": "true"})
         self.assertIn("::warning title=Drift run limited by --limit::", out)
         self.assertIn("2 of 4", out)
